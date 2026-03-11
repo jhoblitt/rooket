@@ -9,6 +9,7 @@ import (
 	"strings"
 	"text/template"
 
+	"github.com/jhoblitt/rooket/internal/disks"
 	"github.com/jhoblitt/rooket/internal/run"
 )
 
@@ -22,13 +23,14 @@ type Config struct {
 	RegistryName string
 	// RegistryHostPort is the port the registry listens on on the host.
 	RegistryHostPort int
-	// WorkerDisks maps worker index → list of /dev/loopN device paths to
-	// pass through into that worker node container.
-	WorkerDisks map[int][]string
+	// WorkerDisks maps worker index → Disk descriptors.
+	// Each disk's HostPath (/dev/loopN) is bind-mounted into the corresponding
+	// worker node. crun adds the device to the container's cgroup device
+	// allowlist automatically for bind-mounted device files.
+	WorkerDisks map[int][]disks.Disk
 }
 
 // kindConfigTmpl is the kind cluster configuration template.
-// It configures containerd on every node to use the local registry mirror.
 var kindConfigTmpl = template.Must(template.New("kind").Parse(`kind: Cluster
 apiVersion: kind.x-k8s.io/v1alpha4
 containerdConfigPatches:
@@ -39,11 +41,11 @@ nodes:
 - role: control-plane
 {{- range $i, $w := .Workers}}
 - role: worker
-  {{- if $w.Devices}}
+  {{- if $w.Disks}}
   extraMounts:
-  {{- range $w.Devices}}
-  - hostPath: {{.}}
-    containerPath: {{.}}
+  {{- range $w.Disks}}
+  - hostPath: {{.HostPath}}
+    containerPath: {{.ContainerPath}}
     propagation: HostToContainer
   {{- end}}
   {{- end}}
@@ -51,7 +53,7 @@ nodes:
 `))
 
 type workerNode struct {
-	Devices []string
+	Disks []disks.Disk
 }
 
 type kindConfigData struct {
@@ -62,7 +64,7 @@ type kindConfigData struct {
 func GenerateConfig(cfg Config) ([]byte, error) {
 	var workers []workerNode
 	for i := 0; i < cfg.Workers; i++ {
-		workers = append(workers, workerNode{Devices: cfg.WorkerDisks[i]})
+		workers = append(workers, workerNode{Disks: cfg.WorkerDisks[i]})
 	}
 	data := kindConfigData{Workers: workers}
 
@@ -88,14 +90,12 @@ func Exists(name string) (bool, error) {
 }
 
 // Create creates the kind cluster using the provided configuration.
-// It writes the kind config to a temporary file and invokes kind.
 func Create(cfg Config) error {
 	configBytes, err := GenerateConfig(cfg)
 	if err != nil {
 		return fmt.Errorf("generate kind config: %w", err)
 	}
 
-	// Write config to a temp file.
 	tmpFile := filepath.Join(os.TempDir(), fmt.Sprintf("rooket-kind-%s.yaml", cfg.Name))
 	if err := os.WriteFile(tmpFile, configBytes, 0o600); err != nil {
 		return fmt.Errorf("write kind config: %w", err)
@@ -135,16 +135,13 @@ func Nodes(clusterName string) ([]string, error) {
 	return nodes, nil
 }
 
-// ConfigureRegistry creates the containerd registry hosts.toml on every node
-// so that images pushed to localhost:<hostPort> are pulled from the registry
-// container reachable at registryName:5000 on the kind network.
+// ConfigureRegistry creates the containerd registry hosts.toml on every node.
 func ConfigureRegistry(clusterName, registryName string, hostPort int) error {
 	nodes, err := Nodes(clusterName)
 	if err != nil {
 		return err
 	}
 
-	// hosts.toml maps localhost:<hostPort> → http://<registryName>:5000
 	hostsToml := fmt.Sprintf(`server = "http://%s:5000"
 
 [host."http://%s:5000"]
@@ -170,8 +167,7 @@ func ConfigureRegistry(clusterName, registryName string, hostPort int) error {
 	return nil
 }
 
-// ApplyRegistryConfigMap creates the standard registry ConfigMap so that tools
-// can discover the local registry address.
+// ApplyRegistryConfigMap creates the standard registry ConfigMap.
 func ApplyRegistryConfigMap(clusterName, registryName string, hostPort int) error {
 	cm := fmt.Sprintf(`apiVersion: v1
 kind: ConfigMap

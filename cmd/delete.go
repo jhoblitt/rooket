@@ -25,9 +25,9 @@ var deleteCmd = &cobra.Command{
 	Short: "Delete the kind cluster and associated registry and disk images",
 	Long: `delete tears down the cluster created by 'rooket create':
 
-  1. Delete the kind cluster.
+  1. Delete the kind cluster (loop devices inside nodes are cleaned up automatically).
   2. Stop and remove the local OCI registry container.
-  3. Detach loop devices and (unless --keep-disks) remove disk image files.
+  3. Unless --keep-disks, remove the disk image files from the host.
 `,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		regName := registry.ContainerName(deleteName)
@@ -42,6 +42,8 @@ var deleteCmd = &cobra.Command{
 		}
 
 		// --- Step 1: kind cluster ---
+		// Deleting the cluster removes the node containers, which automatically
+		// cleans up any loop devices that were set up inside them.
 		fmt.Println("==> deleting kind cluster")
 		if err := cluster.Delete(deleteName); err != nil {
 			fmt.Printf("warning: delete cluster: %v\n", err)
@@ -53,9 +55,12 @@ var deleteCmd = &cobra.Command{
 			fmt.Printf("warning: delete registry: %v\n", err)
 		}
 
-		// --- Step 3: loop devices and disk images ---
-		if !deleteKeepDisks && deleteDiskCount > 0 {
-			fmt.Println("==> detaching loop devices and removing disk images")
+		// --- Step 3: loop devices and disk image files ---
+		// The cluster deletion above releases the bind-mounts, so the loop
+		// devices are no longer held open. They are owned by the current user
+		// (transferred via sudo chown during create), so no sudo is needed here.
+		if deleteDiskCount > 0 {
+			fmt.Println("==> detaching loop devices")
 			for i := 0; i < deleteWorkers; i++ {
 				diskCfg := disks.Config{
 					DataDir:     dataDir,
@@ -63,13 +68,22 @@ var deleteCmd = &cobra.Command{
 					Count:       deleteDiskCount,
 				}
 				if err := disks.Detach(diskCfg); err != nil {
-					fmt.Printf("warning: detach disks for worker %d: %v\n", i, err)
+					fmt.Printf("warning: detach loop devices for worker %d: %v\n", i, err)
+				}
+			}
+		}
+		if !deleteKeepDisks && deleteDiskCount > 0 {
+			fmt.Println("==> removing disk image files")
+			for i := 0; i < deleteWorkers; i++ {
+				diskCfg := disks.Config{
+					DataDir:     dataDir,
+					WorkerIndex: i,
+					Count:       deleteDiskCount,
 				}
 				if err := disks.Remove(diskCfg); err != nil {
 					fmt.Printf("warning: remove disk images for worker %d: %v\n", i, err)
 				}
 			}
-			// Remove data dir if empty.
 			_ = os.Remove(dataDir)
 		}
 
@@ -83,7 +97,7 @@ func init() {
 
 	deleteCmd.Flags().StringVar(&deleteName, "name", "rook", "kind cluster name")
 	deleteCmd.Flags().StringVar(&deleteDataDir, "data-dir", "", "directory containing disk images (default: ~/.local/share/rooket/<name>)")
-	deleteCmd.Flags().IntVar(&deleteWorkers, "workers", 3, "number of workers (must match what was used at create time)")
+	deleteCmd.Flags().IntVar(&deleteWorkers, "workers", 3, "number of workers (must match create)")
 	deleteCmd.Flags().IntVar(&deleteDiskCount, "disk-count", 1, "disks per worker (must match create; 0 to skip)")
-	deleteCmd.Flags().BoolVar(&deleteKeepDisks, "keep-disks", false, "detach loop devices but keep disk image files")
+	deleteCmd.Flags().BoolVar(&deleteKeepDisks, "keep-disks", false, "keep disk image files on disk")
 }

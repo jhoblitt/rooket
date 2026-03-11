@@ -7,6 +7,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/jhoblitt/rooket/internal/cluster"
+	"github.com/jhoblitt/rooket/internal/disks"
 	"github.com/jhoblitt/rooket/internal/registry"
 )
 
@@ -23,13 +24,17 @@ var configCmd = &cobra.Command{
 	RunE: func(cmd *cobra.Command, args []string) error {
 		regName := registry.ContainerName(configName)
 
-		// Build a representative disk map (actual devices unknown at this point).
-		workerDisks := make(map[int][]string)
+		// Build a representative disk map for display purposes.
+		// Actual HostPaths are /dev/loopN assigned at create time; shown here as placeholders.
+		workerDisks := make(map[int][]disks.Disk)
 		if configDiskCount > 0 {
 			for i := 0; i < configWorkers; i++ {
 				for d := 0; d < configDiskCount; d++ {
-					workerDisks[i] = append(workerDisks[i],
-						fmt.Sprintf("/dev/loop<worker%d-disk%d>", i, d))
+					placeholder := fmt.Sprintf("/dev/loop<worker%d-disk%d>", i, d)
+					workerDisks[i] = append(workerDisks[i], disks.Disk{
+						HostPath:      placeholder,
+						ContainerPath: placeholder,
+					})
 				}
 			}
 		}

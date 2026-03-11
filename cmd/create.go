@@ -27,24 +27,23 @@ var createCmd = &cobra.Command{
 	Short: "Create a kind cluster with a local OCI registry for Rook development",
 	Long: `create performs the following steps:
 
-  1. Start a local OCI registry container (podman) on localhost:<registry-port>.
-  2. Create a kind cluster (via podman provider) with containerd configured to
-     mirror localhost:<registry-port> to the registry container.
-  3. Connect the registry container to the kind podman network so nodes can
-     pull images by container name.
-  4. (Unless --skip-disks) Create sparse disk image files, attach them as loop
-     devices, and pass the loop devices into each worker node so Rook/Ceph can
-     use them as raw block OSDs.
-  5. Apply the standard local-registry-hosting ConfigMap to kube-public.
+  1. Create sparse disk image files on the host (no root required).
+  2. Create the kind cluster (via podman provider). The disk images are
+     bind-mounted into each worker node via the kind config.
+  3. Start a local OCI registry container joined to the kind podman network,
+     bound to localhost:<registry-port> on the host. The registry must be
+     created after the cluster so that the "kind" podman network exists.
+     (With rootless podman, network membership is set at container creation;
+     'podman network connect' is not supported with the default pasta mode.)
+  4. Configure containerd on every node to mirror localhost:<registry-port>
+     to the registry container (reachable by name on the kind network).
+  5. Attach disk images as loop devices inside each worker node (losetup runs
+     inside the container where it has root access, not on the host).
+  6. Apply the standard local-registry-hosting ConfigMap to kube-public.
 `,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		regName := registry.ContainerName(createName)
-		regCfg := registry.Config{
-			Name:     regName,
-			HostPort: createRegistryPort,
-		}
 
-		// Resolve data directory.
 		dataDir := createDataDir
 		if dataDir == "" {
 			home, err := os.UserHomeDir()
@@ -54,16 +53,10 @@ var createCmd = &cobra.Command{
 			dataDir = filepath.Join(home, ".local", "share", "rooket", createName)
 		}
 
-		// --- Step 1: Registry ---
-		fmt.Println("==> creating local OCI registry")
-		if err := registry.Create(regCfg); err != nil {
-			return fmt.Errorf("create registry: %w", err)
-		}
-
-		// --- Step 2: Disk images & loop devices ---
-		workerDisks := make(map[int][]string)
+		// --- Step 1: Disk images (host side only, no losetup yet) ---
+		workerDisks := make(map[int][]disks.Disk)
 		if !createSkipDisks && createDiskCount > 0 {
-			fmt.Println("==> creating OSD disk images and loop devices")
+			fmt.Println("==> creating OSD disk images")
 			for i := 0; i < createWorkers; i++ {
 				diskCfg := disks.Config{
 					DataDir:     dataDir,
@@ -71,15 +64,16 @@ var createCmd = &cobra.Command{
 					Count:       createDiskCount,
 					SizeGB:      createDiskSizeGB,
 				}
-				devs, err := disks.Create(diskCfg)
+				d, err := disks.Create(diskCfg)
 				if err != nil {
 					return fmt.Errorf("create disks for worker %d: %w", i, err)
 				}
-				workerDisks[i] = devs
+				workerDisks[i] = d
 			}
 		}
 
-		// --- Step 3: kind cluster ---
+		// --- Step 2: kind cluster ---
+		// This also creates the "kind" podman network used by the registry.
 		fmt.Println("==> creating kind cluster")
 		clusterCfg := cluster.Config{
 			Name:             createName,
@@ -100,19 +94,31 @@ var createCmd = &cobra.Command{
 			}
 		}
 
-		// --- Step 4: Connect registry to kind network ---
-		fmt.Println("==> connecting registry to kind podman network")
-		if err := registry.ConnectNetwork(regName, "kind"); err != nil {
-			return fmt.Errorf("connect registry to kind network: %w", err)
+		// --- Step 3: Registry ---
+		// Created after the cluster so the "kind" podman network exists.
+		// --network=kind makes the container reachable by name from cluster nodes.
+		fmt.Println("==> creating local OCI registry on the kind network")
+		regCfg := registry.Config{
+			Name:     regName,
+			HostPort: createRegistryPort,
+			Network:  "kind",
+		}
+		if err := registry.Create(regCfg); err != nil {
+			return fmt.Errorf("create registry: %w", err)
 		}
 
-		// --- Step 5: Configure containerd registry on each node ---
+		// --- Step 4: Configure containerd registry on each node ---
 		fmt.Println("==> configuring containerd registry on cluster nodes")
 		if err := cluster.ConfigureRegistry(createName, regName, createRegistryPort); err != nil {
 			return fmt.Errorf("configure registry on nodes: %w", err)
 		}
 
-		// --- Step 6: Registry ConfigMap ---
+		// Loop devices were set up via sudo before the cluster was created and
+		// bind-mounted into worker nodes via extraMounts in the kind config.
+		// crun automatically adds bind-mounted device files to the container's
+		// cgroup device allowlist, so no in-node setup is required here.
+
+		// --- Step 5: Registry ConfigMap ---
 		fmt.Println("==> applying local-registry-hosting ConfigMap")
 		if err := cluster.ApplyRegistryConfigMap(createName, regName, createRegistryPort); err != nil {
 			return fmt.Errorf("apply registry ConfigMap: %w", err)
@@ -139,5 +145,5 @@ func init() {
 	createCmd.Flags().IntVar(&createDiskCount, "disk-count", 1, "number of OSD disks per worker (0 to skip)")
 	createCmd.Flags().IntVar(&createDiskSizeGB, "disk-size", 10, "size of each OSD disk image in GiB")
 	createCmd.Flags().StringVar(&createDataDir, "data-dir", "", "directory for disk images (default: ~/.local/share/rooket/<name>)")
-	createCmd.Flags().BoolVar(&createSkipDisks, "skip-disks", false, "skip disk image and loop device creation")
+	createCmd.Flags().BoolVar(&createSkipDisks, "skip-disks", false, "skip disk image creation")
 }

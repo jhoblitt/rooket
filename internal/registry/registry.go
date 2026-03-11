@@ -3,7 +3,7 @@ package registry
 
 import (
 	"fmt"
-	"strings"
+	"strings"	// for Exists
 
 	"github.com/jhoblitt/rooket/internal/run"
 )
@@ -19,6 +19,10 @@ type Config struct {
 	Name string
 	// HostPort is the port bound on the host (e.g. 5001).
 	HostPort int
+	// Network is the podman network to attach the container to (e.g. "kind").
+	// With rootless podman the default "pasta" mode does not support
+	// network connect, so the network must be specified at container creation.
+	Network string
 }
 
 // ContainerName returns the registry container name for a given cluster name.
@@ -52,34 +56,26 @@ func Exists(name string) bool {
 }
 
 // Create starts the registry container if it does not already exist.
+// The registry must be created after the kind cluster so that cfg.Network
+// ("kind") already exists. With rootless podman, network membership must be
+// declared at container creation time — podman network connect is not
+// supported with the default "pasta" network mode.
 func Create(cfg Config) error {
 	if Exists(cfg.Name) {
 		fmt.Printf("registry container %q already exists, skipping creation\n", cfg.Name)
 		return nil
 	}
-	return run.Cmd("podman", "run",
-		"-d",
+	args := []string{
+		"run", "-d",
 		"--restart=always",
 		"-p", fmt.Sprintf("127.0.0.1:%d:%d", cfg.HostPort, RegistryInternalPort),
 		"--name", cfg.Name,
-		RegistryImage,
-	)
-}
-
-// ConnectNetwork connects the registry container to the named podman network so
-// that kind nodes on that network can pull images by container name.
-func ConnectNetwork(containerName, network string) error {
-	// Check if already connected.
-	out, err := run.Output("podman", "inspect", containerName, "--format", "{{range $k,$v := .NetworkSettings.Networks}}{{$k}}\n{{end}}")
-	if err == nil {
-		for _, line := range strings.Split(out, "\n") {
-			if strings.TrimSpace(line) == network {
-				fmt.Printf("registry already connected to network %q\n", network)
-				return nil
-			}
-		}
 	}
-	return run.Cmd("podman", "network", "connect", network, containerName)
+	if cfg.Network != "" {
+		args = append(args, "--network="+cfg.Network)
+	}
+	args = append(args, RegistryImage)
+	return run.Cmd("podman", args...)
 }
 
 // Delete stops and removes the registry container.
