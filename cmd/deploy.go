@@ -62,7 +62,7 @@ Example:
 		fmt.Printf("    release:    %s\n", deployName)
 		fmt.Printf("    namespace:  rook-ceph\n")
 
-		return run.Cmd(
+		if err := run.Cmd(
 			"helm",
 			"--kube-context", deployKubeContext,
 			"-n", "rook-ceph",
@@ -71,7 +71,16 @@ Example:
 			chartPath,
 			"--set", fmt.Sprintf("image.repository=%s", imageRepo),
 			"--set", fmt.Sprintf("image.tag=%s", imageTag),
-		)
+		); err != nil {
+			return err
+		}
+
+		// Switch the default namespace to rook-ceph if the krew ns plugin is available.
+		if nsOut, err := run.Output("kubectl", "ns", "rook-ceph"); err == nil {
+			fmt.Println(nsOut)
+		}
+
+		return nil
 	},
 }
 
