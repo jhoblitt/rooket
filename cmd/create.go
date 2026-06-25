@@ -2,24 +2,21 @@ package cmd
 
 import (
 	"fmt"
-	"os"
-	"path/filepath"
 
 	"github.com/spf13/cobra"
 
 	"github.com/jhoblitt/rooket/internal/cluster"
-	"github.com/jhoblitt/rooket/internal/disks"
 	"github.com/jhoblitt/rooket/internal/registry"
 )
 
 var (
-	createName         string
-	createWorkers      int
-	createRegistryPort int
-	createDiskCount    int
-	createDiskSizeGB   int
-	createDataDir      string
-	createSkipDisks    bool
+	createName              string
+	createWorkers           int
+	createRegistryPort      int
+	createDiskCount         int
+	createISCSIQNDate       string
+	createPromCRDsVersion   string
+	createPromCRDsRelease   string
 )
 
 var createCmd = &cobra.Command{
@@ -27,9 +24,9 @@ var createCmd = &cobra.Command{
 	Short: "Create a kind cluster with a local OCI registry for Rook development",
 	Long: `create performs the following steps:
 
-  1. Create sparse disk image files on the host (no root required).
-  2. Create the kind cluster (via podman provider). The disk images are
-     bind-mounted into each worker node via the kind config.
+  1. Locate iSCSI block devices set up by 'rooket block setup' and bind-mount
+     them into each worker node via the kind config.
+  2. Create the kind cluster (via podman provider).
   3. Start a local OCI registry container joined to the kind podman network,
      bound to localhost:<registry-port> on the host. The registry must be
      created after the cluster so that the "kind" podman network exists.
@@ -37,38 +34,32 @@ var createCmd = &cobra.Command{
      'podman network connect' is not supported with the default pasta mode.)
   4. Configure containerd on every node to mirror localhost:<registry-port>
      to the registry container (reachable by name on the kind network).
-  5. Attach disk images as loop devices inside each worker node (losetup runs
-     inside the container where it has root access, not on the host).
-  6. Apply the standard local-registry-hosting ConfigMap to kube-public.
+  5. Apply the standard local-registry-hosting ConfigMap to kube-public.
+
+Run 'rooket block setup' before 'rooket cluster create' to prepare block devices.
 `,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		regName := registry.ContainerName(createName)
 
-		dataDir := createDataDir
-		if dataDir == "" {
-			home, err := os.UserHomeDir()
-			if err != nil {
-				return fmt.Errorf("resolve home dir: %w", err)
-			}
-			dataDir = filepath.Join(home, ".local", "share", "rooket", createName)
-		}
-
-		// --- Step 1: Disk images (host side only, no losetup yet) ---
-		workerDisks := make(map[int][]disks.Disk)
-		if !createSkipDisks && createDiskCount > 0 {
-			fmt.Println("==> creating OSD disk images")
+		// --- Step 1: Locate iSCSI block devices ---
+		workerDisks := make(map[int][]cluster.Disk)
+		if createDiskCount > 0 {
+			fmt.Println("==> locating iSCSI block devices")
 			for i := 0; i < createWorkers; i++ {
-				diskCfg := disks.Config{
-					DataDir:     dataDir,
-					WorkerIndex: i,
-					Count:       createDiskCount,
-					SizeGB:      createDiskSizeGB,
+				for d := 0; d < createDiskCount; d++ {
+					iqn := fmt.Sprintf("iqn.%s.local.rooket:%s-worker%d-disk%d",
+						createISCSIQNDate, createName, i, d)
+					dev, err := waitForISCSIDevice(iqn)
+					if err != nil {
+						return fmt.Errorf("iSCSI device for worker %d disk %d not found "+
+							"(run 'rooket block setup' first): %w", i, d, err)
+					}
+					fmt.Printf("worker%d disk%d: %s\n", i, d, dev)
+					workerDisks[i] = append(workerDisks[i], cluster.Disk{
+						HostPath:      dev,
+						ContainerPath: dev,
+					})
 				}
-				d, err := disks.Create(diskCfg)
-				if err != nil {
-					return fmt.Errorf("create disks for worker %d: %w", i, err)
-				}
-				workerDisks[i] = d
 			}
 		}
 
@@ -113,15 +104,18 @@ var createCmd = &cobra.Command{
 			return fmt.Errorf("configure registry on nodes: %w", err)
 		}
 
-		// Loop devices were set up via sudo before the cluster was created and
-		// bind-mounted into worker nodes via extraMounts in the kind config.
-		// crun automatically adds bind-mounted device files to the container's
-		// cgroup device allowlist, so no in-node setup is required here.
-
 		// --- Step 5: Registry ConfigMap ---
 		fmt.Println("==> applying local-registry-hosting ConfigMap")
 		if err := cluster.ApplyRegistryConfigMap(createName, regName, createRegistryPort); err != nil {
 			return fmt.Errorf("apply registry ConfigMap: %w", err)
+		}
+
+		// --- Step 6: prometheus-operator CRDs ---
+		fmt.Println("==> installing prometheus-operator-crds helm chart")
+		if err := cluster.InstallPrometheusOperatorCRDs(
+			createName, createPromCRDsRelease, createPromCRDsVersion,
+		); err != nil {
+			return fmt.Errorf("install prometheus-operator-crds: %w", err)
 		}
 
 		fmt.Printf(`
@@ -137,13 +131,13 @@ Cluster %q is ready.
 }
 
 func init() {
-	rootCmd.AddCommand(createCmd)
+	clusterCmd.AddCommand(createCmd)
 
 	createCmd.Flags().StringVar(&createName, "name", "rook", "kind cluster name")
 	createCmd.Flags().IntVar(&createWorkers, "workers", 3, "number of worker nodes")
 	createCmd.Flags().IntVar(&createRegistryPort, "registry-port", 5001, "host port for the local OCI registry")
-	createCmd.Flags().IntVar(&createDiskCount, "disk-count", 1, "number of OSD disks per worker (0 to skip)")
-	createCmd.Flags().IntVar(&createDiskSizeGB, "disk-size", 10, "size of each OSD disk image in GiB")
-	createCmd.Flags().StringVar(&createDataDir, "data-dir", "", "directory for disk images (default: ~/.local/share/rooket/<name>)")
-	createCmd.Flags().BoolVar(&createSkipDisks, "skip-disks", false, "skip disk image creation")
+	createCmd.Flags().IntVar(&createDiskCount, "disk-count", 1, "number of iSCSI disks per worker (0 to skip)")
+	createCmd.Flags().StringVar(&createISCSIQNDate, "iqn-date", "2003-01", "IQN date component matching 'rooket block setup' (YYYY-MM)")
+	createCmd.Flags().StringVar(&createPromCRDsVersion, "prometheus-operator-crds-version", "29.0.0", "version of the prometheus-operator-crds helm chart to install")
+	createCmd.Flags().StringVar(&createPromCRDsRelease, "prometheus-operator-crds-release", "my-prometheus-operator-crds", "helm release name for prometheus-operator-crds")
 }

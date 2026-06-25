@@ -7,7 +7,6 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/jhoblitt/rooket/internal/cluster"
-	"github.com/jhoblitt/rooket/internal/disks"
 	"github.com/jhoblitt/rooket/internal/registry"
 )
 
@@ -25,13 +24,13 @@ var configCmd = &cobra.Command{
 		regName := registry.ContainerName(configName)
 
 		// Build a representative disk map for display purposes.
-		// Actual HostPaths are /dev/loopN assigned at create time; shown here as placeholders.
-		workerDisks := make(map[int][]disks.Disk)
+		// Actual HostPaths are /dev/sdX assigned by block setup; shown here as placeholders.
+		workerDisks := make(map[int][]cluster.Disk)
 		if configDiskCount > 0 {
 			for i := 0; i < configWorkers; i++ {
 				for d := 0; d < configDiskCount; d++ {
-					placeholder := fmt.Sprintf("/dev/loop<worker%d-disk%d>", i, d)
-					workerDisks[i] = append(workerDisks[i], disks.Disk{
+					placeholder := fmt.Sprintf("/dev/sd<worker%d-disk%d>", i, d)
+					workerDisks[i] = append(workerDisks[i], cluster.Disk{
 						HostPath:      placeholder,
 						ContainerPath: placeholder,
 					})

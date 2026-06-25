@@ -9,9 +9,16 @@ import (
 	"strings"
 	"text/template"
 
-	"github.com/jhoblitt/rooket/internal/disks"
 	"github.com/jhoblitt/rooket/internal/run"
 )
+
+// Disk describes a single OSD block device to bind-mount into a worker node.
+type Disk struct {
+	// HostPath is the path to the block device on the host (e.g. /dev/sdb).
+	HostPath string
+	// ContainerPath is where the device appears inside the node container.
+	ContainerPath string
+}
 
 // Config holds all parameters needed to create a kind cluster for Rook.
 type Config struct {
@@ -23,11 +30,10 @@ type Config struct {
 	RegistryName string
 	// RegistryHostPort is the port the registry listens on on the host.
 	RegistryHostPort int
-	// WorkerDisks maps worker index → Disk descriptors.
-	// Each disk's HostPath (/dev/loopN) is bind-mounted into the corresponding
-	// worker node. crun adds the device to the container's cgroup device
-	// allowlist automatically for bind-mounted device files.
-	WorkerDisks map[int][]disks.Disk
+	// WorkerDisks maps worker index → Disk descriptors to bind-mount into
+	// each worker node. crun adds device files to the container's cgroup
+	// device allowlist automatically for bind-mounted device files.
+	WorkerDisks map[int][]Disk
 }
 
 // kindConfigTmpl is the kind cluster configuration template.
@@ -53,7 +59,7 @@ nodes:
 `))
 
 type workerNode struct {
-	Disks []disks.Disk
+	Disks []Disk
 }
 
 type kindConfigData struct {
@@ -81,7 +87,7 @@ func Exists(name string) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	for _, line := range strings.Split(out, "\n") {
+	for line := range strings.SplitSeq(out, "\n") {
 		if strings.TrimSpace(line) == name {
 			return true, nil
 		}
@@ -127,7 +133,7 @@ func Nodes(clusterName string) ([]string, error) {
 		return nil, err
 	}
 	var nodes []string
-	for _, line := range strings.Split(out, "\n") {
+	for line := range strings.SplitSeq(out, "\n") {
 		if n := strings.TrimSpace(line); n != "" {
 			nodes = append(nodes, n)
 		}
@@ -165,6 +171,35 @@ func ConfigureRegistry(clusterName, registryName string, hostPort int) error {
 		fmt.Printf("configured registry on node %s\n", node)
 	}
 	return nil
+}
+
+// InstallPrometheusOperatorCRDs installs the prometheus-operator-crds helm
+// chart from the prometheus-community repository into the cluster. The install
+// is idempotent: the repo is added with --force-update and the chart is
+// applied with 'helm upgrade --install'.
+func InstallPrometheusOperatorCRDs(clusterName, releaseName, version string) error {
+	if err := run.Cmd(
+		"helm", "repo", "add", "--force-update",
+		"prometheus-community",
+		"https://prometheus-community.github.io/helm-charts",
+	); err != nil {
+		return fmt.Errorf("add prometheus-community helm repo: %w", err)
+	}
+
+	if err := run.Cmd(
+		"helm", "repo", "update", "prometheus-community",
+	); err != nil {
+		return fmt.Errorf("update prometheus-community helm repo: %w", err)
+	}
+
+	return run.Cmd(
+		"helm",
+		"--kube-context", "kind-"+clusterName,
+		"upgrade", "--install",
+		releaseName,
+		"prometheus-community/prometheus-operator-crds",
+		"--version", version,
+	)
 }
 
 // ApplyRegistryConfigMap creates the standard registry ConfigMap.

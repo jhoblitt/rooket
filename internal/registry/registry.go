@@ -3,13 +3,13 @@ package registry
 
 import (
 	"fmt"
-	"strings"	// for Exists
+	"strings" // for Exists
 
 	"github.com/jhoblitt/rooket/internal/run"
 )
 
 const (
-	RegistryImage       = "docker.io/library/registry:2"
+	RegistryImage        = "docker.io/library/registry:2"
 	RegistryInternalPort = 5000
 )
 
@@ -47,7 +47,7 @@ func Exists(name string) bool {
 	if err != nil {
 		return false
 	}
-	for _, line := range strings.Split(out, "\n") {
+	for line := range strings.SplitSeq(out, "\n") {
 		if strings.TrimSpace(line) == name {
 			return true
 		}

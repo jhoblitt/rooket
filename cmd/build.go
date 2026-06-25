@@ -2,11 +2,13 @@ package cmd
 
 import (
 	"bufio"
+	"crypto/sha256"
 	"fmt"
 	"io"
 	"os"
 	"os/exec"
 	"regexp"
+	"runtime"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -19,6 +21,14 @@ var (
 	buildRegistryPort int
 	buildNamespace    string
 	buildTag          string
+)
+
+var (
+	buildPushDir          string
+	buildPushRegistryPort int
+	buildPushNamespace    string
+	buildPushTag          string
+	buildPushSource       string
 )
 
 // containerBuildRe matches lines like "=== container build build-98fc4431/ceph-amd64".
@@ -160,11 +170,87 @@ func deriveTag(registry, namespace, srcImage, gitRef string) string {
 	return fmt.Sprintf("%s/%s:%s", registry, base, gitRef)
 }
 
+// buildRegistryName computes rook's BUILD_REGISTRY prefix for a given source
+// directory: build-<first 8 hex chars of sha256("hostname-dir\n")>.
+func buildRegistryName(dir string) (string, error) {
+	hostname, err := os.Hostname()
+	if err != nil {
+		return "", err
+	}
+	sum := sha256.Sum256([]byte(hostname + "-" + dir + "\n"))
+	return fmt.Sprintf("build-%x", sum[:4]), nil
+}
+
+var buildPushCmd = &cobra.Command{
+	Use:   "push",
+	Short: "Retag and push the rook image built by 'make' to the local registry (skips make)",
+	Long: `push retags the rook image that was previously built by 'make' and pushes
+it to the local OCI registry, using the same tag logic as 'rooket build'.
+
+The source image is auto-detected from the rook BUILD_REGISTRY formula unless
+overridden with --source.
+
+Example:
+  rooket build push --dir ~/github/rook
+`,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		dir := buildPushDir
+		if dir == "" {
+			var err error
+			dir, err = os.Getwd()
+			if err != nil {
+				return fmt.Errorf("get working directory: %w", err)
+			}
+		}
+
+		src := buildPushSource
+		if src == "" {
+			regName, err := buildRegistryName(dir)
+			if err != nil {
+				return fmt.Errorf("compute build registry name: %w", err)
+			}
+			src = fmt.Sprintf("%s/ceph-%s", regName, runtime.GOARCH)
+		}
+
+		gitRef, err := gitHeadRef(dir)
+		if err != nil {
+			fmt.Printf("warning: could not determine git branch (%v); using \"latest\"\n", err)
+			gitRef = "latest"
+		}
+
+		registry := fmt.Sprintf("localhost:%d", buildPushRegistryPort)
+		target := buildPushTag
+		if target == "" {
+			target = deriveTag(registry, buildPushNamespace, src, gitRef)
+		}
+
+		fmt.Printf("==> tagging %s → %s\n", src, target)
+		if err := run.Cmd("podman", "tag", src, target); err != nil {
+			return fmt.Errorf("tag %s: %w", src, err)
+		}
+
+		fmt.Printf("==> pushing %s\n", target)
+		if err := run.Cmd("podman", "push", "--tls-verify=false", target); err != nil {
+			return fmt.Errorf("push %s: %w", target, err)
+		}
+
+		fmt.Printf("pushed %s\n", target)
+		return nil
+	},
+}
+
 func init() {
 	rootCmd.AddCommand(buildCmd)
+	buildCmd.AddCommand(buildPushCmd)
 
 	buildCmd.Flags().StringVar(&buildDir, "dir", "", "path to the rook source directory (default: current directory)")
 	buildCmd.Flags().IntVar(&buildRegistryPort, "registry-port", 5001, "host port for the local OCI registry")
 	buildCmd.Flags().StringVar(&buildNamespace, "namespace", "rook", "image namespace prefix in the registry")
 	buildCmd.Flags().StringVar(&buildTag, "tag", "", "override the full target image reference (e.g. localhost:5001/rook/ceph:v1.2.3)")
+
+	buildPushCmd.Flags().StringVar(&buildPushDir, "dir", "", "path to the rook source directory (default: current directory)")
+	buildPushCmd.Flags().IntVar(&buildPushRegistryPort, "registry-port", 5001, "host port for the local OCI registry")
+	buildPushCmd.Flags().StringVar(&buildPushNamespace, "namespace", "rook", "image namespace prefix in the registry")
+	buildPushCmd.Flags().StringVar(&buildPushTag, "tag", "", "override the full target image reference")
+	buildPushCmd.Flags().StringVar(&buildPushSource, "source", "", "source image to retag (default: auto-detected from rook BUILD_REGISTRY)")
 }
