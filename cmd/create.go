@@ -25,16 +25,19 @@ var createCmd = &cobra.Command{
 	Long: `create performs the following steps:
 
   1. Locate iSCSI block devices set up by 'rooket block setup' and bind-mount
-     them into each worker node via the kind config.
+     them — together with /run/udev, which ceph-volume needs to inventory the
+     disks — into each worker node via the kind config.
   2. Create the kind cluster (via podman provider).
-  3. Start a local OCI registry container joined to the kind podman network,
+  3. Prepare every node: remount /sys read-write and install lvm2 and cryptsetup,
+     which Rook needs to provision LVM-backed and encrypted OSDs.
+  4. Start a local OCI registry container joined to the kind podman network,
      bound to localhost:<registry-port> on the host. The registry must be
      created after the cluster so that the "kind" podman network exists.
      (With rootless podman, network membership is set at container creation;
      'podman network connect' is not supported with the default pasta mode.)
-  4. Configure containerd on every node to mirror localhost:<registry-port>
+  5. Configure containerd on every node to mirror localhost:<registry-port>
      to the registry container (reachable by name on the kind network).
-  5. Apply the standard local-registry-hosting ConfigMap to kube-public.
+  6. Apply the standard local-registry-hosting ConfigMap to kube-public.
 
 Run 'rooket block setup' before 'rooket cluster create' to prepare block devices.
 `,
@@ -85,7 +88,13 @@ Run 'rooket block setup' before 'rooket cluster create' to prepare block devices
 			}
 		}
 
-		// --- Step 3: Registry ---
+		// --- Step 3: Prepare nodes for OSD provisioning ---
+		fmt.Println("==> preparing nodes for OSD provisioning")
+		if err := cluster.PrepareNodes(createName); err != nil {
+			return fmt.Errorf("prepare nodes: %w", err)
+		}
+
+		// --- Step 4: Registry ---
 		// Created after the cluster so the "kind" podman network exists.
 		// --network=kind makes the container reachable by name from cluster nodes.
 		fmt.Println("==> creating local OCI registry on the kind network")
@@ -98,19 +107,19 @@ Run 'rooket block setup' before 'rooket cluster create' to prepare block devices
 			return fmt.Errorf("create registry: %w", err)
 		}
 
-		// --- Step 4: Configure containerd registry on each node ---
+		// --- Step 5: Configure containerd registry on each node ---
 		fmt.Println("==> configuring containerd registry on cluster nodes")
 		if err := cluster.ConfigureRegistry(createName, regName, createRegistryPort); err != nil {
 			return fmt.Errorf("configure registry on nodes: %w", err)
 		}
 
-		// --- Step 5: Registry ConfigMap ---
+		// --- Step 6: Registry ConfigMap ---
 		fmt.Println("==> applying local-registry-hosting ConfigMap")
 		if err := cluster.ApplyRegistryConfigMap(createName, regName, createRegistryPort); err != nil {
 			return fmt.Errorf("apply registry ConfigMap: %w", err)
 		}
 
-		// --- Step 6: prometheus-operator CRDs ---
+		// --- Step 7: prometheus-operator CRDs ---
 		fmt.Println("==> installing prometheus-operator-crds helm chart")
 		if err := cluster.InstallPrometheusOperatorCRDs(
 			createName, createPromCRDsRelease, createPromCRDsVersion,
