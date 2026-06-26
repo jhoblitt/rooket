@@ -1,0 +1,129 @@
+name: integration
+
+# Full "up" integration test: build rooket, stand up a kind cluster with Rook
+# (block devices, OSDs) via `rooket up`, verify the Ceph cluster is healthy, then
+# tear it all down via `rooket down`. Runs the real podman/kind/iSCSI flow on a
+# GitHub-hosted runner.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      rook_ref:
+        description: "rook git ref to build and deploy"
+        default: "master"
+      workers:
+        description: "kind worker nodes (one OSD each)"
+        default: "1"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: integration-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  up-down:
+    name: rooket up -> verify -> down
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      ROOK_REF: ${{ github.event.inputs.rook_ref || 'master' }}
+      WORKERS: ${{ github.event.inputs.workers || '1' }}
+      KUBECONFIG: /home/runner/.kube/config
+      KIND_EXPERIMENTAL_PROVIDER: podman
+      # rooket builds Rook with podman and then `podman tag/push`es the result;
+      # the runner also has docker, which rook's make would otherwise prefer, so
+      # force podman to keep the built image in the same store rooket pushes from.
+      DOCKERCMD: podman
+    steps:
+      - name: Checkout rooket
+        uses: actions/checkout@v4
+
+      - name: Free up runner disk
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+            /opt/hostedtoolcache/CodeQL /usr/local/.ghcup /usr/lib/jvm \
+            /usr/share/swift /usr/local/share/powershell || true
+          sudo docker system prune -af || true
+          df -h /
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
+
+      - name: Install kind, kubectl, helm
+        run: |
+          set -eux
+          curl -fsSLo ./kind https://kind.sigs.k8s.io/dl/v0.32.0/kind-linux-amd64
+          sudo install -m 0755 ./kind /usr/local/bin/kind && rm -f ./kind
+          curl -fsSLo ./kubectl "https://dl.k8s.io/release/$(curl -fsSL https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
+          sudo install -m 0755 ./kubectl /usr/local/bin/kubectl && rm -f ./kubectl
+          curl -fsSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
+          kind version && kubectl version --client && helm version
+
+      - name: Install iSCSI and LVM tooling
+        run: |
+          set -eux
+          sudo apt-get update
+          sudo apt-get install -y open-iscsi targetcli-fb lvm2
+          sudo modprobe configfs target_core_mod target_core_file iscsi_tcp || true
+          sudo systemctl enable --now iscsid
+
+      - name: Prepare rootless podman for kind
+        run: |
+          set -eux
+          # cgroup v2 delegation lets rootless podman (and thus kind) manage cgroups
+          sudo mkdir -p /etc/systemd/system/user@.service.d
+          printf '[Service]\nDelegate=yes\n' | sudo tee /etc/systemd/system/user@.service.d/delegate.conf
+          sudo systemctl daemon-reload
+          loginctl enable-linger "$(whoami)" || true
+          podman info >/dev/null
+
+      - name: Build rooket
+        run: go build -o rooket .
+
+      - name: Checkout rook
+        uses: actions/checkout@v4
+        with:
+          repository: rook/rook
+          ref: ${{ env.ROOK_REF }}
+          path: rook
+
+      - name: rooket up (block setup, kind cluster, build, deploy)
+        run: ./rooket up --dir "${{ github.workspace }}/rook" --workers "$WORKERS"
+
+      - name: Verify Ceph OSDs are up
+        run: |
+          set -eux
+          kubectl --context kind-rook -n rook-ceph rollout status deploy/rook-ceph-operator --timeout=300s
+          ok=0
+          for _ in $(seq 1 40); do
+            up=$(kubectl --context kind-rook -n rook-ceph exec deploy/rook-ceph-tools -- \
+                   ceph osd stat 2>/dev/null | grep -oE '[0-9]+ up' | grep -oE '^[0-9]+' || echo 0)
+            echo "OSDs up: ${up:-0}/${WORKERS}"
+            if [ "${up:-0}" -ge "$WORKERS" ]; then ok=1; break; fi
+            sleep 15
+          done
+          kubectl --context kind-rook -n rook-ceph exec deploy/rook-ceph-tools -- ceph -s
+          kubectl --context kind-rook -n rook-ceph exec deploy/rook-ceph-tools -- ceph osd tree
+          [ "$ok" = 1 ]
+
+      - name: Diagnostics (on failure)
+        if: failure()
+        run: |
+          kubectl --context kind-rook get nodes -o wide || true
+          kubectl --context kind-rook -n rook-ceph get pods -o wide || true
+          kubectl --context kind-rook -n rook-ceph get pvc,pv || true
+          kubectl --context kind-rook -n rook-ceph logs -l app=rook-ceph-osd-prepare --tail=100 || true
+          kubectl --context kind-rook -n rook-ceph describe pods -l app=rook-ceph-osd 2>/dev/null | tail -80 || true
+          podman ps -a || true
+          df -h / || true
+
+      - name: rooket down (teardown + zap)
+        if: always()
+        run: ./rooket down --workers "$WORKERS" --delete-disks || true
