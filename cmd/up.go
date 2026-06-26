@@ -90,6 +90,11 @@ Example:
 			deployKubeContext = "kind-" + upName
 			deployOperatorName = upOperatorRelease
 			deployClusterName = upClusterRelease
+			deployName = upName
+			deployWorkers = upWorkers
+			deployDiskCount = upDiskCount
+			deployDiskSizeGB = upDiskSizeGB
+			deployIQNDate = upIQNDate
 			if err := deployCmd.RunE(deployCmd, nil); err != nil {
 				return fmt.Errorf("deploy: %w", err)
 			}

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/spf13/cobra"
 
@@ -18,6 +19,11 @@ var (
 	deployOperatorName   string
 	deployClusterName    string
 	deployKubeContext    string
+	deployName           string
+	deployWorkers        int
+	deployDiskCount      int
+	deployDiskSizeGB     int
+	deployIQNDate        string
 )
 
 var deployCmd = &cobra.Command{
@@ -140,20 +146,149 @@ func installRookCephOperator(dir string) error {
 func installRookCephCluster(dir string) error {
 	chartPath := filepath.Join(dir, "deploy", "charts", "rook-ceph-cluster")
 
-	fmt.Printf("==> deploying rook-ceph-cluster\n")
-	fmt.Printf("    chart:      %s\n", chartPath)
-	fmt.Printf("    release:    %s\n", deployClusterName)
-	fmt.Printf("    namespace:  rook-ceph\n")
-
-	return run.Cmd(
-		"helm",
+	args := []string{
 		"--kube-context", deployKubeContext,
 		"-n", "rook-ceph",
 		"upgrade", "--install", "--create-namespace",
 		deployClusterName,
 		chartPath,
 		"--set", "operatorNamespace=rook-ceph",
-	)
+		"--set", "toolbox.enabled=true",
+	}
+
+	fmt.Printf("==> deploying rook-ceph-cluster\n")
+	fmt.Printf("    chart:      %s\n", chartPath)
+	fmt.Printf("    release:    %s\n", deployClusterName)
+	fmt.Printf("    namespace:  rook-ceph\n")
+
+	// The kind nodes are privileged and share the host's /dev, so a node-local
+	// device list lets every worker see (and rook mis-attribute) every disk.
+	// Instead back each OSD with a node-pinned local PV: the PV's nodeAffinity
+	// fixes placement to one OSD per worker, and PVC-backed OSDs scope
+	// ceph-volume's listing to the claim rather than the whole host.
+	if deployWorkers > 0 && deployDiskCount > 0 {
+		if err := applyLocalStorage(); err != nil {
+			return err
+		}
+		valuesPath, err := writeClusterStorageValues()
+		if err != nil {
+			return err
+		}
+		defer os.Remove(valuesPath)
+		fmt.Printf("    storage:    %d local-PV OSD(s) via storageClassDeviceSet (one per worker)\n", deployWorkers*deployDiskCount)
+		args = append(args, "-f", valuesPath)
+	}
+
+	return run.Cmd("helm", args...)
+}
+
+// writeClusterStorageValues renders a Helm values file configuring OSDs as a
+// storageClassDeviceSet over the node-pinned local PVs created by
+// applyLocalStorage. PVC-backed OSDs scope ceph-volume's listing to the claim,
+// so each worker ends up with exactly one OSD on its own iSCSI disk. Returns the
+// file path; the caller removes it.
+func writeClusterStorageValues() (string, error) {
+	var sb strings.Builder
+	sb.WriteString("cephClusterSpec:\n")
+	sb.WriteString("  storage:\n")
+	sb.WriteString("    useAllNodes: false\n")
+	sb.WriteString("    useAllDevices: false\n")
+	sb.WriteString("    storageClassDeviceSets:\n")
+	sb.WriteString("      - name: rooket\n")
+	sb.WriteString(fmt.Sprintf("        count: %d\n", deployWorkers*deployDiskCount))
+	sb.WriteString("        portable: false\n")
+	sb.WriteString("        volumeClaimTemplates:\n")
+	sb.WriteString("          - metadata:\n")
+	sb.WriteString("              name: data\n")
+	sb.WriteString("            spec:\n")
+	sb.WriteString("              storageClassName: rooket-local\n")
+	sb.WriteString("              volumeMode: Block\n")
+	sb.WriteString("              accessModes:\n")
+	sb.WriteString("                - ReadWriteOnce\n")
+	sb.WriteString("              resources:\n")
+	sb.WriteString("                requests:\n")
+	sb.WriteString(fmt.Sprintf("                  storage: %dGi\n", deployDiskSizeGB))
+
+	f, err := os.CreateTemp("", "rooket-cluster-values-*.yaml")
+	if err != nil {
+		return "", fmt.Errorf("create cluster values file: %w", err)
+	}
+	if _, err := f.WriteString(sb.String()); err != nil {
+		f.Close()
+		return "", fmt.Errorf("write cluster values file: %w", err)
+	}
+	if err := f.Close(); err != nil {
+		return "", err
+	}
+	fmt.Printf("%s", sb.String())
+	return f.Name(), nil
+}
+
+// applyLocalStorage creates the no-provisioner StorageClass and one block-mode
+// local PersistentVolume per iSCSI disk. Each PV's nodeAffinity pins it to the
+// worker that owns the disk, so the storageClassDeviceSet's WaitForFirstConsumer
+// claims bind one OSD to each node.
+func applyLocalStorage() error {
+	fmt.Printf("==> applying local-PV StorageClass and PersistentVolumes\n")
+	return run.CmdWithStdin(strings.NewReader(localStorageManifest()),
+		"kubectl", "apply", "--context", deployKubeContext, "-f", "-")
+}
+
+// localStorageManifest renders the no-provisioner StorageClass and a node-pinned,
+// block-mode local PV for each worker's iSCSI disk(s).
+func localStorageManifest() string {
+	var sb strings.Builder
+	sb.WriteString(`apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: rooket-local
+provisioner: kubernetes.io/no-provisioner
+volumeBindingMode: WaitForFirstConsumer
+reclaimPolicy: Retain
+`)
+	for i := 0; i < deployWorkers; i++ {
+		node := workerNodeName(deployName, i)
+		for d := 0; d < deployDiskCount; d++ {
+			byPath := fmt.Sprintf(
+				"/dev/disk/by-path/ip-127.0.0.1:3260-iscsi-iqn.%s.local.rooket:%s-worker%d-disk%d-lun-0",
+				deployIQNDate, deployName, i, d)
+			sb.WriteString(fmt.Sprintf(`---
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: rooket-osd-%s-disk%d
+spec:
+  capacity:
+    storage: %dGi
+  volumeMode: Block
+  accessModes:
+    - ReadWriteOnce
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: rooket-local
+  local:
+    path: %q
+  nodeAffinity:
+    required:
+      nodeSelectorTerms:
+        - matchExpressions:
+            - key: kubernetes.io/hostname
+              operator: In
+              values:
+                - %s
+`, node, d, deployDiskSizeGB, byPath, node))
+		}
+	}
+	return sb.String()
+}
+
+// workerNodeName returns the kind/k8s node name for worker index i. kind names
+// the first worker "<cluster>-worker" and the rest "<cluster>-worker2",
+// "<cluster>-worker3", ...
+func workerNodeName(cluster string, i int) string {
+	if i == 0 {
+		return cluster + "-worker"
+	}
+	return fmt.Sprintf("%s-worker%d", cluster, i+1)
 }
 
 // switchKubectlNamespace sets the default kubectl namespace if the krew ns
@@ -177,4 +312,9 @@ func init() {
 	pf.StringVar(&deployImageName, "image-name", "ceph", "image name without architecture suffix")
 	pf.StringVar(&deployOperatorName, "operator-release", "rook-ceph", "rook-ceph operator helm release name")
 	pf.StringVar(&deployClusterName, "cluster-release", "rook-ceph-cluster", "rook-ceph-cluster helm release name")
+	pf.StringVar(&deployName, "name", "rook", "kind cluster name (for node-name and iSCSI by-path derivation)")
+	pf.IntVar(&deployWorkers, "workers", 3, "worker node count (for per-node OSD device pinning)")
+	pf.IntVar(&deployDiskCount, "disk-count", 1, "iSCSI disks per worker (0 disables OSD device pinning)")
+	pf.IntVar(&deployDiskSizeGB, "disk-size", 10, "disk size in GiB (must match 'rooket block setup'; used for local-PV capacity)")
+	pf.StringVar(&deployIQNDate, "iqn-date", "2003-01", "IQN date component matching 'rooket block setup'")
 }

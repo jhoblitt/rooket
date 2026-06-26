@@ -55,6 +55,11 @@ nodes:
   - hostPath: /run/udev
     containerPath: /run/udev
     propagation: HostToContainer
+  # /dev/disk/by-path carries the stable iSCSI symlinks Rook pins OSDs to; the
+  # node runs no udevd, so without the host's /dev/disk these are absent.
+  - hostPath: /dev/disk
+    containerPath: /dev/disk
+    propagation: HostToContainer
   {{- range $w.Disks}}
   - hostPath: {{.HostPath}}
     containerPath: {{.ContainerPath}}
@@ -156,9 +161,14 @@ func Nodes(clusterName string) ([]string, error) {
 //     device-mapper devices: the node shares the host's /sys (which advertises
 //     those dm devices) but not its /dev/mapper, so ceph-volume's full-device
 //     scan would otherwise crash on the missing nodes and provision no OSDs.
+//   - creates extra /dev/loopN nodes: the kubelet maps each local-PV block
+//     volume (the OSD storageClassDeviceSet) through a loop device, but rootless
+//     podman's image-layer mounts already consume most of the host's ~22 loop
+//     devices, so losetup -f runs out and OSDs fail to start. max_loop=0 lets
+//     the kernel allocate more on use; this just provides the device nodes.
 //
-// Per-node failures are logged, not fatal. The /run/udev bind-mount lives in
-// the kind config, not here.
+// Per-node failures are logged, not fatal. The /run/udev and /dev/disk
+// bind-mounts live in the kind config, not here.
 func PrepareNodes(clusterName string) error {
 	nodes, err := Nodes(clusterName)
 	if err != nil {
@@ -173,6 +183,10 @@ func PrepareNodes(clusterName string) error {
 		}
 		if err := run.Cmd("podman", "exec", node, "dmsetup", "mknodes"); err != nil {
 			fmt.Printf("warning: dmsetup mknodes on node %s: %v\n", node, err)
+		}
+		if err := run.Cmd("podman", "exec", node, "sh", "-c",
+			"for i in $(seq 0 127); do [ -e /dev/loop$i ] || mknod /dev/loop$i b 7 $i; done"); err != nil {
+			fmt.Printf("warning: create loop device nodes on node %s: %v\n", node, err)
 		}
 	}
 	return nil
