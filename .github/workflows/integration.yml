@@ -93,6 +93,9 @@ jobs:
           repository: rook/rook
           ref: ${{ env.ROOK_REF }}
           path: rook
+          # full history + tags so rook's `git describe` yields a valid semver
+          # chart version (a shallow checkout gives a bare SHA -> helm errors)
+          fetch-depth: 0
 
       - name: rooket up (block setup, kind cluster, build, deploy)
         run: ./rooket up --dir "${{ github.workspace }}/rook" --workers "$WORKERS"
