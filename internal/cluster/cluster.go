@@ -137,6 +137,83 @@ func Delete(name string) error {
 	)
 }
 
+// ZapISCSIDisks wipes this cluster's iSCSI OSD disks so the next bring-up sees
+// clean devices. It re-creates each backing image as a fresh sparse file
+// (truncate to 0, then back to its size), which clears every Ceph bluestore
+// label while keeping the image sparse — the LIO fileio backstore supports
+// neither UNMAP/blkdiscard nor (on ext2) hole-punching, so zeroing through the
+// device would permanently inflate the image instead. It then refreshes the host
+// udev DB (the truncate doesn't notify the kernel, so lsblk/ceph-volume would
+// otherwise see a stale "ceph_bluestore" signature and skip the disk). Run AFTER
+// the kind cluster is deleted, when the disks are idle. Best-effort; targets the
+// default data dir (~/.local/share/rooket/<cluster>).
+func ZapISCSIDisks(clusterName string) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		fmt.Printf("warning: zap OSD disks: resolve home: %v\n", err)
+		return
+	}
+	imgs, _ := filepath.Glob(filepath.Join(home, ".local", "share", "rooket", clusterName, "*.img"))
+	if len(imgs) == 0 {
+		fmt.Printf("no OSD disk images for cluster %q; skipping zap\n", clusterName)
+		return
+	}
+
+	fmt.Println("==> zapping OSD disks (re-sparsifying backing images)")
+	for _, img := range imgs {
+		fi, err := os.Stat(img)
+		if err != nil {
+			fmt.Printf("warning: stat %s: %v\n", img, err)
+			continue
+		}
+		if err := os.Truncate(img, 0); err != nil {
+			fmt.Printf("warning: truncate %s to 0: %v\n", img, err)
+			continue
+		}
+		if err := os.Truncate(img, fi.Size()); err != nil {
+			fmt.Printf("warning: truncate %s to %d: %v\n", img, fi.Size(), err)
+			continue
+		}
+		fmt.Printf("zapped %s\n", img)
+	}
+
+	// Refresh udev so lsblk/ceph-volume don't see the stale "ceph_bluestore"
+	// signature. Needs privileges, so use a throwaway privileged container, with
+	// the host's /run/udev mounted so udevadm shares real udev state (else settle
+	// hangs and the re-probe is unreliable). blockdev --flushbufs first drops the
+	// iSCSI initiator's stale block-device cache (the truncate happened on the
+	// backstore file, behind the initiator) so the re-probe reads the now-zeroed
+	// device rather than cached bluestore blocks.
+	if cimg := kindNodeImageID(); cimg != "" {
+		script := fmt.Sprintf(`for dev in /dev/disk/by-path/ip-127.0.0.1:3260-iscsi-iqn.*.local.rooket:%s-worker*-disk*-lun-0; do
+  [ -e "$dev" ] || continue
+  blockdev --flushbufs "$dev" 2>/dev/null || true
+done
+udevadm trigger --action=change --subsystem-match=block >/dev/null 2>&1 || true
+udevadm settle >/dev/null 2>&1 || true`, clusterName)
+		_ = run.Cmd("podman", "run", "--rm", "--privileged",
+			"-v", "/dev:/dev", "-v", "/run/udev:/run/udev",
+			"--entrypoint", "sh", cimg, "-c", script)
+	}
+}
+
+// kindNodeImageID returns the image ID of a locally-present kindest/node image,
+// used as a throwaway privileged container for disk zapping. Empty if none.
+func kindNodeImageID() string {
+	out, err := run.Output("podman", "images", "--format", "{{.ID}} {{.Repository}}")
+	if err != nil {
+		return ""
+	}
+	for _, line := range strings.Split(out, "\n") {
+		if strings.Contains(line, "kindest/node") {
+			if f := strings.Fields(line); len(f) > 0 {
+				return f[0]
+			}
+		}
+	}
+	return ""
+}
+
 // Nodes returns the list of node container names for the cluster.
 func Nodes(clusterName string) ([]string, error) {
 	out, err := run.Output("kind", "get", "nodes", "--name", clusterName)

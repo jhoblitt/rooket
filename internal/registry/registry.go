@@ -78,13 +78,12 @@ func Create(cfg Config) error {
 	return run.Cmd("podman", args...)
 }
 
-// Delete stops and removes the registry container.
+// Delete stops and removes the registry container. The -v removes the
+// container's anonymous volume (registry:2 declares VOLUME /var/lib/registry);
+// without it each create/delete cycle leaks a ~600MB volume.
 func Delete(name string) error {
 	if !Exists(name) {
 		return nil
 	}
-	if err := run.Cmd("podman", "stop", name); err != nil {
-		return err
-	}
-	return run.Cmd("podman", "rm", name)
+	return run.Cmd("podman", "rm", "-f", "-v", name)
 }
