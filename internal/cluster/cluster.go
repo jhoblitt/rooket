@@ -10,6 +10,7 @@ import (
 	"text/template"
 	"time"
 
+	"github.com/jhoblitt/rooket/internal/engine"
 	"github.com/jhoblitt/rooket/internal/run"
 )
 
@@ -27,13 +28,14 @@ type Config struct {
 	Name string
 	// Workers is the number of worker nodes.
 	Workers int
-	// RegistryName is the podman container name of the local OCI registry.
+	// RegistryName is the container name of the local OCI registry.
 	RegistryName string
 	// RegistryHostPort is the port the registry listens on on the host.
 	RegistryHostPort int
-	// WorkerDisks maps worker index → Disk descriptors to bind-mount into
-	// each worker node. crun adds device files to the container's cgroup
-	// device allowlist automatically for bind-mounted device files.
+	// WorkerDisks maps worker index → Disk descriptors to bind-mount into each
+	// worker node. kind runs node containers privileged, so a bind-mounted
+	// device file is usable inside the node under either engine (podman's crun
+	// also adds such devices to the cgroup device allowlist automatically).
 	WorkerDisks map[int][]Disk
 }
 
@@ -121,20 +123,19 @@ func Create(cfg Config) error {
 
 	fmt.Printf("kind cluster config:\n%s\n", configBytes)
 
-	return run.CmdWithEnv(
-		[]string{"KIND_EXPERIMENTAL_PROVIDER=podman"},
+	// The kind provider comes from KIND_EXPERIMENTAL_PROVIDER, which the root
+	// command exports from the selected engine.
+	return run.Cmd(
 		"kind", "create", "cluster",
 		"--name", cfg.Name,
 		"--config", tmpFile,
 	)
 }
 
-// Delete deletes the named kind cluster.
+// Delete deletes the named kind cluster. The kind provider comes from
+// KIND_EXPERIMENTAL_PROVIDER, which the root command exports from the engine.
 func Delete(name string) error {
-	return run.CmdWithEnv(
-		[]string{"KIND_EXPERIMENTAL_PROVIDER=podman"},
-		"kind", "delete", "cluster", "--name", name,
-	)
+	return run.Cmd("kind", "delete", "cluster", "--name", name)
 }
 
 // ZapISCSIDisks wipes this cluster's iSCSI OSD disks so the next bring-up sees
@@ -147,7 +148,7 @@ func Delete(name string) error {
 // otherwise see a stale "ceph_bluestore" signature and skip the disk). Run AFTER
 // the kind cluster is deleted, when the disks are idle. Best-effort; targets the
 // default data dir (~/.local/share/rooket/<cluster>).
-func ZapISCSIDisks(clusterName string) {
+func ZapISCSIDisks(eng engine.Engine, clusterName string) {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		fmt.Printf("warning: zap OSD disks: resolve home: %v\n", err)
@@ -184,14 +185,14 @@ func ZapISCSIDisks(clusterName string) {
 	// iSCSI initiator's stale block-device cache (the truncate happened on the
 	// backstore file, behind the initiator) so the re-probe reads the now-zeroed
 	// device rather than cached bluestore blocks.
-	if cimg := kindNodeImageID(); cimg != "" {
+	if cimg := kindNodeImageID(eng); cimg != "" {
 		script := fmt.Sprintf(`for dev in /dev/disk/by-path/ip-127.0.0.1:3260-iscsi-iqn.*.local.rooket:%s-worker*-disk*-lun-0; do
   [ -e "$dev" ] || continue
   blockdev --flushbufs "$dev" 2>/dev/null || true
 done
 udevadm trigger --action=change --subsystem-match=block >/dev/null 2>&1 || true
 udevadm settle >/dev/null 2>&1 || true`, clusterName)
-		_ = run.Cmd("podman", "run", "--rm", "--privileged",
+		_ = run.Cmd(eng.String(), "run", "--rm", "--privileged",
 			"-v", "/dev:/dev", "-v", "/run/udev:/run/udev",
 			"--entrypoint", "sh", cimg, "-c", script)
 	}
@@ -199,8 +200,8 @@ udevadm settle >/dev/null 2>&1 || true`, clusterName)
 
 // kindNodeImageID returns the image ID of a locally-present kindest/node image,
 // used as a throwaway privileged container for disk zapping. Empty if none.
-func kindNodeImageID() string {
-	out, err := run.Output("podman", "images", "--format", "{{.ID}} {{.Repository}}")
+func kindNodeImageID(eng engine.Engine) string {
+	out, err := run.Output(eng.String(), "images", "--format", "{{.ID}} {{.Repository}}")
 	if err != nil {
 		return ""
 	}
@@ -246,22 +247,22 @@ func Nodes(clusterName string) ([]string, error) {
 //
 // Per-node failures are logged, not fatal. The /run/udev and /dev/disk
 // bind-mounts live in the kind config, not here.
-func PrepareNodes(clusterName string) error {
+func PrepareNodes(eng engine.Engine, clusterName string) error {
 	nodes, err := Nodes(clusterName)
 	if err != nil {
 		return err
 	}
 	for _, node := range nodes {
-		if err := run.Cmd("podman", "exec", node, "mount", "-o", "remount,rw", "/sys"); err != nil {
+		if err := run.Cmd(eng.String(), "exec", node, "mount", "-o", "remount,rw", "/sys"); err != nil {
 			fmt.Printf("warning: remount /sys read-write on node %s: %v\n", node, err)
 		}
-		if err := installNodePackages(node); err != nil {
+		if err := installNodePackages(eng, node); err != nil {
 			fmt.Printf("warning: install lvm2/cryptsetup on node %s: %v\n", node, err)
 		}
-		if err := run.Cmd("podman", "exec", node, "dmsetup", "mknodes"); err != nil {
+		if err := run.Cmd(eng.String(), "exec", node, "dmsetup", "mknodes"); err != nil {
 			fmt.Printf("warning: dmsetup mknodes on node %s: %v\n", node, err)
 		}
-		if err := run.Cmd("podman", "exec", node, "sh", "-c",
+		if err := run.Cmd(eng.String(), "exec", node, "sh", "-c",
 			"for i in $(seq 0 127); do [ -e /dev/loop$i ] || mknod /dev/loop$i b 7 $i; done"); err != nil {
 			fmt.Printf("warning: create loop device nodes on node %s: %v\n", node, err)
 		}
@@ -271,11 +272,11 @@ func PrepareNodes(clusterName string) error {
 
 // installNodePackages installs lvm2 and cryptsetup into a kind node, retrying to
 // ride out transient apt failures.
-func installNodePackages(node string) error {
+func installNodePackages(eng engine.Engine, node string) error {
 	const script = "apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y lvm2 cryptsetup"
 	var err error
 	for attempt := 1; attempt <= 3; attempt++ {
-		if err = run.Cmd("podman", "exec", node, "sh", "-c", script); err == nil {
+		if err = run.Cmd(eng.String(), "exec", node, "sh", "-c", script); err == nil {
 			return nil
 		}
 		if attempt < 3 {
@@ -287,7 +288,7 @@ func installNodePackages(node string) error {
 }
 
 // ConfigureRegistry creates the containerd registry hosts.toml on every node.
-func ConfigureRegistry(clusterName, registryName string, hostPort int) error {
+func ConfigureRegistry(eng engine.Engine, clusterName, registryName string, hostPort int) error {
 	nodes, err := Nodes(clusterName)
 	if err != nil {
 		return err
@@ -302,13 +303,13 @@ func ConfigureRegistry(clusterName, registryName string, hostPort int) error {
 	dir := fmt.Sprintf("/etc/containerd/certs.d/localhost:%d", hostPort)
 
 	for _, node := range nodes {
-		if err := run.Cmd("podman", "exec", node, "mkdir", "-p", dir); err != nil {
+		if err := run.Cmd(eng.String(), "exec", node, "mkdir", "-p", dir); err != nil {
 			return fmt.Errorf("mkdir on node %s: %w", node, err)
 		}
 		hostsPath := dir + "/hosts.toml"
 		if err := run.CmdWithStdin(
 			strings.NewReader(hostsToml),
-			"podman", "exec", "-i", node,
+			eng.String(), "exec", "-i", node,
 			"sh", "-c", "cat > "+hostsPath,
 		); err != nil {
 			return fmt.Errorf("write hosts.toml on node %s: %w", node, err)
