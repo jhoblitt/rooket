@@ -2,8 +2,8 @@ name: integration
 
 # Full "up" integration test: build rooket, stand up a kind cluster with Rook
 # (block devices, OSDs) via `rooket up`, verify the Ceph cluster is healthy, then
-# tear it all down via `rooket down`. Runs the real podman/kind/iSCSI flow on a
-# GitHub-hosted runner.
+# tear it all down via `rooket down`. Runs the real kind/iSCSI flow on a
+# GitHub-hosted runner, matrixed over both container engines (podman and docker).
 
 on:
   pull_request:
@@ -27,18 +27,21 @@ concurrency:
 
 jobs:
   up-down:
-    name: rooket up -> verify -> down
+    name: rooket up -> verify -> down (${{ matrix.engine }})
     runs-on: ubuntu-latest
     timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        engine: [podman, docker]
     env:
       ROOK_REF: ${{ github.event.inputs.rook_ref || 'master' }}
       WORKERS: ${{ github.event.inputs.workers || '3' }}
       KUBECONFIG: /home/runner/.kube/config
-      KIND_EXPERIMENTAL_PROVIDER: podman
-      # rooket builds Rook with podman and then `podman tag/push`es the result;
-      # the runner also has docker, which rook's make would otherwise prefer, so
-      # force podman to keep the built image in the same store rooket pushes from.
-      DOCKERCMD: podman
+      # rooket drives this engine and exports KIND_EXPERIMENTAL_PROVIDER (the kind
+      # provider) and DOCKERCMD (rook's make) from it, so the Rook image is built
+      # into the same store rooket then tags and pushes from.
+      ROOKET_ENGINE: ${{ matrix.engine }}
     steps:
       - name: Checkout rooket
         uses: actions/checkout@v4
@@ -75,6 +78,7 @@ jobs:
           sudo systemctl enable --now iscsid
 
       - name: Prepare rootless podman for kind
+        if: matrix.engine == 'podman'
         run: |
           set -eux
           # cgroup v2 delegation lets rootless podman (and thus kind) manage cgroups
@@ -138,7 +142,7 @@ jobs:
           kubectl --context kind-rook -n rook-ceph get pvc,pv || true
           kubectl --context kind-rook -n rook-ceph logs -l app=rook-ceph-osd-prepare --tail=100 || true
           kubectl --context kind-rook -n rook-ceph describe pods -l app=rook-ceph-osd 2>/dev/null | tail -80 || true
-          podman ps -a || true
+          ${{ matrix.engine }} ps -a || true
           df -h / || true
 
       - name: rooket down (teardown + zap)
