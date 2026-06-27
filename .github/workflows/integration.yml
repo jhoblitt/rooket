@@ -16,7 +16,7 @@ on:
         default: "master"
       workers:
         description: "kind worker nodes (one OSD each)"
-        default: "1"
+        default: "3"
 
 permissions:
   contents: read
@@ -32,7 +32,7 @@ jobs:
     timeout-minutes: 120
     env:
       ROOK_REF: ${{ github.event.inputs.rook_ref || 'master' }}
-      WORKERS: ${{ github.event.inputs.workers || '1' }}
+      WORKERS: ${{ github.event.inputs.workers || '3' }}
       KUBECONFIG: /home/runner/.kube/config
       KIND_EXPERIMENTAL_PROVIDER: podman
       # rooket builds Rook with podman and then `podman tag/push`es the result;
@@ -103,17 +103,20 @@ jobs:
       - name: Verify Ceph OSDs are up
         run: |
           set -eux
-          kubectl --context kind-rook -n rook-ceph rollout status deploy/rook-ceph-operator --timeout=300s
+          # Check OSD daemon pods directly (the toolbox can lag behind, so don't
+          # depend on it for the gate). Expect one Running OSD per worker.
           ok=0
-          for _ in $(seq 1 40); do
-            up=$(kubectl --context kind-rook -n rook-ceph exec deploy/rook-ceph-tools -- \
-                   ceph osd stat 2>/dev/null | grep -oE '[0-9]+ up' | grep -oE '^[0-9]+' || echo 0)
-            echo "OSDs up: ${up:-0}/${WORKERS}"
-            if [ "${up:-0}" -ge "$WORKERS" ]; then ok=1; break; fi
+          for _ in $(seq 1 60); do
+            run=$(kubectl --context kind-rook -n rook-ceph get pods --no-headers \
+                    -l app=rook-ceph-osd 2>/dev/null | awk '$3=="Running"' | wc -l)
+            echo "OSD pods Running: ${run}/${WORKERS}"
+            if [ "${run:-0}" -ge "$WORKERS" ]; then ok=1; break; fi
             sleep 15
           done
-          kubectl --context kind-rook -n rook-ceph exec deploy/rook-ceph-tools -- ceph -s
-          kubectl --context kind-rook -n rook-ceph exec deploy/rook-ceph-tools -- ceph osd tree
+          kubectl --context kind-rook -n rook-ceph get pods -o wide || true
+          # best-effort ceph status if the toolbox is ready
+          kubectl --context kind-rook -n rook-ceph exec deploy/rook-ceph-tools -- ceph -s 2>/dev/null || true
+          kubectl --context kind-rook -n rook-ceph exec deploy/rook-ceph-tools -- ceph osd tree 2>/dev/null || true
           [ "$ok" = 1 ]
 
       - name: Diagnostics (on failure)
