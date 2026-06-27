@@ -1,10 +1,12 @@
-// Package registry manages a local OCI registry container via podman.
+// Package registry manages a local OCI registry container via the configured
+// container engine (podman or docker).
 package registry
 
 import (
 	"fmt"
 	"strings" // for Exists
 
+	"github.com/jhoblitt/rooket/internal/engine"
 	"github.com/jhoblitt/rooket/internal/run"
 )
 
@@ -15,11 +17,13 @@ const (
 
 // Config holds registry configuration.
 type Config struct {
-	// Name is the podman container name for the registry.
+	// Engine is the container engine (podman or docker) that runs the registry.
+	Engine engine.Engine
+	// Name is the registry container name.
 	Name string
 	// HostPort is the port bound on the host (e.g. 5001).
 	HostPort int
-	// Network is the podman network to attach the container to (e.g. "kind")
+	// Network is the container network to attach the registry to (e.g. "kind")
 	// so cluster nodes can reach the registry by name.
 	Network string
 }
@@ -35,14 +39,14 @@ func (c *Config) HostAddr() string {
 }
 
 // InClusterAddr returns the address reachable from inside cluster nodes.
-// kind nodes share a podman network and can reach the registry container by name.
+// kind nodes share a container network and can reach the registry by name.
 func (c *Config) InClusterAddr() string {
 	return fmt.Sprintf("%s:%d", c.Name, RegistryInternalPort)
 }
 
 // Exists returns true if the registry container already exists (running or stopped).
-func Exists(name string) bool {
-	out, err := run.Output("podman", "ps", "-a", "--filter", "name=^"+name+"$", "--format", "{{.Names}}")
+func Exists(eng engine.Engine, name string) bool {
+	out, err := run.Output(eng.String(), "ps", "-a", "--filter", "name=^"+name+"$", "--format", "{{.Names}}")
 	if err != nil {
 		return false
 	}
@@ -59,7 +63,7 @@ func Exists(name string) bool {
 // ("kind") already exists; attaching at creation time makes it reachable by
 // name from the cluster nodes.
 func Create(cfg Config) error {
-	if Exists(cfg.Name) {
+	if Exists(cfg.Engine, cfg.Name) {
 		fmt.Printf("registry container %q already exists, skipping creation\n", cfg.Name)
 		return nil
 	}
@@ -73,15 +77,15 @@ func Create(cfg Config) error {
 		args = append(args, "--network="+cfg.Network)
 	}
 	args = append(args, RegistryImage)
-	return run.Cmd("podman", args...)
+	return run.Cmd(cfg.Engine.String(), args...)
 }
 
 // Delete stops and removes the registry container. The -v removes the
 // container's anonymous volume (registry:2 declares VOLUME /var/lib/registry);
 // without it each create/delete cycle leaks a ~600MB volume.
-func Delete(name string) error {
-	if !Exists(name) {
+func Delete(eng engine.Engine, name string) error {
+	if !Exists(eng, name) {
 		return nil
 	}
-	return run.Cmd("podman", "rm", "-f", "-v", name)
+	return run.Cmd(eng.String(), "rm", "-f", "-v", name)
 }

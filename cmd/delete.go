@@ -38,12 +38,12 @@ must be torn down separately if desired.
 
 		// --- Step 2: zap OSD disks now that the nodes have released them ---
 		if deleteZap {
-			cluster.ZapISCSIDisks(deleteName)
+			cluster.ZapISCSIDisks(containerEngine, deleteName)
 		}
 
 		// --- Step 3: registry container ---
 		fmt.Println("==> deleting local OCI registry")
-		if err := registry.Delete(regName); err != nil {
+		if err := registry.Delete(containerEngine, regName); err != nil {
 			fmt.Printf("warning: delete registry: %v\n", err)
 		}
 
