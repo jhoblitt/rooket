@@ -98,7 +98,18 @@ jobs:
           fetch-depth: 0
 
       - name: rooket up (block setup, kind cluster, build, deploy)
-        run: ./rooket up --dir "${{ github.workspace }}/rook" --workers "$WORKERS"
+        run: |
+          # Retry: pulling Ceph images from quay.io during the Rook build is
+          # flaky. up is re-runnable (block setup reuses disks, cluster create
+          # skips if present, deploy is helm upgrade --install).
+          n=0
+          until [ "$n" -ge 3 ]; do
+            ./rooket up --dir "${{ github.workspace }}/rook" --workers "$WORKERS" && exit 0
+            n=$((n + 1))
+            echo "::warning::rooket up attempt $n failed (often a transient image pull); retrying"
+            sleep 30
+          done
+          exit 1
 
       - name: Verify Ceph OSDs are up
         run: |
