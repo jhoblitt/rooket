@@ -48,9 +48,8 @@ var blockSetupCmd = &cobra.Command{
 	Use:   "setup",
 	Short: "Create disk images and configure iSCSI targets on the host",
 	Long: `setup creates sparse disk image files and exposes each one as an iSCSI
-target via targetcli and iscsiadm. The resulting /dev/sdX block devices can be
-bind-mounted into kind worker nodes as Rook OSD devices, avoiding the need for
-loop devices.
+target via targetcli and iscsiadm. The resulting /dev/sdX block devices are
+bind-mounted into kind worker nodes as Rook OSD devices.
 
 Privilege requirements: targetcli, iscsiadm, and systemctl require root.
 rooket tries sudo -n first, then pkexec.

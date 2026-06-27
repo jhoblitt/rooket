@@ -5,9 +5,7 @@ name: integration
 # tear it all down via `rooket down`. Runs the real podman/kind/iSCSI flow on a
 # GitHub-hosted runner.
 #
-# rooket and kind run under sudo (rootful podman): the kubelet maps each local-PV
-# block OSD via a loop device, and only rootful privileged kind nodes get the
-# host's loop devices (rootless nodes get just /dev/loop0).
+# rooket and kind run under sudo (rootful podman), matching the development setup.
 
 on:
   pull_request:
@@ -72,18 +70,6 @@ jobs:
           sudo modprobe configfs target_core_mod target_core_file iscsi_tcp || true
           sudo systemctl enable --now iscsid
 
-      - name: Raise loop-device limit
-        run: |
-          set -eux
-          # The kubelet maps each local-PV block volume (the OSD device set) via a
-          # loop device; the runner's loop module defaults to max_loop=8. Reload it
-          # with a higher cap (no loops are in use, so removal is safe). Rootful
-          # kind nodes inherit the host loop devices.
-          cat /sys/module/loop/parameters/max_loop || true
-          sudo modprobe -r loop || true
-          sudo modprobe loop max_loop=256
-          cat /sys/module/loop/parameters/max_loop
-
       - name: Build rooket
         run: go build -o rooket .
 
@@ -99,10 +85,10 @@ jobs:
 
       - name: rooket up (block setup, kind cluster, build, deploy)
         run: |
-          # Run as root: rootful podman gives the kind nodes the host's loop
-          # devices (needed by the local-PV OSDs). DOCKERCMD=podman makes rook's
-          # make build with podman so rooket can tag/push the image. Retry to ride
-          # out transient Ceph image-pull flakes; up is re-runnable.
+          # Run as root (rootful podman), matching the development setup.
+          # DOCKERCMD=podman makes rook's make build with podman so rooket can
+          # tag/push the image. Retry to ride out transient Ceph image-pull
+          # flakes; up is re-runnable.
           n=0
           until [ "$n" -ge 3 ]; do
             sudo DOCKERCMD=podman ./rooket up --dir "${{ github.workspace }}/rook" --workers "$WORKERS" && exit 0
@@ -136,12 +122,7 @@ jobs:
           sudo kubectl --context kind-rook -n rook-ceph get pvc,pv || true
           sudo kubectl --context kind-rook -n rook-ceph logs -l app=rook-ceph-osd-prepare --tail=100 || true
           sudo kubectl --context kind-rook -n rook-ceph describe pods -l app=rook-ceph-osd-prepare 2>/dev/null \
-            | grep -iE 'Init Containers:|State:|Reason:|Events:|Warning|FailedMapVolume|losetup|loop' | tail -50 || true
-          sudo losetup -a | wc -l || true
-          for n in $(sudo env KIND_EXPERIMENTAL_PROVIDER=podman kind get nodes --name rook 2>/dev/null); do
-            echo "loop devices in node $n:"
-            sudo podman exec "$n" sh -c 'ls /dev/loop[0-9]* 2>/dev/null | wc -l; losetup -f 2>&1 || true' || true
-          done
+            | grep -iE 'Init Containers:|State:|Reason:|Events:|Warning|FailedMapVolume' | tail -50 || true
           df -h / || true
 
       - name: rooket down (teardown + zap)

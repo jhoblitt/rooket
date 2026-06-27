@@ -19,8 +19,8 @@ Rook development and testing. It creates:
 
   • A multi-node kind cluster whose containerd is wired to the local registry.
 
-  • (Optional) Sparse disk images attached as loop devices and passed through
-    into each worker node so Rook/Ceph can consume them as raw block OSDs.
+  • (Optional) iSCSI-backed block devices passed through into each worker node
+    so Rook/Ceph can consume them as raw block OSDs.
 `,
 }
 

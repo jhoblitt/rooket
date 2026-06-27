@@ -19,9 +19,8 @@ type Config struct {
 	Name string
 	// HostPort is the port bound on the host (e.g. 5001).
 	HostPort int
-	// Network is the podman network to attach the container to (e.g. "kind").
-	// With rootless podman the default "pasta" mode does not support
-	// network connect, so the network must be specified at container creation.
+	// Network is the podman network to attach the container to (e.g. "kind")
+	// so cluster nodes can reach the registry by name.
 	Network string
 }
 
@@ -57,9 +56,8 @@ func Exists(name string) bool {
 
 // Create starts the registry container if it does not already exist.
 // The registry must be created after the kind cluster so that cfg.Network
-// ("kind") already exists. With rootless podman, network membership must be
-// declared at container creation time — podman network connect is not
-// supported with the default "pasta" network mode.
+// ("kind") already exists; attaching at creation time makes it reachable by
+// name from the cluster nodes.
 func Create(cfg Config) error {
 	if Exists(cfg.Name) {
 		fmt.Printf("registry container %q already exists, skipping creation\n", cfg.Name)

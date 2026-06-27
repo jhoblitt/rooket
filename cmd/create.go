@@ -33,8 +33,6 @@ var createCmd = &cobra.Command{
   4. Start a local OCI registry container joined to the kind podman network,
      bound to localhost:<registry-port> on the host. The registry must be
      created after the cluster so that the "kind" podman network exists.
-     (With rootless podman, network membership is set at container creation;
-     'podman network connect' is not supported with the default pasta mode.)
   5. Configure containerd on every node to mirror localhost:<registry-port>
      to the registry container (reachable by name on the kind network).
   6. Apply the standard local-registry-hosting ConfigMap to kube-public.
