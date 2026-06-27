@@ -97,6 +97,18 @@ jobs:
           # chart version (a shallow checkout gives a bare SHA -> helm errors)
           fetch-depth: 0
 
+      - name: Ensure ample loop devices for local-PV OSDs
+        run: |
+          set -eux
+          # The kubelet maps each local-PV block volume (the OSD device set) via a
+          # loop device. The runner's snap mounts consume many, and rootless
+          # podman cannot mknod inside the kind node, so create plenty on the host
+          # (privileged kind nodes inherit host /dev). max_loop=0 lets the kernel
+          # allocate them on first use.
+          cat /sys/module/loop/parameters/max_loop 2>/dev/null || true
+          for i in $(seq 0 127); do [ -e "/dev/loop$i" ] || sudo mknod "/dev/loop$i" b 7 "$i"; done
+          ls -1 /dev/loop[0-9]* | wc -l
+
       - name: rooket up (block setup, kind cluster, build, deploy)
         run: |
           # Retry: pulling Ceph images from quay.io during the Rook build is
@@ -137,7 +149,9 @@ jobs:
           kubectl --context kind-rook -n rook-ceph get pods -o wide || true
           kubectl --context kind-rook -n rook-ceph get pvc,pv || true
           kubectl --context kind-rook -n rook-ceph logs -l app=rook-ceph-osd-prepare --tail=100 || true
-          kubectl --context kind-rook -n rook-ceph describe pods -l app=rook-ceph-osd 2>/dev/null | tail -80 || true
+          kubectl --context kind-rook -n rook-ceph describe pods -l app=rook-ceph-osd-prepare 2>/dev/null \
+            | grep -iE 'Init Containers:|State:|Reason:|Events:|Warning|FailedMapVolume|losetup|loop' | tail -50 || true
+          losetup -a | wc -l || true
           podman ps -a || true
           df -h / || true
 
