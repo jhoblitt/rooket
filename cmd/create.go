@@ -88,7 +88,14 @@ Run 'rooket block setup' before 'rooket cluster create' to prepare block devices
 
 		// --- Step 3: Prepare nodes for OSD provisioning ---
 		fmt.Println("==> preparing nodes for OSD provisioning")
-		if err := cluster.PrepareNodes(createName); err != nil {
+		ownDevsByNode := make(map[string][]string)
+		for i := 0; i < createWorkers; i++ {
+			name := workerNodeName(createName, i)
+			for _, d := range workerDisks[i] {
+				ownDevsByNode[name] = append(ownDevsByNode[name], d.HostPath)
+			}
+		}
+		if err := cluster.PrepareNodes(createName, ownDevsByNode); err != nil {
 			return fmt.Errorf("prepare nodes: %w", err)
 		}
 

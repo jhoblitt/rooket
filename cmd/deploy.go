@@ -161,31 +161,28 @@ func installRookCephCluster(dir string) error {
 	fmt.Printf("    release:    %s\n", deployClusterName)
 	fmt.Printf("    namespace:  rook-ceph\n")
 
-	// The kind nodes are privileged and share the host's /dev, so a node-local
-	// device list lets every worker see (and rook mis-attribute) every disk.
-	// Instead back each OSD with a node-pinned local PV: the PV's nodeAffinity
-	// fixes placement to one OSD per worker, and PVC-backed OSDs scope
-	// ceph-volume's listing to the claim rather than the whole host.
+	// Pin one OSD to each worker's own iSCSI disk with an explicit per-node device
+	// list. Every privileged kind node sees every host disk, so naming the device
+	// per node is what keeps Rook from mis-attributing OSDs; this puts the OSD on
+	// Rook's direct device path, with no local PV or kubelet loop device.
 	if deployWorkers > 0 && deployDiskCount > 0 {
-		if err := applyLocalStorage(); err != nil {
-			return err
-		}
 		valuesPath, err := writeClusterStorageValues()
 		if err != nil {
 			return err
 		}
 		defer os.Remove(valuesPath)
-		fmt.Printf("    storage:    %d local-PV OSD(s) via storageClassDeviceSet (one per worker)\n", deployWorkers*deployDiskCount)
+		fmt.Printf("    storage:    %d node-device OSD(s) (one per worker)\n", deployWorkers*deployDiskCount)
 		args = append(args, "-f", valuesPath)
 	}
 
 	return run.Cmd("helm", args...)
 }
 
-// writeClusterStorageValues renders a Helm values file configuring OSDs as a
-// storageClassDeviceSet over the node-pinned local PVs created by
-// applyLocalStorage. PVC-backed OSDs scope ceph-volume's listing to the claim,
-// so each worker ends up with exactly one OSD on its own iSCSI disk. Returns the
+// writeClusterStorageValues renders a Helm values file pinning one OSD to each
+// worker's own iSCSI disk with an explicit per-node device list. Naming the
+// device per node keeps Rook from mis-attributing OSDs (every privileged kind
+// node sees every host disk), so each worker gets exactly one OSD on its own
+// disk via Rook's direct device path — no local PV, no kubelet loop. Returns the
 // file path; the caller removes it.
 func writeClusterStorageValues() (string, error) {
 	var sb strings.Builder
@@ -193,21 +190,21 @@ func writeClusterStorageValues() (string, error) {
 	sb.WriteString("  storage:\n")
 	sb.WriteString("    useAllNodes: false\n")
 	sb.WriteString("    useAllDevices: false\n")
-	sb.WriteString("    storageClassDeviceSets:\n")
-	sb.WriteString("      - name: rooket\n")
-	sb.WriteString(fmt.Sprintf("        count: %d\n", deployWorkers*deployDiskCount))
-	sb.WriteString("        portable: false\n")
-	sb.WriteString("        volumeClaimTemplates:\n")
-	sb.WriteString("          - metadata:\n")
-	sb.WriteString("              name: data\n")
-	sb.WriteString("            spec:\n")
-	sb.WriteString("              storageClassName: rooket-local\n")
-	sb.WriteString("              volumeMode: Block\n")
-	sb.WriteString("              accessModes:\n")
-	sb.WriteString("                - ReadWriteOnce\n")
-	sb.WriteString("              resources:\n")
-	sb.WriteString("                requests:\n")
-	sb.WriteString(fmt.Sprintf("                  storage: %dGi\n", deployDiskSizeGB))
+	sb.WriteString("    nodes:\n")
+	for i := 0; i < deployWorkers; i++ {
+		node := workerNodeName(deployName, i)
+		sb.WriteString(fmt.Sprintf("      - name: %s\n", node))
+		sb.WriteString("        devices:\n")
+		for d := 0; d < deployDiskCount; d++ {
+			iqn := fmt.Sprintf("iqn.%s.local.rooket:%s-worker%d-disk%d",
+				deployIQNDate, deployName, i, d)
+			dev, err := waitForISCSIDevice(iqn)
+			if err != nil {
+				return "", fmt.Errorf("resolve iSCSI device for worker %d disk %d: %w", i, d, err)
+			}
+			sb.WriteString(fmt.Sprintf("          - name: %s\n", dev))
+		}
+	}
 
 	f, err := os.CreateTemp("", "rooket-cluster-values-*.yaml")
 	if err != nil {
@@ -222,63 +219,6 @@ func writeClusterStorageValues() (string, error) {
 	}
 	fmt.Printf("%s", sb.String())
 	return f.Name(), nil
-}
-
-// applyLocalStorage creates the no-provisioner StorageClass and one block-mode
-// local PersistentVolume per iSCSI disk. Each PV's nodeAffinity pins it to the
-// worker that owns the disk, so the storageClassDeviceSet's WaitForFirstConsumer
-// claims bind one OSD to each node.
-func applyLocalStorage() error {
-	fmt.Printf("==> applying local-PV StorageClass and PersistentVolumes\n")
-	return run.CmdWithStdin(strings.NewReader(localStorageManifest()),
-		"kubectl", "apply", "--context", deployKubeContext, "-f", "-")
-}
-
-// localStorageManifest renders the no-provisioner StorageClass and a node-pinned,
-// block-mode local PV for each worker's iSCSI disk(s).
-func localStorageManifest() string {
-	var sb strings.Builder
-	sb.WriteString(`apiVersion: storage.k8s.io/v1
-kind: StorageClass
-metadata:
-  name: rooket-local
-provisioner: kubernetes.io/no-provisioner
-volumeBindingMode: WaitForFirstConsumer
-reclaimPolicy: Retain
-`)
-	for i := 0; i < deployWorkers; i++ {
-		node := workerNodeName(deployName, i)
-		for d := 0; d < deployDiskCount; d++ {
-			byPath := fmt.Sprintf(
-				"/dev/disk/by-path/ip-127.0.0.1:3260-iscsi-iqn.%s.local.rooket:%s-worker%d-disk%d-lun-0",
-				deployIQNDate, deployName, i, d)
-			sb.WriteString(fmt.Sprintf(`---
-apiVersion: v1
-kind: PersistentVolume
-metadata:
-  name: rooket-osd-%s-disk%d
-spec:
-  capacity:
-    storage: %dGi
-  volumeMode: Block
-  accessModes:
-    - ReadWriteOnce
-  persistentVolumeReclaimPolicy: Retain
-  storageClassName: rooket-local
-  local:
-    path: %q
-  nodeAffinity:
-    required:
-      nodeSelectorTerms:
-        - matchExpressions:
-            - key: kubernetes.io/hostname
-              operator: In
-              values:
-                - %s
-`, node, d, deployDiskSizeGB, byPath, node))
-		}
-	}
-	return sb.String()
 }
 
 // workerNodeName returns the kind/k8s node name for worker index i. kind names
@@ -315,6 +255,6 @@ func init() {
 	pf.StringVar(&deployName, "name", "rook", "kind cluster name (for node-name and iSCSI by-path derivation)")
 	pf.IntVar(&deployWorkers, "workers", 3, "worker node count (for per-node OSD device pinning)")
 	pf.IntVar(&deployDiskCount, "disk-count", 1, "iSCSI disks per worker (0 disables OSD device pinning)")
-	pf.IntVar(&deployDiskSizeGB, "disk-size", 10, "disk size in GiB (must match 'rooket block setup'; used for local-PV capacity)")
+	pf.IntVar(&deployDiskSizeGB, "disk-size", 10, "disk size in GiB (matches 'rooket block setup')")
 	pf.StringVar(&deployIQNDate, "iqn-date", "2003-01", "IQN date component matching 'rooket block setup'")
 }

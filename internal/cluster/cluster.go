@@ -238,14 +238,28 @@ func Nodes(clusterName string) ([]string, error) {
 //     device-mapper devices: the node shares the host's /sys (which advertises
 //     those dm devices) but not its /dev/mapper, so ceph-volume's full-device
 //     scan would otherwise crash on the missing nodes and provision no OSDs.
+//   - removes every other worker's OSD device node from this node's /dev so each
+//     node sees only its own disk. The nodes share the host's /dev, so otherwise
+//     each node's global ceph-volume scan adopts all OSDs and Rook mis-attributes
+//     them onto one node. /dev is a per-container tmpfs (so the removal is
+//     node-local) and Rook's OSD pods bind-mount the node's /dev, so the mask
+//     reaches ceph-volume. ownDevsByNode maps node name -> the OSD device(s) it keeps.
 //
 // Per-node failures are logged, not fatal. The /run/udev and /dev/disk
 // bind-mounts live in the kind config, not here.
-func PrepareNodes(clusterName string) error {
+func PrepareNodes(clusterName string, ownDevsByNode map[string][]string) error {
 	nodes, err := Nodes(clusterName)
 	if err != nil {
 		return err
 	}
+
+	allOSDDevs := map[string]bool{}
+	for _, devs := range ownDevsByNode {
+		for _, d := range devs {
+			allOSDDevs[d] = true
+		}
+	}
+
 	for _, node := range nodes {
 		if err := run.Cmd("podman", "exec", node, "mount", "-o", "remount,rw", "/sys"); err != nil {
 			fmt.Printf("warning: remount /sys read-write on node %s: %v\n", node, err)
@@ -255,6 +269,18 @@ func PrepareNodes(clusterName string) error {
 		}
 		if err := run.Cmd("podman", "exec", node, "dmsetup", "mknodes"); err != nil {
 			fmt.Printf("warning: dmsetup mknodes on node %s: %v\n", node, err)
+		}
+		keep := map[string]bool{}
+		for _, d := range ownDevsByNode[node] {
+			keep[d] = true
+		}
+		for dev := range allOSDDevs {
+			if keep[dev] {
+				continue
+			}
+			if err := run.Cmd("podman", "exec", node, "rm", "-f", dev); err != nil {
+				fmt.Printf("warning: mask foreign OSD device %s on node %s: %v\n", dev, node, err)
+			}
 		}
 	}
 	return nil
