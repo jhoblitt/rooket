@@ -8,7 +8,8 @@
 //   - ROOK_DIR points at a Rook source tree (its charts are deployed).
 //   - The iSCSI OSD block devices already exist ('rooket block setup', which
 //     needs root); the suite runs up/down with --skip-block by default.
-//   - podman, kind, kubectl, helm and a Go toolchain are on PATH.
+//   - The container engine (podman by default, or docker via $ROOKET_ENGINE),
+//     kind, kubectl, helm and a Go toolchain are on PATH.
 //
 // Run with:  go test -tags e2e ./test/e2e/ -timeout 60m
 package e2e
@@ -60,9 +61,8 @@ var _ = BeforeSuite(func() {
 	}
 	kubeCtx = "kind-" + clusterName
 
-	// Use a prebuilt binary if given (CI builds it as the runner user, then runs
-	// the suite under sudo — avoids running the go toolchain as root); otherwise
-	// build it from the repo.
+	// Use a prebuilt binary if given (CI builds rooket up front and passes
+	// ROOKET_BIN); otherwise build it from the repo.
 	if b := os.Getenv("ROOKET_BIN"); b != "" {
 		abs, err := filepath.Abs(b)
 		Expect(err).NotTo(HaveOccurred())
