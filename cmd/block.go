@@ -100,11 +100,18 @@ func blockSetupRun(_ *cobra.Command, _ []string) error {
 		}
 	}
 
-	// Step 2: Privileged iSCSI setup via a single shell script.
-	fmt.Println("==> configuring iSCSI targets")
-	script := buildISCSIScript(initIQN, disks, blockSetupDiskSizeGB)
-	if err := runPrivilegedScript(script); err != nil {
-		return fmt.Errorf("iSCSI setup failed.\n\nRun the following script manually with root privileges:\n\n%s\nError: %w", script, err)
+	// Step 2: Privileged iSCSI setup via a single shell script, unless every
+	// target is already present. Checking the (world-readable) by-path symlinks
+	// first means a re-run with nothing to do skips the privileged step and its
+	// sudo/pkexec prompt.
+	if allISCSIDevicesPresent(disks) {
+		fmt.Println("==> iSCSI targets already present, skipping privileged setup")
+	} else {
+		fmt.Println("==> configuring iSCSI targets")
+		script := buildISCSIScript(initIQN, disks, blockSetupDiskSizeGB)
+		if err := runPrivilegedScript(script); err != nil {
+			return fmt.Errorf("iSCSI setup failed.\n\nRun the following script manually with root privileges:\n\n%s\nError: %w", script, err)
+		}
 	}
 
 	// Step 3: Wait for block devices to appear and print their paths.
@@ -240,9 +247,14 @@ func buildISCSIScript(initIQN string, disks []iscsiDisk, sizeGB int) string {
 	return sb.String()
 }
 
-// runPrivilegedScript runs a shell script with root privileges, trying sudo -n
-// first and falling back to pkexec (via a temp file so pkexec can find it).
+// runPrivilegedScript runs a shell script with root privileges: directly when
+// already root, otherwise via sudo -n (which never prompts) and finally pkexec
+// (through a temp file so pkexec can find it). pkexec is the only step that can
+// prompt, so callers should skip this entirely when there is no work to do.
 func runPrivilegedScript(script string) error {
+	if os.Geteuid() == 0 {
+		return run.CmdWithStdin(strings.NewReader(script), "sh")
+	}
 	if err := run.CmdWithStdin(strings.NewReader(script), "sudo", "-n", "sh"); err == nil {
 		return nil
 	}
@@ -260,6 +272,7 @@ func runPrivilegedScript(script string) error {
 		if err := os.Chmod(f.Name(), 0o700); err != nil {
 			return err
 		}
+		fmt.Println("==> requesting root via pkexec (you may be prompted to authenticate)")
 		if err := run.Cmd("pkexec", "sh", f.Name()); err == nil {
 			return nil
 		}
@@ -267,22 +280,59 @@ func runPrivilegedScript(script string) error {
 	return fmt.Errorf("all privilege-escalation strategies failed")
 }
 
+// iscsiByPathLink returns the /dev/disk/by-path symlink for a target's LUN 0.
+func iscsiByPathLink(targetIQN string) string {
+	return fmt.Sprintf("/dev/disk/by-path/ip-127.0.0.1:3260-iscsi-%s-lun-0", targetIQN)
+}
+
+// resolveDeviceLink reads a symlink and returns its target as an absolute path,
+// or "" if the link does not exist. No privileges are required: the by-path
+// symlinks are world-readable.
+func resolveDeviceLink(link string) string {
+	target, err := os.Readlink(link)
+	if err != nil || target == "" {
+		return ""
+	}
+	if filepath.IsAbs(target) {
+		return target
+	}
+	return filepath.Clean(filepath.Join(filepath.Dir(link), target))
+}
+
+// iscsiDevicePresent reports whether the target's LUN is already attached: the
+// by-path symlink resolves and the device node it points to exists (the os.Stat
+// guards against a dangling symlink to a removed device).
+func iscsiDevicePresent(targetIQN string) bool {
+	dev := resolveDeviceLink(iscsiByPathLink(targetIQN))
+	if dev == "" {
+		return false
+	}
+	_, err := os.Stat(dev)
+	return err == nil
+}
+
+// allISCSIDevicesPresent reports whether every disk's iSCSI device is already
+// attached, so the privileged setup step can be skipped.
+func allISCSIDevicesPresent(disks []iscsiDisk) bool {
+	for _, d := range disks {
+		if !iscsiDevicePresent(d.targetIQN) {
+			return false
+		}
+	}
+	return len(disks) > 0
+}
+
 // waitForISCSIDevice waits up to 10 s for the /dev/disk/by-path symlink
 // for the given target IQN to appear, then returns the resolved device path.
 func waitForISCSIDevice(targetIQN string) (string, error) {
-	link := fmt.Sprintf("/dev/disk/by-path/ip-127.0.0.1:3260-iscsi-%s-lun-0", targetIQN)
 	deadline := time.Now().Add(10 * time.Second)
 	for time.Now().Before(deadline) {
-		target, err := os.Readlink(link)
-		if err == nil && target != "" {
-			if filepath.IsAbs(target) {
-				return target, nil
-			}
-			return filepath.Clean(filepath.Join(filepath.Dir(link), target)), nil
+		if dev := resolveDeviceLink(iscsiByPathLink(targetIQN)); dev != "" {
+			return dev, nil
 		}
 		time.Sleep(200 * time.Millisecond)
 	}
-	return "", fmt.Errorf("device for %s not found after 10s (expected symlink at %s)", targetIQN, link)
+	return "", fmt.Errorf("device for %s not found after 10s (expected symlink at %s)", targetIQN, iscsiByPathLink(targetIQN))
 }
 
 func init() {
