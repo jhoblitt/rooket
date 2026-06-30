@@ -93,6 +93,43 @@ var _ = AfterSuite(func() {
 	_, _ = rooketRun(10*time.Minute, args...)
 })
 
+// AfterEach dumps cluster diagnostics to the Ginkgo log when a spec fails, so CI
+// (where AfterSuite then tears the cluster down) still captures the cause.
+var _ = AfterEach(func() {
+	if !CurrentSpecReport().Failed() {
+		return
+	}
+	GinkgoWriter.Println("\n=================== FAILURE DIAGNOSTICS ===================")
+	dumps := []struct {
+		label string
+		args  []string
+	}{
+		{"pods -o wide", []string{"get", "pods", "-o", "wide"}},
+		{"cephcluster status", []string{"get", "cephcluster", "-o", "jsonpath={.items[0].status.phase} {.items[0].status.message}"}},
+		{"osd-prepare logs", []string{"logs", "--prefix", "-l", "app=rook-ceph-osd-prepare", "--tail=120"}},
+		{"osd-prepare describe", []string{"describe", "pods", "-l", "app=rook-ceph-osd-prepare"}},
+		{"operator log tail", []string{"logs", "-l", "app=rook-ceph-operator", "--tail=120"}},
+	}
+	for _, d := range dumps {
+		out, _ := kubectlNS(d.args...)
+		GinkgoWriter.Printf("----- %s -----\n%s\n", d.label, tail(out, 60))
+	}
+	GinkgoWriter.Printf("----- node block devices + loops -----\n%s\n", nodeDevDump())
+})
+
+func nodeDevDump() string {
+	cmd := exec.Command("kind", "get", "nodes", "--name", clusterName)
+	cmd.Env = append(os.Environ(), "KIND_EXPERIMENTAL_PROVIDER=podman")
+	out, _ := cmd.Output()
+	var b strings.Builder
+	for _, node := range strings.Fields(string(out)) {
+		o, _ := runOut(30*time.Second, "podman", "exec", node, "sh", "-c",
+			"echo sd: $(ls -d /dev/sd* 2>/dev/null); echo loops: $(losetup -a 2>/dev/null | wc -l)")
+		b.WriteString(node + ": " + strings.TrimSpace(o) + "\n")
+	}
+	return b.String()
+}
+
 // --- command helpers ---
 
 // rooketRun runs the rooket binary, streaming output to the Ginkgo log while
