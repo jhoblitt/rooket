@@ -354,13 +354,18 @@ func InstallPrometheusOperatorCRDs(clusterName, releaseName, version string) err
 		return fmt.Errorf("update prometheus-community helm repo: %w", err)
 	}
 
+	// Pin the release namespace: rooket later switches the kube-context's default
+	// namespace to rook-ceph, so an unpinned install lands in a different namespace
+	// on re-run and collides with the CRDs' helm ownership annotations.
 	return run.Cmd(
 		"helm",
 		"--kube-context", "kind-"+clusterName,
+		"-n", "rook-ceph",
 		"upgrade", "--install",
 		releaseName,
 		"prometheus-community/prometheus-operator-crds",
 		"--version", version,
+		"--create-namespace",
 	)
 }
 
