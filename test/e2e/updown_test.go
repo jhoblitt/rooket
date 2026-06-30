@@ -61,6 +61,25 @@ var _ = Describe("rooket up/down", Ordered, func() {
 		}, 2*time.Minute, 15*time.Second).Should(Succeed())
 	})
 
+	It("stays healthy when up is re-run (idempotent)", func() {
+		// --skip-build: the image is already in the registry from the first up;
+		// this exercises re-running create+deploy against a live cluster.
+		args := []string{"up", "--skip-build", "--dir", rookDir, "--workers", workers, "--name", clusterName}
+		if skipBlock {
+			args = append(args, "--skip-block")
+		}
+		out, err := rooketRun(15*time.Minute, args...)
+		Expect(err).NotTo(HaveOccurred(), "re-running rooket up failed:\n%s", tail(out, 40))
+
+		Eventually(func(g Gomega) {
+			s := cephTool(g, "-s")
+			m := reOsdUp.FindStringSubmatch(s)
+			g.Expect(m).NotTo(BeNil(), "no osd line:\n%s", s)
+			g.Expect(m[2]).To(Equal(workers), "not all OSDs up after re-up:\n%s", s)
+			g.Expect(s).NotTo(ContainSubstring("HEALTH_ERR"), "unhealthy after re-up:\n%s", s)
+		}, 3*time.Minute, 15*time.Second).Should(Succeed())
+	})
+
 	It("tears the cluster down and leaves the disks clean", func() {
 		args := []string{"down", "--workers", workers, "--name", clusterName}
 		if skipBlock {
