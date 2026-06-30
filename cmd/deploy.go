@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/spf13/cobra"
 
@@ -18,6 +19,11 @@ var (
 	deployOperatorName   string
 	deployClusterName    string
 	deployKubeContext    string
+	deployName           string
+	deployWorkers        int
+	deployDiskCount      int
+	deployDiskSizeGB     int
+	deployIQNDate        string
 )
 
 var deployCmd = &cobra.Command{
@@ -140,20 +146,89 @@ func installRookCephOperator(dir string) error {
 func installRookCephCluster(dir string) error {
 	chartPath := filepath.Join(dir, "deploy", "charts", "rook-ceph-cluster")
 
-	fmt.Printf("==> deploying rook-ceph-cluster\n")
-	fmt.Printf("    chart:      %s\n", chartPath)
-	fmt.Printf("    release:    %s\n", deployClusterName)
-	fmt.Printf("    namespace:  rook-ceph\n")
-
-	return run.Cmd(
-		"helm",
+	args := []string{
 		"--kube-context", deployKubeContext,
 		"-n", "rook-ceph",
 		"upgrade", "--install", "--create-namespace",
 		deployClusterName,
 		chartPath,
 		"--set", "operatorNamespace=rook-ceph",
-	)
+		"--set", "toolbox.enabled=true",
+	}
+
+	fmt.Printf("==> deploying rook-ceph-cluster\n")
+	fmt.Printf("    chart:      %s\n", chartPath)
+	fmt.Printf("    release:    %s\n", deployClusterName)
+	fmt.Printf("    namespace:  rook-ceph\n")
+
+	// Pin one OSD to each worker's own iSCSI disk with an explicit per-node device
+	// list. Every privileged kind node sees every host disk, so naming the device
+	// per node is what keeps Rook from mis-attributing OSDs; this puts the OSD on
+	// Rook's direct device path, with no local PV or kubelet loop device.
+	if deployWorkers > 0 && deployDiskCount > 0 {
+		valuesPath, err := writeClusterStorageValues()
+		if err != nil {
+			return err
+		}
+		defer os.Remove(valuesPath)
+		fmt.Printf("    storage:    %d node-device OSD(s) (one per worker)\n", deployWorkers*deployDiskCount)
+		args = append(args, "-f", valuesPath)
+	}
+
+	return run.Cmd("helm", args...)
+}
+
+// writeClusterStorageValues renders a Helm values file pinning one OSD to each
+// worker's own iSCSI disk with an explicit per-node device list. Naming the
+// device per node keeps Rook from mis-attributing OSDs (every privileged kind
+// node sees every host disk), so each worker gets exactly one OSD on its own
+// disk via Rook's direct device path — no local PV, no kubelet loop. Returns the
+// file path; the caller removes it.
+func writeClusterStorageValues() (string, error) {
+	var sb strings.Builder
+	sb.WriteString("cephClusterSpec:\n")
+	sb.WriteString("  storage:\n")
+	sb.WriteString("    useAllNodes: false\n")
+	sb.WriteString("    useAllDevices: false\n")
+	sb.WriteString("    nodes:\n")
+	for i := 0; i < deployWorkers; i++ {
+		node := workerNodeName(deployName, i)
+		sb.WriteString(fmt.Sprintf("      - name: %s\n", node))
+		sb.WriteString("        devices:\n")
+		for d := 0; d < deployDiskCount; d++ {
+			iqn := fmt.Sprintf("iqn.%s.local.rooket:%s-worker%d-disk%d",
+				deployIQNDate, deployName, i, d)
+			dev, err := waitForISCSIDevice(iqn)
+			if err != nil {
+				return "", fmt.Errorf("resolve iSCSI device for worker %d disk %d: %w", i, d, err)
+			}
+			sb.WriteString(fmt.Sprintf("          - name: %s\n", dev))
+		}
+	}
+
+	f, err := os.CreateTemp("", "rooket-cluster-values-*.yaml")
+	if err != nil {
+		return "", fmt.Errorf("create cluster values file: %w", err)
+	}
+	if _, err := f.WriteString(sb.String()); err != nil {
+		f.Close()
+		return "", fmt.Errorf("write cluster values file: %w", err)
+	}
+	if err := f.Close(); err != nil {
+		return "", err
+	}
+	fmt.Printf("%s", sb.String())
+	return f.Name(), nil
+}
+
+// workerNodeName returns the kind/k8s node name for worker index i. kind names
+// the first worker "<cluster>-worker" and the rest "<cluster>-worker2",
+// "<cluster>-worker3", ...
+func workerNodeName(cluster string, i int) string {
+	if i == 0 {
+		return cluster + "-worker"
+	}
+	return fmt.Sprintf("%s-worker%d", cluster, i+1)
 }
 
 // switchKubectlNamespace sets the default kubectl namespace if the krew ns
@@ -177,4 +252,9 @@ func init() {
 	pf.StringVar(&deployImageName, "image-name", "ceph", "image name without architecture suffix")
 	pf.StringVar(&deployOperatorName, "operator-release", "rook-ceph", "rook-ceph operator helm release name")
 	pf.StringVar(&deployClusterName, "cluster-release", "rook-ceph-cluster", "rook-ceph-cluster helm release name")
+	pf.StringVar(&deployName, "name", "rook", "kind cluster name (for node-name and iSCSI by-path derivation)")
+	pf.IntVar(&deployWorkers, "workers", 3, "worker node count (for per-node OSD device pinning)")
+	pf.IntVar(&deployDiskCount, "disk-count", 1, "iSCSI disks per worker (0 disables OSD device pinning)")
+	pf.IntVar(&deployDiskSizeGB, "disk-size", 10, "disk size in GiB (matches 'rooket block setup')")
+	pf.StringVar(&deployIQNDate, "iqn-date", "2003-01", "IQN date component matching 'rooket block setup'")
 }

@@ -17,7 +17,7 @@ var (
 var loadCmd = &cobra.Command{
 	Use:   "load <image>",
 	Short: "Tag and push a local image to the cluster's OCI registry",
-	Long: `load makes a locally-available podman image available inside the kind cluster
+	Long: `load makes a locally-available image available inside the kind cluster
 by pushing it to the local registry.
 
 The image is re-tagged as localhost:<registry-port>/<basename> and pushed.
@@ -41,12 +41,12 @@ After loading, reference the image in your Rook manifests as:
 		dest := fmt.Sprintf("localhost:%d/%s", loadRegistryPort, destBase)
 
 		fmt.Printf("==> tagging %s → %s\n", src, dest)
-		if err := run.Cmd("podman", "tag", src, dest); err != nil {
+		if err := run.Cmd(containerEngine.String(), "tag", src, dest); err != nil {
 			return fmt.Errorf("tag image: %w", err)
 		}
 
 		fmt.Printf("==> pushing %s\n", dest)
-		if err := run.Cmd("podman", "push", "--tls-verify=false", dest); err != nil {
+		if err := run.Cmd(containerEngine.String(), containerEngine.PushArgs(dest)...); err != nil {
 			return fmt.Errorf("push image: %w", err)
 		}
 

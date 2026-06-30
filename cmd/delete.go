@@ -9,31 +9,41 @@ import (
 	"github.com/jhoblitt/rooket/internal/registry"
 )
 
-var deleteName string
+var (
+	deleteName string
+	deleteZap  bool
+)
 
 var deleteCmd = &cobra.Command{
 	Use:   "delete",
 	Short: "Delete the kind cluster and associated registry",
 	Long: `delete tears down the cluster created by 'rooket cluster create':
 
-  1. Delete the kind cluster.
-  2. Stop and remove the local OCI registry container.
+  1. Delete the kind cluster (releasing the OSD disks).
+  2. Zap the OSD disks (unless --zap=false) so the next bring-up starts clean:
+     re-create the iSCSI disk images as sparse and refresh the udev cache.
+  3. Stop and remove the local OCI registry container.
 
-iSCSI block devices set up by 'rooket block setup' are not affected and must
-be torn down separately if desired.
+The iSCSI targets themselves set up by 'rooket block setup' are not removed and
+must be torn down separately if desired.
 `,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		regName := registry.ContainerName(deleteName)
 
-		// --- Step 1: kind cluster ---
+		// --- Step 1: kind cluster (releases the OSD disks) ---
 		fmt.Println("==> deleting kind cluster")
 		if err := cluster.Delete(deleteName); err != nil {
 			fmt.Printf("warning: delete cluster: %v\n", err)
 		}
 
-		// --- Step 2: registry container ---
+		// --- Step 2: zap OSD disks now that the nodes have released them ---
+		if deleteZap {
+			cluster.ZapISCSIDisks(containerEngine, deleteName)
+		}
+
+		// --- Step 3: registry container ---
 		fmt.Println("==> deleting local OCI registry")
-		if err := registry.Delete(regName); err != nil {
+		if err := registry.Delete(containerEngine, regName); err != nil {
 			fmt.Printf("warning: delete registry: %v\n", err)
 		}
 
@@ -46,4 +56,5 @@ func init() {
 	clusterCmd.AddCommand(deleteCmd)
 
 	deleteCmd.Flags().StringVar(&deleteName, "name", "rook", "kind cluster name")
+	deleteCmd.Flags().BoolVar(&deleteZap, "zap", true, "re-sparsify (wipe) the OSD disk images during teardown so the next bring-up starts clean")
 }

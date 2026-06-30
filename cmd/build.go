@@ -82,12 +82,12 @@ Example:
 			}
 
 			fmt.Printf("==> tagging %s → %s\n", src, target)
-			if err := run.Cmd("podman", "tag", src, target); err != nil {
+			if err := run.Cmd(containerEngine.String(), "tag", src, target); err != nil {
 				return fmt.Errorf("tag %s: %w", src, err)
 			}
 
 			fmt.Printf("==> pushing %s\n", target)
-			if err := run.Cmd("podman", "push", "--tls-verify=false", target); err != nil {
+			if err := run.Cmd(containerEngine.String(), containerEngine.PushArgs(target)...); err != nil {
 				return fmt.Errorf("push %s: %w", target, err)
 			}
 
@@ -225,12 +225,12 @@ Example:
 		}
 
 		fmt.Printf("==> tagging %s → %s\n", src, target)
-		if err := run.Cmd("podman", "tag", src, target); err != nil {
+		if err := run.Cmd(containerEngine.String(), "tag", src, target); err != nil {
 			return fmt.Errorf("tag %s: %w", src, err)
 		}
 
 		fmt.Printf("==> pushing %s\n", target)
-		if err := run.Cmd("podman", "push", "--tls-verify=false", target); err != nil {
+		if err := run.Cmd(containerEngine.String(), containerEngine.PushArgs(target)...); err != nil {
 			return fmt.Errorf("push %s: %w", target, err)
 		}
 
