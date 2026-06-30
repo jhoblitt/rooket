@@ -34,6 +34,7 @@ var (
 	clusterName = envOr("ROOKET_NAME", "rook")
 	workers     = envOr("ROOKET_WORKERS", "3")
 	skipBlock   = envOr("ROOKET_SKIP_BLOCK", "true") == "true"
+	eng         = envOr("ROOKET_ENGINE", "podman") // engine for the suite's own container/kind calls
 
 	rooketBin string // built in BeforeSuite
 	kubeCtx   string // kind-<name>
@@ -119,11 +120,11 @@ var _ = AfterEach(func() {
 
 func nodeDevDump() string {
 	cmd := exec.Command("kind", "get", "nodes", "--name", clusterName)
-	cmd.Env = append(os.Environ(), "KIND_EXPERIMENTAL_PROVIDER=podman")
+	cmd.Env = append(os.Environ(), "KIND_EXPERIMENTAL_PROVIDER="+eng)
 	out, _ := cmd.Output()
 	var b strings.Builder
 	for _, node := range strings.Fields(string(out)) {
-		o, _ := runOut(30*time.Second, "podman", "exec", node, "sh", "-c",
+		o, _ := runOut(30*time.Second, eng, "exec", node, "sh", "-c",
 			"echo sd: $(ls -d /dev/sd* 2>/dev/null); echo loops: $(losetup -a 2>/dev/null | wc -l)")
 		b.WriteString(node + ": " + strings.TrimSpace(o) + "\n")
 	}
@@ -165,7 +166,7 @@ func cephTool(g Gomega, args ...string) string {
 // kindNodeImageID returns a locally-present kindest/node image ID for the
 // throwaway privileged container used to inspect host /dev.
 func kindNodeImageID() string {
-	out, _ := runOut(30*time.Second, "podman", "images", "--format", "{{.ID}} {{.Repository}}")
+	out, _ := runOut(30*time.Second, eng, "images", "--format", "{{.ID}} {{.Repository}}")
 	for _, line := range strings.Split(out, "\n") {
 		if strings.Contains(line, "kindest/node") {
 			if f := strings.Fields(line); len(f) > 0 {
@@ -176,12 +177,14 @@ func kindNodeImageID() string {
 	return ""
 }
 
-func podmanPrivileged(script string) string {
+// enginePrivileged runs a throwaway privileged container (with the configured
+// engine) that shares the host /dev, used to inspect loop devices / disk state.
+func enginePrivileged(script string) string {
 	img := kindNodeImageID()
 	if img == "" {
 		return ""
 	}
-	out, _ := runOut(2*time.Minute, "podman", "run", "--rm", "--privileged",
+	out, _ := runOut(2*time.Minute, eng, "run", "--rm", "--privileged",
 		"-v", "/dev:/dev", "--entrypoint", "sh", img, "-c", script)
 	return out
 }

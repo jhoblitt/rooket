@@ -123,7 +123,7 @@ func osdNodes() []string {
 }
 
 func loopCount() int {
-	n, _ := strconv.Atoi(strings.TrimSpace(podmanPrivileged("losetup -a 2>/dev/null | wc -l")))
+	n, _ := strconv.Atoi(strings.TrimSpace(enginePrivileged("losetup -a 2>/dev/null | wc -l")))
 	return n
 }
 
@@ -138,7 +138,7 @@ func pgsSettled(g Gomega) {
 
 func kindClusters() []string {
 	cmd := exec.Command("kind", "get", "clusters")
-	cmd.Env = append(os.Environ(), "KIND_EXPERIMENTAL_PROVIDER=podman")
+	cmd.Env = append(os.Environ(), "KIND_EXPERIMENTAL_PROVIDER="+eng)
 	out, _ := cmd.Output() // cluster names on stdout; provider notes go to stderr
 	var cs []string
 	for _, l := range strings.Split(string(out), "\n") {
@@ -156,6 +156,6 @@ for l in /dev/disk/by-path/ip-127.0.0.1:3260-iscsi-iqn.*.local.rooket:` + cluste
   blkid -p "$l" >/dev/null 2>&1 && n=$((n+1))
 done
 echo $n`
-	n, _ := strconv.Atoi(strings.TrimSpace(podmanPrivileged(script)))
+	n, _ := strconv.Atoi(strings.TrimSpace(enginePrivileged(script)))
 	return n
 }
