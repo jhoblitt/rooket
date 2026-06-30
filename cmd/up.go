@@ -40,6 +40,17 @@ Example:
   rooket up --dir ~/github/rook
 `,
 	RunE: func(cmd *cobra.Command, args []string) error {
+		// Resolve the rook source dir up front so a missing clone fails fast,
+		// before we stand up a cluster. Only build and deploy consume it.
+		var rookDir string
+		if !upSkipBuild || !upSkipDeploy {
+			var err error
+			rookDir, err = resolveRookDir(upRookDir)
+			if err != nil {
+				return err
+			}
+		}
+
 		// --- Step 1: block setup ---
 		if upSkipBlock || upDiskCount == 0 {
 			fmt.Println("==> [1/4] block setup (skipped)")
@@ -73,7 +84,7 @@ Example:
 			fmt.Println("==> [3/4] build (skipped)")
 		} else {
 			fmt.Println("==> [3/4] build")
-			buildDir = upRookDir
+			buildDir = rookDir
 			buildRegistryPort = upRegistryPort
 			if err := buildCmd.RunE(buildCmd, nil); err != nil {
 				return fmt.Errorf("build: %w", err)
@@ -85,7 +96,7 @@ Example:
 			fmt.Println("==> [4/4] deploy (skipped)")
 		} else {
 			fmt.Println("==> [4/4] deploy")
-			deployDir = upRookDir
+			deployDir = rookDir
 			deployRegistryPort = upRegistryPort
 			deployKubeContext = "kind-" + upName
 			deployOperatorName = upOperatorRelease
@@ -115,7 +126,7 @@ func init() {
 	upCmd.Flags().IntVar(&upDiskSizeGB, "disk-size", 10, "disk size in GiB")
 	upCmd.Flags().IntVar(&upRegistryPort, "registry-port", 5001, "host port for the local OCI registry")
 	upCmd.Flags().StringVar(&upIQNDate, "iqn-date", "2003-01", "IQN date component (YYYY-MM)")
-	upCmd.Flags().StringVar(&upRookDir, "dir", "", "path to the rook source directory (default: current directory)")
+	upCmd.Flags().StringVar(&upRookDir, "dir", "", "path to the rook source directory (default: $ROOK_DIR, else the rook clone found by walking up from the current directory)")
 	upCmd.Flags().StringVar(&upPromVersion, "prometheus-operator-crds-version", "29.0.0", "version of the prometheus-operator-crds helm chart")
 	upCmd.Flags().StringVar(&upPromRelease, "prometheus-operator-crds-release", "my-prometheus-operator-crds", "helm release name for prometheus-operator-crds")
 	upCmd.Flags().StringVar(&upOperatorRelease, "operator-release", "rook-ceph", "rook-ceph operator helm release name")
