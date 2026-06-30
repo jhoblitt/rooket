@@ -28,6 +28,11 @@ The iSCSI targets themselves set up by 'rooket block setup' are not removed and
 must be torn down separately if desired.
 `,
 	RunE: func(cmd *cobra.Command, args []string) error {
+		name, err := useCluster(deleteName)
+		if err != nil {
+			return err
+		}
+		deleteName = name
 		regName := registry.ContainerName(deleteName)
 
 		// --- Step 1: kind cluster (releases the OSD disks) ---
@@ -55,6 +60,6 @@ must be torn down separately if desired.
 func init() {
 	clusterCmd.AddCommand(deleteCmd)
 
-	deleteCmd.Flags().StringVar(&deleteName, "name", "rook", "kind cluster name")
+	deleteCmd.Flags().StringVar(&deleteName, "name", "", "kind cluster name")
 	deleteCmd.Flags().BoolVar(&deleteZap, "zap", true, "re-sparsify (wipe) the OSD disk images during teardown so the next bring-up starts clean")
 }

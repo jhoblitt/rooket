@@ -61,6 +61,13 @@ var _ = BeforeSuite(func() {
 	}
 	kubeCtx = "kind-" + clusterName
 
+	// rooket writes each cluster's kubeconfig under its own state dir, not
+	// ~/.kube/config; point the suite's kubectl/helm calls at it.
+	home, herr := os.UserHomeDir()
+	Expect(herr).NotTo(HaveOccurred())
+	Expect(os.Setenv("KUBECONFIG",
+		filepath.Join(home, ".local", "share", "rooket", clusterName, "kubeconfig"))).To(Succeed())
+
 	// Use a prebuilt binary if given (CI builds rooket up front and passes
 	// ROOKET_BIN); otherwise build it from the repo.
 	if b := os.Getenv("ROOKET_BIN"); b != "" {

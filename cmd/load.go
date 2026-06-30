@@ -34,6 +34,13 @@ After loading, reference the image in your Rook manifests as:
 `,
 	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
+		name := clusterName(loadName)
+		port, err := resolveRegistryPort(name, loadRegistryPort, cmd.Flags().Changed("registry-port"))
+		if err != nil {
+			return err
+		}
+		loadRegistryPort = port
+
 		src := args[0]
 
 		// Derive the destination tag: strip any host prefix, keep name:tag.
@@ -74,6 +81,6 @@ func imageBasename(ref string) string {
 func init() {
 	rootCmd.AddCommand(loadCmd)
 
-	loadCmd.Flags().StringVar(&loadName, "name", "rook", "kind cluster name (used for context only)")
+	loadCmd.Flags().StringVar(&loadName, "name", "", "kind cluster name (used for context only)")
 	loadCmd.Flags().IntVar(&loadRegistryPort, "registry-port", 5001, "host port of the local OCI registry")
 }

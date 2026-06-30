@@ -10,7 +10,7 @@ var (
 	upName            string
 	upWorkers         int
 	upDiskCount       int
-	upDiskSizeGB     int
+	upDiskSizeGB      int
 	upRegistryPort    int
 	upIQNDate         string
 	upRookDir         string
@@ -51,6 +51,20 @@ Example:
 			}
 		}
 
+		name, err := useCluster(upName)
+		if err != nil {
+			return err
+		}
+		upName = name
+		port, err := resolveRegistryPort(upName, upRegistryPort, cmd.Flags().Changed("registry-port"))
+		if err != nil {
+			return err
+		}
+		if err := writeRegistryPort(upName, port); err != nil {
+			return err
+		}
+		upRegistryPort = port
+
 		// --- Step 1: block setup ---
 		if upSkipBlock || upDiskCount == 0 {
 			fmt.Println("==> [1/4] block setup (skipped)")
@@ -85,6 +99,7 @@ Example:
 		} else {
 			fmt.Println("==> [3/4] build")
 			buildDir = rookDir
+			buildName = upName
 			buildRegistryPort = upRegistryPort
 			if err := buildCmd.RunE(buildCmd, nil); err != nil {
 				return fmt.Errorf("build: %w", err)
@@ -120,7 +135,7 @@ Example:
 func init() {
 	rootCmd.AddCommand(upCmd)
 
-	upCmd.Flags().StringVar(&upName, "name", "rook", "kind cluster name")
+	upCmd.Flags().StringVar(&upName, "name", "", "kind cluster name")
 	upCmd.Flags().IntVar(&upWorkers, "workers", 3, "number of worker nodes")
 	upCmd.Flags().IntVar(&upDiskCount, "disk-count", 1, "iSCSI disks per worker (0 skips block setup)")
 	upCmd.Flags().IntVar(&upDiskSizeGB, "disk-size", 10, "disk size in GiB")

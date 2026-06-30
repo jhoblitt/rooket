@@ -94,14 +94,29 @@ func GenerateConfig(cfg Config) ([]byte, error) {
 	return buf.Bytes(), nil
 }
 
+// List returns the names of all kind clusters known to the active provider.
+func List() ([]string, error) {
+	out, err := run.Output("kind", "get", "clusters")
+	if err != nil {
+		return nil, err
+	}
+	var names []string
+	for line := range strings.SplitSeq(out, "\n") {
+		if s := strings.TrimSpace(line); s != "" {
+			names = append(names, s)
+		}
+	}
+	return names, nil
+}
+
 // Exists returns true if a kind cluster with the given name already exists.
 func Exists(name string) (bool, error) {
-	out, err := run.Output("kind", "get", "clusters")
+	names, err := List()
 	if err != nil {
 		return false, err
 	}
-	for line := range strings.SplitSeq(out, "\n") {
-		if strings.TrimSpace(line) == name {
+	for _, n := range names {
+		if n == name {
 			return true, nil
 		}
 	}

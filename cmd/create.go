@@ -10,13 +10,13 @@ import (
 )
 
 var (
-	createName              string
-	createWorkers           int
-	createRegistryPort      int
-	createDiskCount         int
-	createISCSIQNDate       string
-	createPromCRDsVersion   string
-	createPromCRDsRelease   string
+	createName            string
+	createWorkers         int
+	createRegistryPort    int
+	createDiskCount       int
+	createISCSIQNDate     string
+	createPromCRDsVersion string
+	createPromCRDsRelease string
 )
 
 var createCmd = &cobra.Command{
@@ -40,6 +40,21 @@ var createCmd = &cobra.Command{
 Run 'rooket block setup' before 'rooket cluster create' to prepare block devices.
 `,
 	RunE: func(cmd *cobra.Command, args []string) error {
+		name, err := useCluster(createName)
+		if err != nil {
+			return err
+		}
+		createName = name
+
+		port, err := resolveRegistryPort(createName, createRegistryPort, cmd.Flags().Changed("registry-port"))
+		if err != nil {
+			return err
+		}
+		if err := writeRegistryPort(createName, port); err != nil {
+			return err
+		}
+		createRegistryPort = port
+
 		regName := registry.ContainerName(createName)
 
 		// --- Step 1: Locate iSCSI block devices ---
@@ -148,7 +163,7 @@ Cluster %q is ready.
 func init() {
 	clusterCmd.AddCommand(createCmd)
 
-	createCmd.Flags().StringVar(&createName, "name", "rook", "kind cluster name")
+	createCmd.Flags().StringVar(&createName, "name", "", "kind cluster name")
 	createCmd.Flags().IntVar(&createWorkers, "workers", 3, "number of worker nodes")
 	createCmd.Flags().IntVar(&createRegistryPort, "registry-port", 5001, "host port for the local OCI registry")
 	createCmd.Flags().IntVar(&createDiskCount, "disk-count", 1, "number of iSCSI disks per worker (0 to skip)")

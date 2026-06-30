@@ -14,12 +14,12 @@ import (
 )
 
 var (
-	blockSetupName      string
-	blockSetupWorkers   int
-	blockSetupDiskCount int
+	blockSetupName       string
+	blockSetupWorkers    int
+	blockSetupDiskCount  int
 	blockSetupDiskSizeGB int
-	blockSetupDataDir   string
-	blockSetupIQNDate   string
+	blockSetupDataDir    string
+	blockSetupIQNDate    string
 )
 
 var (
@@ -58,6 +58,8 @@ rooket tries sudo -n first, then pkexec.
 }
 
 func blockSetupRun(_ *cobra.Command, _ []string) error {
+	blockSetupName = clusterName(blockSetupName)
+
 	dataDir := blockSetupDataDir
 	if dataDir == "" {
 		home, err := os.UserHomeDir()
@@ -147,6 +149,8 @@ sudo -n first, then pkexec.
 }
 
 func blockTeardownRun(_ *cobra.Command, _ []string) error {
+	blockTeardownName = clusterName(blockTeardownName)
+
 	dataDir := blockTeardownDataDir
 	if dataDir == "" {
 		home, err := os.UserHomeDir()
@@ -340,14 +344,14 @@ func init() {
 	blockCmd.AddCommand(blockSetupCmd)
 	blockCmd.AddCommand(blockTeardownCmd)
 
-	blockSetupCmd.Flags().StringVar(&blockSetupName, "name", "rook", "cluster name (used in iSCSI IQN naming)")
+	blockSetupCmd.Flags().StringVar(&blockSetupName, "name", "", "cluster name (used in iSCSI IQN naming)")
 	blockSetupCmd.Flags().IntVar(&blockSetupWorkers, "workers", 3, "number of workers")
 	blockSetupCmd.Flags().IntVar(&blockSetupDiskCount, "disk-count", 1, "disks per worker")
 	blockSetupCmd.Flags().IntVar(&blockSetupDiskSizeGB, "disk-size", 10, "disk size in GiB")
 	blockSetupCmd.Flags().StringVar(&blockSetupDataDir, "data-dir", "", "directory for disk images (default: ~/.local/share/rooket/<name>)")
 	blockSetupCmd.Flags().StringVar(&blockSetupIQNDate, "iqn-date", "2003-01", "date component for IQNs (YYYY-MM)")
 
-	blockTeardownCmd.Flags().StringVar(&blockTeardownName, "name", "rook", "cluster name (used in iSCSI IQN naming)")
+	blockTeardownCmd.Flags().StringVar(&blockTeardownName, "name", "", "cluster name (used in iSCSI IQN naming)")
 	blockTeardownCmd.Flags().IntVar(&blockTeardownWorkers, "workers", 3, "number of workers")
 	blockTeardownCmd.Flags().IntVar(&blockTeardownDiskCount, "disk-count", 1, "disks per worker")
 	blockTeardownCmd.Flags().StringVar(&blockTeardownDataDir, "data-dir", "", "directory for disk images (default: ~/.local/share/rooket/<name>)")

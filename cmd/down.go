@@ -32,6 +32,8 @@ Example:
   rooket down --delete-disks
 `,
 	RunE: func(cmd *cobra.Command, args []string) error {
+		downName = clusterName(downName)
+
 		if downSkipCluster {
 			fmt.Println("==> [1/2] cluster delete (skipped)")
 		} else {
@@ -64,7 +66,7 @@ Example:
 func init() {
 	rootCmd.AddCommand(downCmd)
 
-	downCmd.Flags().StringVar(&downName, "name", "rook", "kind cluster name")
+	downCmd.Flags().StringVar(&downName, "name", "", "kind cluster name")
 	downCmd.Flags().IntVar(&downWorkers, "workers", 3, "number of worker nodes (must match 'up')")
 	downCmd.Flags().IntVar(&downDiskCount, "disk-count", 1, "iSCSI disks per worker (0 skips block teardown)")
 	downCmd.Flags().StringVar(&downIQNDate, "iqn-date", "2003-01", "IQN date component (YYYY-MM)")

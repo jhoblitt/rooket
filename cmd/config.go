@@ -21,6 +21,7 @@ var configCmd = &cobra.Command{
 	Use:   "config",
 	Short: "Print the kind cluster configuration that would be used by 'create'",
 	RunE: func(cmd *cobra.Command, args []string) error {
+		configName = clusterName(configName)
 		regName := registry.ContainerName(configName)
 
 		// Build a representative disk map for display purposes.
@@ -58,7 +59,7 @@ var configCmd = &cobra.Command{
 func init() {
 	rootCmd.AddCommand(configCmd)
 
-	configCmd.Flags().StringVar(&configName, "name", "rook", "kind cluster name")
+	configCmd.Flags().StringVar(&configName, "name", "", "kind cluster name")
 	configCmd.Flags().IntVar(&configWorkers, "workers", 3, "number of worker nodes")
 	configCmd.Flags().IntVar(&configRegistryPort, "registry-port", 5001, "host port for the local OCI registry")
 	configCmd.Flags().IntVar(&configDiskCount, "disk-count", 1, "disks per worker (for illustration)")

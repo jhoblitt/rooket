@@ -103,7 +103,7 @@ jobs:
       - name: Diagnostics (on failure)
         if: failure()
         run: |
-          k() { kubectl --context kind-rook "$@"; }
+          k() { ./rooket kubectl "$@"; }
           k get nodes -o wide || true
           k -n rook-ceph get pods -o wide || true
           k -n rook-ceph get pvc,sc || true
