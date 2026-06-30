@@ -1,13 +1,14 @@
 name: integration
 
 # End-to-end integration test: the ginkgo suite in test/e2e drives the real
-# `rooket up`/`down` on a GitHub-hosted runner (podman/kind/iSCSI), asserting the
-# Rook/Ceph cluster provisions one OSD per worker (node-device, loop-free), settles
-# healthy, serves I/O, and tears down cleanly.
+# `rooket up`/`down` on a GitHub-hosted runner, asserting the Rook/Ceph cluster
+# provisions one OSD per worker (node-device, loop-free), settles healthy, serves
+# I/O, and tears down cleanly.
 #
-# The go toolchain runs as the runner user (build only); rooket and the compiled
-# test binary run under sudo, so rooket drives rootful podman (matching the dev
-# setup — privileged kind nodes need the host's block devices).
+# Uses docker (the runner's preinstalled, rootful engine) via ROOKET_ENGINE, so
+# kind nodes get the host block devices and the local registry works without the
+# rootful-podman gymnastics a runner otherwise needs. iSCSI target setup still
+# needs root, which `rooket block setup` gets via the runner's passwordless sudo.
 
 on:
   pull_request:
@@ -31,12 +32,13 @@ concurrency:
 
 jobs:
   e2e:
-    name: rooket up/down e2e
+    name: rooket up/down e2e (docker)
     runs-on: ubuntu-latest
     timeout-minutes: 120
     env:
       ROOK_REF: ${{ github.event.inputs.rook_ref || 'master' }}
       WORKERS: ${{ github.event.inputs.workers || '3' }}
+      ROOKET_ENGINE: docker
     steps:
       - name: Checkout rooket
         uses: actions/checkout@v4
@@ -46,7 +48,6 @@ jobs:
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
             /opt/hostedtoolcache/CodeQL /usr/local/.ghcup /usr/lib/jvm \
             /usr/share/swift /usr/local/share/powershell || true
-          sudo docker system prune -af || true
           df -h /
 
       - name: Set up Go
@@ -62,7 +63,7 @@ jobs:
           curl -fsSLo ./kubectl "https://dl.k8s.io/release/$(curl -fsSL https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
           sudo install -m 0755 ./kubectl /usr/local/bin/kubectl && rm -f ./kubectl
           curl -fsSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
-          kind version && kubectl version --client && helm version
+          kind version && kubectl version --client && helm version && docker version
 
       - name: Install iSCSI and LVM tooling
         run: |
@@ -88,30 +89,27 @@ jobs:
           go build -o rooket .
           go test -c -tags e2e -o e2e.test ./test/e2e/
 
-      - name: Set up iSCSI OSD disks (rootful)
-        run: sudo env "PATH=$PATH" HOME=/root ./rooket block setup --workers "$WORKERS" --disk-count 1
+      - name: Set up iSCSI OSD disks
+        run: ./rooket block setup --workers "$WORKERS" --disk-count 1
 
-      - name: Run e2e suite (rootful podman)
+      - name: Run e2e suite
         run: |
-          sudo env "PATH=$PATH" HOME=/root DOCKERCMD=podman \
-            ROOK_DIR="${{ github.workspace }}/rook" \
-            ROOKET_BIN="${{ github.workspace }}/rooket" \
-            ROOKET_WORKERS="$WORKERS" \
-            ROOKET_SKIP_BLOCK=true \
+          ROOK_DIR="${{ github.workspace }}/rook" \
+          ROOKET_BIN="${{ github.workspace }}/rooket" \
+          ROOKET_WORKERS="$WORKERS" \
+          ROOKET_SKIP_BLOCK=true \
             ./e2e.test -test.v -test.timeout 100m
 
       - name: Diagnostics (on failure)
         if: failure()
         run: |
-          k() { sudo env "PATH=$PATH" HOME=/root kubectl --context kind-rook "$@"; }
+          k() { kubectl --context kind-rook "$@"; }
           k get nodes -o wide || true
           k -n rook-ceph get pods -o wide || true
           k -n rook-ceph get pvc,sc || true
           k -n rook-ceph logs -l app=rook-ceph-osd-prepare --tail=100 || true
-          k -n rook-ceph describe pods -l app=rook-ceph-osd-prepare 2>/dev/null \
-            | grep -iE 'State:|Reason:|Events:|Warning|FailedMapVolume' | tail -50 || true
           df -h / || true
 
       - name: Tear down (always)
         if: always()
-        run: sudo env "PATH=$PATH" HOME=/root ./rooket down --workers "$WORKERS" --delete-disks || true
+        run: ./rooket down --workers "$WORKERS" --delete-disks || true
