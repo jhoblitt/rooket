@@ -1,11 +1,13 @@
 name: integration
 
-# Full "up" integration test: build rooket, stand up a kind cluster with Rook
-# (block devices, OSDs) via `rooket up`, verify the Ceph cluster is healthy, then
-# tear it all down via `rooket down`. Runs the real podman/kind/iSCSI flow on a
-# GitHub-hosted runner.
+# End-to-end integration test: the ginkgo suite in test/e2e drives the real
+# `rooket up`/`down` on a GitHub-hosted runner (podman/kind/iSCSI), asserting the
+# Rook/Ceph cluster provisions one OSD per worker (node-device, loop-free), settles
+# healthy, serves I/O, and tears down cleanly.
 #
-# rooket and kind run under sudo (rootful podman), matching the development setup.
+# The go toolchain runs as the runner user (build only); rooket and the compiled
+# test binary run under sudo, so rooket drives rootful podman (matching the dev
+# setup — privileged kind nodes need the host's block devices).
 
 on:
   pull_request:
@@ -28,8 +30,8 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  up-down:
-    name: rooket up -> verify -> down
+  e2e:
+    name: rooket up/down e2e
     runs-on: ubuntu-latest
     timeout-minutes: 120
     env:
@@ -70,9 +72,6 @@ jobs:
           sudo modprobe configfs target_core_mod target_core_file iscsi_tcp || true
           sudo systemctl enable --now iscsid
 
-      - name: Build rooket
-        run: go build -o rooket .
-
       - name: Checkout rook
         uses: actions/checkout@v4
         with:
@@ -83,48 +82,36 @@ jobs:
           # chart version (a shallow checkout gives a bare SHA -> helm errors)
           fetch-depth: 0
 
-      - name: rooket up (block setup, kind cluster, build, deploy)
-        run: |
-          # Run as root (rootful podman), matching the development setup.
-          # DOCKERCMD=podman makes rook's make build with podman so rooket can
-          # tag/push the image. Retry to ride out transient Ceph image-pull
-          # flakes; up is re-runnable.
-          n=0
-          until [ "$n" -ge 3 ]; do
-            sudo DOCKERCMD=podman ./rooket up --dir "${{ github.workspace }}/rook" --workers "$WORKERS" && exit 0
-            n=$((n + 1))
-            echo "::warning::rooket up attempt $n failed (often a transient image pull); retrying"
-            sleep 30
-          done
-          exit 1
-
-      - name: Verify Ceph OSDs are up
+      - name: Build rooket and the e2e test binary
         run: |
           set -eux
-          ok=0
-          for _ in $(seq 1 60); do
-            run=$(sudo kubectl --context kind-rook -n rook-ceph get pods --no-headers \
-                    -l app=rook-ceph-osd 2>/dev/null | awk '$3=="Running"' | wc -l)
-            echo "OSD pods Running: ${run}/${WORKERS}"
-            if [ "${run:-0}" -ge "$WORKERS" ]; then ok=1; break; fi
-            sleep 15
-          done
-          sudo kubectl --context kind-rook -n rook-ceph get pods -o wide || true
-          sudo kubectl --context kind-rook -n rook-ceph exec deploy/rook-ceph-tools -- ceph -s 2>/dev/null || true
-          sudo kubectl --context kind-rook -n rook-ceph exec deploy/rook-ceph-tools -- ceph osd tree 2>/dev/null || true
-          [ "$ok" = 1 ]
+          go build -o rooket .
+          go test -c -tags e2e -o e2e.test ./test/e2e/
+
+      - name: Set up iSCSI OSD disks (rootful)
+        run: sudo env "PATH=$PATH" HOME=/root ./rooket block setup --workers "$WORKERS" --disk-count 1
+
+      - name: Run e2e suite (rootful podman)
+        run: |
+          sudo env "PATH=$PATH" HOME=/root DOCKERCMD=podman \
+            ROOK_DIR="${{ github.workspace }}/rook" \
+            ROOKET_BIN="${{ github.workspace }}/rooket" \
+            ROOKET_WORKERS="$WORKERS" \
+            ROOKET_SKIP_BLOCK=true \
+            ./e2e.test -test.v -test.timeout 100m
 
       - name: Diagnostics (on failure)
         if: failure()
         run: |
-          sudo kubectl --context kind-rook get nodes -o wide || true
-          sudo kubectl --context kind-rook -n rook-ceph get pods -o wide || true
-          sudo kubectl --context kind-rook -n rook-ceph get pvc,pv || true
-          sudo kubectl --context kind-rook -n rook-ceph logs -l app=rook-ceph-osd-prepare --tail=100 || true
-          sudo kubectl --context kind-rook -n rook-ceph describe pods -l app=rook-ceph-osd-prepare 2>/dev/null \
-            | grep -iE 'Init Containers:|State:|Reason:|Events:|Warning|FailedMapVolume' | tail -50 || true
+          k() { sudo env "PATH=$PATH" HOME=/root kubectl --context kind-rook "$@"; }
+          k get nodes -o wide || true
+          k -n rook-ceph get pods -o wide || true
+          k -n rook-ceph get pvc,sc || true
+          k -n rook-ceph logs -l app=rook-ceph-osd-prepare --tail=100 || true
+          k -n rook-ceph describe pods -l app=rook-ceph-osd-prepare 2>/dev/null \
+            | grep -iE 'State:|Reason:|Events:|Warning|FailedMapVolume' | tail -50 || true
           df -h / || true
 
-      - name: rooket down (teardown + zap)
+      - name: Tear down (always)
         if: always()
-        run: sudo ./rooket down --workers "$WORKERS" --delete-disks || true
+        run: sudo env "PATH=$PATH" HOME=/root ./rooket down --workers "$WORKERS" --delete-disks || true

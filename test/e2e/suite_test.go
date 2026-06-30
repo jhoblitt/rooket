@@ -59,16 +59,25 @@ var _ = BeforeSuite(func() {
 	}
 	kubeCtx = "kind-" + clusterName
 
-	repoRoot, err := filepath.Abs("../..")
-	Expect(err).NotTo(HaveOccurred())
-	bin := filepath.Join(GinkgoT().TempDir(), "rooket")
-	cmd := exec.Command("go", "build", "-o", bin, ".")
-	cmd.Dir = repoRoot
-	out, err := cmd.CombinedOutput()
-	Expect(err).NotTo(HaveOccurred(), "build rooket:\n%s", out)
-	rooketBin = bin
-	GinkgoWriter.Printf("built rooket: %s (cluster=%s workers=%s skipBlock=%v rook=%s)\n",
-		bin, clusterName, workers, skipBlock, rookDir)
+	// Use a prebuilt binary if given (CI builds it as the runner user, then runs
+	// the suite under sudo — avoids running the go toolchain as root); otherwise
+	// build it from the repo.
+	if b := os.Getenv("ROOKET_BIN"); b != "" {
+		abs, err := filepath.Abs(b)
+		Expect(err).NotTo(HaveOccurred())
+		rooketBin = abs
+	} else {
+		repoRoot, err := filepath.Abs("../..")
+		Expect(err).NotTo(HaveOccurred())
+		bin := filepath.Join(GinkgoT().TempDir(), "rooket")
+		cmd := exec.Command("go", "build", "-o", bin, ".")
+		cmd.Dir = repoRoot
+		out, err := cmd.CombinedOutput()
+		Expect(err).NotTo(HaveOccurred(), "build rooket:\n%s", out)
+		rooketBin = bin
+	}
+	GinkgoWriter.Printf("rooket: %s (cluster=%s workers=%s skipBlock=%v rook=%s)\n",
+		rooketBin, clusterName, workers, skipBlock, rookDir)
 })
 
 // AfterSuite tears the cluster down best-effort, so a failed spec doesn't leave
