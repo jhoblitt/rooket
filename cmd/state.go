@@ -5,9 +5,13 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
+
+	"github.com/jhoblitt/rooket/internal/cluster"
+	"github.com/jhoblitt/rooket/internal/engine"
 )
 
 // clusterName resolves the cluster name in precedence order: the explicit
@@ -95,13 +99,11 @@ func kubeconfigPath(name string) (string, error) {
 
 // useCluster resolves the cluster name and points $KUBECONFIG at the cluster's
 // own kubeconfig, so kind, kubectl, and helm all operate on that file instead
-// of ~/.kube/config. It creates the state directory (so kind can write the
-// kubeconfig there) and returns the resolved name.
+// of ~/.kube/config. It does not create the state directory — commands that
+// write state (create/up via writeRegistryPort, block setup) create it, so
+// read-only commands like delete don't leave empty dirs behind.
 func useCluster(flagName string) (string, error) {
 	name := clusterName(flagName)
-	if _, err := ensureStateDir(name); err != nil {
-		return "", err
-	}
 	kc, err := kubeconfigPath(name)
 	if err != nil {
 		return "", err
@@ -137,27 +139,72 @@ func writeRegistryPort(name string, port int) error {
 }
 
 // freePort returns the first free TCP port on 127.0.0.1 at or above start.
+// Probe-then-use is inherently racy — another process can grab the port
+// between the probe and the registry binding it — but the window is tiny and
+// a collision just fails the registry create with a clear bind error.
 func freePort(start int) (int, error) {
 	for p := start; p < start+1000; p++ {
-		ln, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", p))
-		if err != nil {
-			continue
+		if portFree(p) {
+			return p, nil
 		}
-		_ = ln.Close()
-		return p, nil
 	}
 	return 0, fmt.Errorf("no free TCP port in [%d, %d)", start, start+1000)
 }
 
-// resolveRegistryPort decides a cluster's registry host port: the port already
-// recorded for the cluster (so repeat runs reuse it), else the explicit
-// --registry-port value if the user set it, else a free port at or above 5001.
-func resolveRegistryPort(name string, flagPort int, flagChanged bool) (int, error) {
-	if p := readRegistryPort(name); p != 0 {
-		return p, nil
+// portFree reports whether TCP port p on 127.0.0.1 can be bound.
+func portFree(p int) bool {
+	ln, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", p))
+	if err != nil {
+		return false
 	}
+	_ = ln.Close()
+	return true
+}
+
+// resolveRegistryPort decides a cluster's registry host port. An explicit
+// --registry-port wins, except that conflicting with the port already recorded
+// for the cluster is an error rather than a silent override: the registry
+// container and every node's containerd mirror config were set up with the
+// recorded port, so changing it requires recreating the cluster. Without the
+// flag, the recorded port is reused (so repeat runs stay consistent), else the
+// first free port from 5001.
+func resolveRegistryPort(name string, flagPort int, flagChanged bool) (int, error) {
+	persisted := readRegistryPort(name)
 	if flagChanged {
+		if persisted != 0 && persisted != flagPort {
+			return 0, fmt.Errorf("cluster %q already uses registry port %d; "+
+				"omit --registry-port to reuse it, or run 'rooket down' first to change it",
+				name, persisted)
+		}
 		return flagPort, nil
 	}
+	if persisted != 0 {
+		return persisted, nil
+	}
 	return freePort(5001)
+}
+
+// liveClusters returns the union of kind cluster names across every installed
+// container engine, mapping each name to the engines that report it. consulted
+// lists the engines successfully queried; failed lists engines that are
+// installed but could not be queried (e.g. a stopped daemon). Querying all
+// engines rather than the session's resolved one keeps prune and list from
+// misclassifying another engine's live cluster as gone.
+func liveClusters() (live map[string][]engine.Engine, consulted, failed []engine.Engine) {
+	live = map[string][]engine.Engine{}
+	for _, eng := range []engine.Engine{engine.Podman, engine.Docker} {
+		if _, err := exec.LookPath(eng.String()); err != nil {
+			continue
+		}
+		names, err := cluster.List(eng)
+		if err != nil {
+			failed = append(failed, eng)
+			continue
+		}
+		consulted = append(consulted, eng)
+		for _, n := range names {
+			live[n] = append(live[n], eng)
+		}
+	}
+	return live, consulted, failed
 }

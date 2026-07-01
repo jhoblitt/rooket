@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"fmt"
+	"os"
 
 	"github.com/spf13/cobra"
 )
@@ -55,6 +56,18 @@ Example:
 			blockTeardownDeleteDisks = downDeleteDisks
 			if err := blockTeardownRun(nil, nil); err != nil {
 				return fmt.Errorf("block teardown: %w", err)
+			}
+
+			// With the disks gone, the cluster's state dir holds only leftovers
+			// (kubeconfig, registry-port marker) — remove it entirely.
+			if downDeleteDisks {
+				if dir, err := stateDirPath(downName); err == nil {
+					if err := os.RemoveAll(dir); err != nil {
+						fmt.Printf("warning: remove state dir %s: %v\n", dir, err)
+					} else {
+						fmt.Printf("removed state dir %s\n", dir)
+					}
+				}
 			}
 		}
 

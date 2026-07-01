@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"fmt"
+	"os"
 
 	"github.com/spf13/cobra"
 
@@ -40,10 +41,21 @@ must be torn down separately if desired.
 		if err := cluster.Delete(deleteName); err != nil {
 			fmt.Printf("warning: delete cluster: %v\n", err)
 		}
+		// kind delete strips the cluster's entries but leaves the (now empty)
+		// kubeconfig file behind; remove it so 'rooket k' reports "is it up?"
+		// instead of letting kubectl chase an empty config. The file is
+		// per-cluster, so nothing else lives in it.
+		if kc, err := kubeconfigPath(deleteName); err == nil {
+			_ = os.Remove(kc)
+		}
 
 		// --- Step 2: zap OSD disks now that the nodes have released them ---
 		if deleteZap {
-			cluster.ZapISCSIDisks(containerEngine, deleteName)
+			if dir, err := stateDirPath(deleteName); err == nil {
+				cluster.ZapISCSIDisks(containerEngine, deleteName, dir)
+			} else {
+				fmt.Printf("warning: zap OSD disks: %v\n", err)
+			}
 		}
 
 		// --- Step 3: registry container ---

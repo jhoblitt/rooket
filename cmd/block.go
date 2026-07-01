@@ -62,11 +62,11 @@ func blockSetupRun(_ *cobra.Command, _ []string) error {
 
 	dataDir := blockSetupDataDir
 	if dataDir == "" {
-		home, err := os.UserHomeDir()
+		var err error
+		dataDir, err = stateDirPath(blockSetupName)
 		if err != nil {
-			return fmt.Errorf("resolve home dir: %w", err)
+			return err
 		}
-		dataDir = filepath.Join(home, ".local", "share", "rooket", blockSetupName)
 	}
 	if err := os.MkdirAll(dataDir, 0o755); err != nil {
 		return fmt.Errorf("create data dir: %w", err)
@@ -153,11 +153,11 @@ func blockTeardownRun(_ *cobra.Command, _ []string) error {
 
 	dataDir := blockTeardownDataDir
 	if dataDir == "" {
-		home, err := os.UserHomeDir()
+		var err error
+		dataDir, err = stateDirPath(blockTeardownName)
 		if err != nil {
-			return fmt.Errorf("resolve home dir: %w", err)
+			return err
 		}
-		dataDir = filepath.Join(home, ".local", "share", "rooket", blockTeardownName)
 	}
 
 	var disks []iscsiDisk

@@ -41,7 +41,7 @@ Example:
   rooket deploy --dir ~/github/rook
 `,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		dir, err := resolveDeployDir(cmd)
+		dir, err := deploySetup(cmd)
 		if err != nil {
 			return err
 		}
@@ -68,7 +68,7 @@ Example:
   rooket deploy operator --dir ~/github/rook
 `,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		dir, err := resolveDeployDir(cmd)
+		dir, err := deploySetup(cmd)
 		if err != nil {
 			return err
 		}
@@ -90,7 +90,7 @@ Example:
   rooket deploy cluster --dir ~/github/rook
 `,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		dir, err := resolveDeployDir(cmd)
+		dir, err := deploySetup(cmd)
 		if err != nil {
 			return err
 		}
@@ -102,13 +102,16 @@ Example:
 	},
 }
 
-func resolveDeployDir(cmd *cobra.Command) (string, error) {
+// deploySetup resolves everything a deploy needs: the cluster name (pointing
+// $KUBECONFIG at its kubeconfig), the kubectl context, the registry port, and
+// finally the rook source directory, which it returns.
+func deploySetup(cmd *cobra.Command) (string, error) {
 	name, err := useCluster(deployName)
 	if err != nil {
 		return "", err
 	}
 	deployName = name
-	if !cmd.Flags().Changed("context") {
+	if deployKubeContext == "" {
 		deployKubeContext = "kind-" + name
 	}
 	port, err := resolveRegistryPort(name, deployRegistryPort, cmd.Flags().Changed("registry-port"))
@@ -260,7 +263,7 @@ func init() {
 
 	pf := deployCmd.PersistentFlags()
 	pf.StringVar(&deployDir, "dir", "", "path to the rook source directory (default: current directory)")
-	pf.StringVar(&deployKubeContext, "context", "kind-rook", "kubectl context to use")
+	pf.StringVar(&deployKubeContext, "context", "", "kubectl context to use (default: kind-<cluster-name>)")
 	pf.IntVar(&deployRegistryPort, "registry-port", 5001, "host port for the local OCI registry")
 	pf.StringVar(&deployNamespace, "namespace", "rook", "image namespace in the registry")
 	pf.StringVar(&deployImageName, "image-name", "ceph", "image name without architecture suffix")

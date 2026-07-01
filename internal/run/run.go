@@ -42,8 +42,19 @@ func CmdWithEnv(extraEnv []string, name string, args ...string) error {
 // Output runs a command and returns its stdout output as a string.
 // stdin is /dev/null; use OutputInteractive when the command may prompt.
 func Output(name string, args ...string) (string, error) {
+	return OutputWithEnv(nil, name, args...)
+}
+
+// OutputWithEnv runs a command with additional environment variables appended
+// to the current environment (later entries override earlier ones) and returns
+// its stdout output as a string.
+func OutputWithEnv(extraEnv []string, name string, args ...string) (string, error) {
 	fmt.Printf("+ %s %s\n", name, strings.Join(args, " "))
-	out, err := exec.Command(name, args...).Output()
+	cmd := exec.Command(name, args...)
+	if len(extraEnv) > 0 {
+		cmd.Env = append(os.Environ(), extraEnv...)
+	}
+	out, err := cmd.Output()
 	return strings.TrimSpace(string(out)), err
 }
 

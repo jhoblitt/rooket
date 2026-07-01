@@ -63,13 +63,26 @@ func TestResolveRegistryPort(t *testing.T) {
 		}
 	})
 
-	t.Run("persisted port is reused over the flag", func(t *testing.T) {
+	t.Run("persisted port is reused when no flag", func(t *testing.T) {
 		if err := writeRegistryPort("c2", 5123); err != nil {
 			t.Fatal(err)
 		}
-		got, err := resolveRegistryPort("c2", 9999, true)
+		got, err := resolveRegistryPort("c2", 9999, false)
 		if err != nil || got != 5123 {
 			t.Fatalf("resolveRegistryPort = (%d, %v), want (5123, nil)", got, err)
+		}
+	})
+
+	t.Run("flag conflicting with the persisted port errors", func(t *testing.T) {
+		if err := writeRegistryPort("c2b", 5123); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := resolveRegistryPort("c2b", 9999, true); err == nil {
+			t.Fatal("resolveRegistryPort = nil error, want a conflict error")
+		}
+		got, err := resolveRegistryPort("c2b", 5123, true)
+		if err != nil || got != 5123 {
+			t.Fatalf("resolveRegistryPort with matching flag = (%d, %v), want (5123, nil)", got, err)
 		}
 	})
 

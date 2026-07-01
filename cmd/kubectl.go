@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
 
@@ -13,7 +14,8 @@ var kubectlCmd = &cobra.Command{
 	Short:   "Run kubectl against the cluster (KUBECONFIG set automatically)",
 	Long: `kubectl runs the real kubectl with KUBECONFIG pointed at the cluster's own
 kubeconfig, forwarding every argument. The cluster is selected the same way as
-the rest of rooket: the rook clone basename, or $ROOKET_NAME.
+the rest of rooket: $ROOKET_NAME, or the name derived from the enclosing rook
+clone's path.
 
   rooket kubectl get pods -n rook-ceph
   rooket k get nodes
@@ -28,6 +30,11 @@ the rest of rooket: the rook clone basename, or $ROOKET_NAME.
 		kc, err := kubeconfigPath(name)
 		if err != nil {
 			return err
+		}
+		// Fail with an actionable error instead of letting kubectl chase a
+		// missing kubeconfig into "connection refused" noise.
+		if _, err := os.Stat(kc); err != nil {
+			return fmt.Errorf("no kubeconfig for cluster %q at %s (is it up?)", name, kc)
 		}
 		if err := os.Setenv("KUBECONFIG", kc); err != nil {
 			return err

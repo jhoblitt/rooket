@@ -56,11 +56,10 @@ Example:
 			return err
 		}
 		upName = name
+		// Resolve the port for fail-fast flag-conflict checking; the create step
+		// re-resolves, repairs a stale recording, and persists the final choice.
 		port, err := resolveRegistryPort(upName, upRegistryPort, cmd.Flags().Changed("registry-port"))
 		if err != nil {
-			return err
-		}
-		if err := writeRegistryPort(upName, port); err != nil {
 			return err
 		}
 		upRegistryPort = port
@@ -91,6 +90,10 @@ Example:
 		createPromCRDsRelease = upPromRelease
 		if err := createCmd.RunE(createCmd, nil); err != nil {
 			return fmt.Errorf("cluster create: %w", err)
+		}
+		// create may have repaired a stale recorded port; pick up its choice.
+		if p := readRegistryPort(upName); p != 0 {
+			upRegistryPort = p
 		}
 
 		// --- Step 3: build ---
@@ -126,8 +129,12 @@ Example:
 			}
 		}
 
-		fmt.Printf("\nrooket up complete. cluster %q is ready (context: kind-%s).\n",
-			upName, upName)
+		fmt.Printf(`
+rooket up complete. cluster %q is ready.
+
+  kubectl:     rooket k <args>
+  kubeconfig:  export KUBECONFIG="$(rooket kubeconfig --path)"
+`, upName)
 		return nil
 	},
 }

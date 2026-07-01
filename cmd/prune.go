@@ -8,8 +8,6 @@ import (
 	"strings"
 
 	"github.com/spf13/cobra"
-
-	"github.com/jhoblitt/rooket/internal/cluster"
 )
 
 var (
@@ -44,13 +42,18 @@ disk images in those directories are deleted with them.
 			return err
 		}
 
-		names, err := cluster.List()
-		if err != nil {
-			return fmt.Errorf("list kind clusters: %w", err)
+		// Query every installed engine, not just the session's resolved one: a
+		// cluster living under the other engine must not be pruned as orphaned.
+		live, consulted, failed := liveClusters()
+		if len(consulted) == 0 {
+			return fmt.Errorf("cannot determine live clusters (no queryable container engine); not pruning")
 		}
-		live := make(map[string]struct{}, len(names))
-		for _, n := range names {
-			live[n] = struct{}{}
+		for _, eng := range failed {
+			fmt.Printf("warning: %s is installed but could not be queried; "+
+				"its clusters (if any) would be misread as orphaned — not pruning\n", eng)
+		}
+		if len(failed) > 0 {
+			return fmt.Errorf("refusing to prune with an unqueryable engine present")
 		}
 
 		var orphans []string
@@ -67,7 +70,12 @@ disk images in those directories are deleted with them.
 			return nil
 		}
 
-		fmt.Println("Orphaned cluster state directories (no live kind cluster):")
+		engNames := make([]string, len(consulted))
+		for i, eng := range consulted {
+			engNames[i] = eng.String()
+		}
+		fmt.Printf("Orphaned cluster state directories (no live kind cluster under %s):\n",
+			strings.Join(engNames, " or "))
 		for _, o := range orphans {
 			fmt.Printf("  %s\n", filepath.Join(root, o))
 		}

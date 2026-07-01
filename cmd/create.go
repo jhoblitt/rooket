@@ -50,12 +50,24 @@ Run 'rooket block setup' before 'rooket cluster create' to prepare block devices
 		if err != nil {
 			return err
 		}
+		regName := registry.ContainerName(createName)
+
+		// A recorded port can go stale: this cluster's registry is gone and
+		// something else (typically another rooket cluster's registry) now holds
+		// the port. With no registry container of our own to preserve, re-pick a
+		// free port — the steps below (re)wire containerd and the ConfigMap to
+		// whatever port ends up in use.
+		if !registry.Exists(containerEngine, regName) && !portFree(port) {
+			old := port
+			if port, err = freePort(5001); err != nil {
+				return err
+			}
+			fmt.Printf("recorded registry port %d is now in use elsewhere; using %d instead\n", old, port)
+		}
 		if err := writeRegistryPort(createName, port); err != nil {
 			return err
 		}
 		createRegistryPort = port
-
-		regName := registry.ContainerName(createName)
 
 		// --- Step 1: Locate iSCSI block devices ---
 		workerDisks := make(map[int][]cluster.Disk)
@@ -89,7 +101,7 @@ Run 'rooket block setup' before 'rooket cluster create' to prepare block devices
 			RegistryHostPort: createRegistryPort,
 			WorkerDisks:      workerDisks,
 		}
-		exists, err := cluster.Exists(createName)
+		exists, err := cluster.Exists(containerEngine, createName)
 		if err != nil {
 			return fmt.Errorf("check cluster existence: %w", err)
 		}
@@ -151,11 +163,11 @@ Run 'rooket block setup' before 'rooket cluster create' to prepare block devices
 		fmt.Printf(`
 Cluster %q is ready.
 
-  kubectl context:   kind-%s
+  kubectl:           rooket k <args>   (or: export KUBECONFIG="$(rooket kubeconfig --path)")
   local registry:    localhost:%d
   push images with:  %s push localhost:%d/<image>
 
-`, createName, createName, createRegistryPort, containerEngine.String(), createRegistryPort)
+`, createName, createRegistryPort, containerEngine.String(), createRegistryPort)
 		return nil
 	},
 }
