@@ -32,8 +32,20 @@ or $ROOKET_ENGINE) to create:
   • (Optional) iSCSI-backed block devices passed through into each worker node
     so Rook/Ceph can consume them as raw block OSDs.
 `,
-	PersistentPreRunE: func(_ *cobra.Command, _ []string) error {
-		eng, err := engine.Parse(engineFlag)
+	PersistentPreRunE: func(cmd *cobra.Command, _ []string) error {
+		requested, err := engine.Parse(engineFlag)
+		if err != nil {
+			return err
+		}
+		// A deliberate selection (--engine on the CLI or $ROOKET_ENGINE) is honored
+		// or fails; only the built-in default falls back between engines.
+		explicit := cmd.Flags().Changed("engine") || os.Getenv(engine.EnvVar) != ""
+		// Probe the requested engine: rooket needs rootful podman, so an auto-
+		// selected podman that is rootless (or unusable) warns and falls back to
+		// docker, while an explicit one errors. An unusable docker is a hard error.
+		eng, err := engine.Resolve(requested, explicit, engine.DefaultProber, func(msg string) {
+			fmt.Printf("warning: %s\n", msg)
+		})
 		if err != nil {
 			return err
 		}
