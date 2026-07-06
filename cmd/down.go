@@ -23,14 +23,17 @@ var downCmd = &cobra.Command{
 	Long: `down reverses the work of 'rooket up':
 
   1. rooket cluster delete  — delete the kind cluster and the local registry
-  2. rooket block teardown  — log out iSCSI sessions and remove targets
+  2. rooket block teardown  — only with --delete-disks: log out iSCSI sessions,
+     remove targets, delete the disk images and the cluster's state dir
 
-Use --skip-cluster or --skip-block to omit a step. Disk image files are
-preserved by default — pass --delete-disks to remove them too.
+By default the disk images AND their iSCSI targets are preserved, so a plain
+down needs no root and the next up reuses the devices without prompting either.
+Pass --delete-disks for the full teardown (this is the step that needs
+sudo/pkexec). Use --skip-cluster to omit the cluster step.
 
 Example:
-  rooket down
-  rooket down --delete-disks
+  rooket down                 # cluster gone, disks kept: no root needed
+  rooket down --delete-disks  # full teardown incl. iSCSI targets and images
 `,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		downName = clusterName(downName)
@@ -45,8 +48,12 @@ Example:
 			}
 		}
 
-		if downSkipBlock || downDiskCount == 0 {
-			fmt.Println("==> [2/2] block teardown (skipped)")
+		// The iSCSI targets are host-level config pointing at the preserved
+		// images: removing them is the only step that needs root, and keeping
+		// them lets the next up skip its privileged block setup too. So a plain
+		// down leaves them alone; --delete-disks is the full, privileged teardown.
+		if downSkipBlock || downDiskCount == 0 || !downDeleteDisks {
+			fmt.Println("==> [2/2] block teardown (skipped; disk images and iSCSI targets preserved — pass --delete-disks to remove them)")
 		} else {
 			fmt.Println("==> [2/2] block teardown")
 			blockTeardownName = downName
@@ -83,7 +90,7 @@ func init() {
 	downCmd.Flags().IntVar(&downWorkers, "workers", 3, "number of worker nodes (must match 'up')")
 	downCmd.Flags().IntVar(&downDiskCount, "disk-count", 1, "iSCSI disks per worker (0 skips block teardown)")
 	downCmd.Flags().StringVar(&downIQNDate, "iqn-date", "2003-01", "IQN date component (YYYY-MM)")
-	downCmd.Flags().BoolVar(&downDeleteDisks, "delete-disks", false, "also delete disk image files")
-	downCmd.Flags().BoolVar(&downSkipBlock, "skip-block", false, "skip block teardown")
+	downCmd.Flags().BoolVar(&downDeleteDisks, "delete-disks", false, "full teardown: remove iSCSI targets and delete the disk images and state dir (needs root)")
+	downCmd.Flags().BoolVar(&downSkipBlock, "skip-block", false, "skip block teardown even with --delete-disks")
 	downCmd.Flags().BoolVar(&downSkipCluster, "skip-cluster", false, "skip cluster delete")
 }

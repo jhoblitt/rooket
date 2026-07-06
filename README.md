@@ -14,9 +14,10 @@ source checkout.
   `$ROOKET_ENGINE`.
 - `kind`, `kubectl`, `helm` on `PATH`.
 - iSCSI tooling for the OSD disks: `targetcli`, `iscsiadm` (package
-  `open-iscsi`/`iscsi-initiator-utils`), and `lvm2`. Configuring targets needs
-  root — `rooket block setup` tries `sudo -n`, then `pkexec` (skipped entirely
-  when the devices already exist).
+  `open-iscsi`/`iscsi-initiator-utils`), and `lvm2`. Only configuring and
+  removing targets needs root (`sudo -n`, then `pkexec`): the first
+  `rooket block setup` and a `rooket down --delete-disks`. Day-to-day
+  `up`/`down` cycles reuse the existing targets and never prompt.
 - A Go toolchain (to build rooket) and a [rook](https://github.com/rook/rook)
   source checkout.
 
@@ -28,7 +29,8 @@ $ cd ~/github/rook            # any directory inside a rook clone
 $ rooket up                   # block setup → kind cluster → build → deploy
 $ rooket k get pods -n rook-ceph
 $ rooket k -n rook-ceph exec deploy/rook-ceph-tools -- ceph -s
-$ rooket down                 # tear it all down (add --delete-disks to reclaim space)
+$ rooket down                 # cluster gone, disks kept for the next up (no root)
+$ rooket down --delete-disks  # full teardown: targets, images, state (needs root)
 ```
 
 `rooket up` finds the rook source via `--dir`, `$ROOK_DIR`, or by walking up
@@ -58,7 +60,7 @@ $ export KUBECONFIG="$(rooket kubeconfig --path)"    # or point your own tools a
 
 | Command | Purpose |
 |---|---|
-| `rooket up` / `rooket down` | full bring-up / teardown (block, cluster, build, deploy) |
+| `rooket up` / `rooket down` | full bring-up / teardown; `down --delete-disks` also removes targets, images, and state |
 | `rooket block setup` / `teardown` | create/remove the iSCSI disk images and targets |
 | `rooket cluster create` / `delete` | create/delete the kind cluster + registry |
 | `rooket build` | `make` in the rook source, tag + push the image to the registry |
