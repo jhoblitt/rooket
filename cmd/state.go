@@ -65,15 +65,49 @@ func encodePath(p string) string {
 	return s
 }
 
-// stateDirPath returns a cluster's state directory (~/.local/share/rooket/<name>)
-// without creating it. The directory holds the cluster's disk images,
-// kubeconfig, and metadata.
-func stateDirPath(name string) (string, error) {
+// stateDirRoot returns the directory that holds every cluster's state dir
+// (~/.local/share/rooket).
+func stateDirRoot() (string, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return "", fmt.Errorf("resolve home dir: %w", err)
 	}
-	return filepath.Join(home, ".local", "share", "rooket", name), nil
+	return filepath.Join(home, ".local", "share", "rooket"), nil
+}
+
+// stateDirNames returns the state root and the cluster names that have a state
+// directory under it. A root that does not exist yet is an empty list, not an
+// error.
+func stateDirNames() (string, []string, error) {
+	root, err := stateDirRoot()
+	if err != nil {
+		return "", nil, err
+	}
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return root, nil, nil
+		}
+		return "", nil, err
+	}
+	var names []string
+	for _, e := range entries {
+		if e.IsDir() {
+			names = append(names, e.Name())
+		}
+	}
+	return root, names, nil
+}
+
+// stateDirPath returns a cluster's state directory (~/.local/share/rooket/<name>)
+// without creating it. The directory holds the cluster's disk images,
+// kubeconfig, and metadata.
+func stateDirPath(name string) (string, error) {
+	root, err := stateDirRoot()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(root, name), nil
 }
 
 // ensureStateDir returns a cluster's state directory, creating it.

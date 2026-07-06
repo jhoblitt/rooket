@@ -195,6 +195,24 @@ func blockTeardownRun(_ *cobra.Command, _ []string) error {
 	return nil
 }
 
+// stateDirDisks reconstructs a cluster's iscsiDisk entries from the
+// worker*-disk*.img images in its state directory, so teardown can name the
+// matching backstores and target IQNs without knowing the --workers and
+// --disk-count the cluster was set up with.
+func stateDirDisks(clusterName, dir, iqnDate string) []iscsiDisk {
+	imgs, _ := filepath.Glob(filepath.Join(dir, "worker*-disk*.img"))
+	var disks []iscsiDisk
+	for _, img := range imgs {
+		id := strings.TrimSuffix(filepath.Base(img), ".img")
+		disks = append(disks, iscsiDisk{
+			imgPath:       img,
+			backstoreName: fmt.Sprintf("%s-%s", clusterName, id),
+			targetIQN:     fmt.Sprintf("iqn.%s.local.rooket:%s-%s", iqnDate, clusterName, id),
+		})
+	}
+	return disks
+}
+
 // buildISCSITeardownScript generates the privileged shell script that logs
 // out of iSCSI sessions, deletes node records, and removes targets and
 // backstores via targetcli. Every step is best-effort so a partial setup

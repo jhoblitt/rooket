@@ -159,6 +159,18 @@ func Delete(name string) error {
 	return run.Cmd("kind", "delete", "cluster", "--name", name)
 }
 
+// DeleteWith deletes the named kind cluster under an explicit engine's kind
+// provider and kubeconfig file, overriding the ambient environment. 'down
+// --all' uses it to remove clusters owned by an engine other than the
+// session's resolved one.
+func DeleteWith(eng engine.Engine, name, kubeconfig string) error {
+	env := []string{"KIND_EXPERIMENTAL_PROVIDER=" + eng.String()}
+	if kubeconfig != "" {
+		env = append(env, "KUBECONFIG="+kubeconfig)
+	}
+	return run.CmdWithEnv(env, "kind", "delete", "cluster", "--name", name)
+}
+
 // ZapISCSIDisks wipes this cluster's iSCSI OSD disks so the next bring-up sees
 // clean devices. It re-creates each backing image as a fresh sparse file
 // (truncate to 0, then back to its size), which clears every Ceph bluestore

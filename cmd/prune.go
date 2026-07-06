@@ -20,7 +20,9 @@ var pruneCmd = &cobra.Command{
 	Short: "Remove state directories of clusters that no longer exist",
 	Long: `prune deletes ~/.local/share/rooket/<name> directories whose kind cluster is
 no longer running — e.g. a clone removed without 'rooket down'. The backing
-disk images in those directories are deleted with them.
+disk images in those directories are deleted with them; any iSCSI targets an
+orphan still has configured are left behind ('rooket down --all --delete-disks'
+is the everything-at-once teardown that removes those too).
 
   rooket prune --dry-run   # list what would be removed
   rooket prune             # prompt, then remove
@@ -28,17 +30,8 @@ disk images in those directories are deleted with them.
 `,
 	Args: cobra.NoArgs,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		home, err := os.UserHomeDir()
+		root, stateNames, err := stateDirNames()
 		if err != nil {
-			return err
-		}
-		root := filepath.Join(home, ".local", "share", "rooket")
-		entries, err := os.ReadDir(root)
-		if err != nil {
-			if os.IsNotExist(err) {
-				fmt.Println("nothing to prune")
-				return nil
-			}
 			return err
 		}
 
@@ -57,12 +50,9 @@ disk images in those directories are deleted with them.
 		}
 
 		var orphans []string
-		for _, e := range entries {
-			if !e.IsDir() {
-				continue
-			}
-			if _, ok := live[e.Name()]; !ok {
-				orphans = append(orphans, e.Name())
+		for _, n := range stateNames {
+			if _, ok := live[n]; !ok {
+				orphans = append(orphans, n)
 			}
 		}
 		if len(orphans) == 0 {
