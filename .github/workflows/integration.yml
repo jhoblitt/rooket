@@ -113,6 +113,11 @@ jobs:
           k -n rook-ceph logs -l app=rook-ceph-osd-prepare --tail=100 || true
           df -h / || true
 
+      # Also exercises 'down --all': it must enumerate the suite's leftovers
+      # (state dir plus targets, or a still-live cluster on failure) and remove
+      # them without flags naming the cluster or its disk layout.
       - name: Tear down (always)
         if: always()
-        run: ./rooket down --workers "$WORKERS" --delete-disks || true
+        run: |
+          [ -x ./rooket ] || { echo "rooket was never built; nothing to tear down"; exit 0; }
+          ./rooket down --all --force --delete-disks

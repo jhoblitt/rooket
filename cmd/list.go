@@ -31,18 +31,13 @@ pruned); a row that is not live is teardown debris — 'rooket prune' removes it
 			fmt.Fprintln(os.Stderr, "warning: no queryable container engine; live status unknown")
 		}
 
-		hasState := map[string]bool{}
-		home, err := os.UserHomeDir()
+		root, stateNames, err := stateDirNames()
 		if err != nil {
 			return err
 		}
-		root := filepath.Join(home, ".local", "share", "rooket")
-		if entries, err := os.ReadDir(root); err == nil {
-			for _, e := range entries {
-				if e.IsDir() {
-					hasState[e.Name()] = true
-				}
-			}
+		hasState := map[string]bool{}
+		for _, n := range stateNames {
+			hasState[n] = true
 		}
 		for n := range live {
 			if _, ok := hasState[n]; !ok {

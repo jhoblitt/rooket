@@ -33,6 +33,13 @@ $ rooket down                 # cluster gone, disks kept for the next up (no roo
 $ rooket down --delete-disks  # full teardown: targets, images, state (needs root)
 ```
 
+To free the whole machine in one shot, `rooket down --all` tears down **every**
+cluster — live under any engine, plus orphaned state dirs — after showing the
+plan and prompting (`--force` skips, `--dry-run` stops at the plan). Add
+`--delete-disks` to also remove every cluster's iSCSI targets, disk images,
+and state dir; all target teardowns are batched into one privileged script, so
+the sweep costs at most a single sudo/pkexec prompt.
+
 `rooket up` finds the rook source via `--dir`, `$ROOK_DIR`, or by walking up
 from the current directory to the enclosing rook clone.
 
@@ -60,7 +67,7 @@ $ export KUBECONFIG="$(rooket kubeconfig --path)"    # or point your own tools a
 
 | Command | Purpose |
 |---|---|
-| `rooket up` / `rooket down` | full bring-up / teardown; `down --delete-disks` also removes targets, images, and state |
+| `rooket up` / `rooket down` | full bring-up / teardown; `down --delete-disks` also removes targets, images, and state; `down --all` sweeps every cluster |
 | `rooket block setup` / `teardown` | create/remove the iSCSI disk images and targets |
 | `rooket cluster create` / `delete` | create/delete the kind cluster + registry |
 | `rooket build` | `make` in the rook source, tag + push the image to the registry |
