@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"fmt"
+	"os"
 
 	"github.com/spf13/cobra"
 )
@@ -32,6 +33,8 @@ Example:
   rooket down --delete-disks
 `,
 	RunE: func(cmd *cobra.Command, args []string) error {
+		downName = clusterName(downName)
+
 		if downSkipCluster {
 			fmt.Println("==> [1/2] cluster delete (skipped)")
 		} else {
@@ -54,6 +57,18 @@ Example:
 			if err := blockTeardownRun(nil, nil); err != nil {
 				return fmt.Errorf("block teardown: %w", err)
 			}
+
+			// With the disks gone, the cluster's state dir holds only leftovers
+			// (kubeconfig, registry-port marker) — remove it entirely.
+			if downDeleteDisks {
+				if dir, err := stateDirPath(downName); err == nil {
+					if err := os.RemoveAll(dir); err != nil {
+						fmt.Printf("warning: remove state dir %s: %v\n", dir, err)
+					} else {
+						fmt.Printf("removed state dir %s\n", dir)
+					}
+				}
+			}
 		}
 
 		fmt.Println("\nrooket down complete.")
@@ -64,7 +79,7 @@ Example:
 func init() {
 	rootCmd.AddCommand(downCmd)
 
-	downCmd.Flags().StringVar(&downName, "name", "rook", "kind cluster name")
+	downCmd.Flags().StringVar(&downName, "name", "", "kind cluster name")
 	downCmd.Flags().IntVar(&downWorkers, "workers", 3, "number of worker nodes (must match 'up')")
 	downCmd.Flags().IntVar(&downDiskCount, "disk-count", 1, "iSCSI disks per worker (0 skips block teardown)")
 	downCmd.Flags().StringVar(&downIQNDate, "iqn-date", "2003-01", "IQN date component (YYYY-MM)")

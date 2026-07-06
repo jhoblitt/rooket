@@ -10,13 +10,13 @@ import (
 )
 
 var (
-	createName              string
-	createWorkers           int
-	createRegistryPort      int
-	createDiskCount         int
-	createISCSIQNDate       string
-	createPromCRDsVersion   string
-	createPromCRDsRelease   string
+	createName            string
+	createWorkers         int
+	createRegistryPort    int
+	createDiskCount       int
+	createISCSIQNDate     string
+	createPromCRDsVersion string
+	createPromCRDsRelease string
 )
 
 var createCmd = &cobra.Command{
@@ -40,7 +40,34 @@ var createCmd = &cobra.Command{
 Run 'rooket block setup' before 'rooket cluster create' to prepare block devices.
 `,
 	RunE: func(cmd *cobra.Command, args []string) error {
+		name, err := useCluster(createName)
+		if err != nil {
+			return err
+		}
+		createName = name
+
+		port, err := resolveRegistryPort(createName, createRegistryPort, cmd.Flags().Changed("registry-port"))
+		if err != nil {
+			return err
+		}
 		regName := registry.ContainerName(createName)
+
+		// A recorded port can go stale: this cluster's registry is gone and
+		// something else (typically another rooket cluster's registry) now holds
+		// the port. With no registry container of our own to preserve, re-pick a
+		// free port — the steps below (re)wire containerd and the ConfigMap to
+		// whatever port ends up in use.
+		if !registry.Exists(containerEngine, regName) && !portFree(port) {
+			old := port
+			if port, err = freePort(5001); err != nil {
+				return err
+			}
+			fmt.Printf("recorded registry port %d is now in use elsewhere; using %d instead\n", old, port)
+		}
+		if err := writeRegistryPort(createName, port); err != nil {
+			return err
+		}
+		createRegistryPort = port
 
 		// --- Step 1: Locate iSCSI block devices ---
 		workerDisks := make(map[int][]cluster.Disk)
@@ -74,7 +101,7 @@ Run 'rooket block setup' before 'rooket cluster create' to prepare block devices
 			RegistryHostPort: createRegistryPort,
 			WorkerDisks:      workerDisks,
 		}
-		exists, err := cluster.Exists(createName)
+		exists, err := cluster.Exists(containerEngine, createName)
 		if err != nil {
 			return fmt.Errorf("check cluster existence: %w", err)
 		}
@@ -136,11 +163,11 @@ Run 'rooket block setup' before 'rooket cluster create' to prepare block devices
 		fmt.Printf(`
 Cluster %q is ready.
 
-  kubectl context:   kind-%s
+  kubectl:           rooket k <args>   (or: export KUBECONFIG="$(rooket kubeconfig --path)")
   local registry:    localhost:%d
   push images with:  %s push localhost:%d/<image>
 
-`, createName, createName, createRegistryPort, containerEngine.String(), createRegistryPort)
+`, createName, createRegistryPort, containerEngine.String(), createRegistryPort)
 		return nil
 	},
 }
@@ -148,7 +175,7 @@ Cluster %q is ready.
 func init() {
 	clusterCmd.AddCommand(createCmd)
 
-	createCmd.Flags().StringVar(&createName, "name", "rook", "kind cluster name")
+	createCmd.Flags().StringVar(&createName, "name", "", "kind cluster name")
 	createCmd.Flags().IntVar(&createWorkers, "workers", 3, "number of worker nodes")
 	createCmd.Flags().IntVar(&createRegistryPort, "registry-port", 5001, "host port for the local OCI registry")
 	createCmd.Flags().IntVar(&createDiskCount, "disk-count", 1, "number of iSCSI disks per worker (0 to skip)")

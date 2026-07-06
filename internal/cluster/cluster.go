@@ -94,14 +94,35 @@ func GenerateConfig(cfg Config) ([]byte, error) {
 	return buf.Bytes(), nil
 }
 
-// Exists returns true if a kind cluster with the given name already exists.
-func Exists(name string) (bool, error) {
-	out, err := run.Output("kind", "get", "clusters")
+// List returns the names of all kind clusters known to the given engine's kind
+// provider. The provider is passed explicitly (overriding the ambient
+// KIND_EXPERIMENTAL_PROVIDER) so callers like prune and list can query engines
+// other than the session's resolved one.
+func List(eng engine.Engine) ([]string, error) {
+	out, err := run.OutputWithEnv(
+		[]string{"KIND_EXPERIMENTAL_PROVIDER=" + eng.String()},
+		"kind", "get", "clusters")
+	if err != nil {
+		return nil, err
+	}
+	var names []string
+	for line := range strings.SplitSeq(out, "\n") {
+		if s := strings.TrimSpace(line); s != "" {
+			names = append(names, s)
+		}
+	}
+	return names, nil
+}
+
+// Exists returns true if a kind cluster with the given name already exists
+// under the given engine's kind provider.
+func Exists(eng engine.Engine, name string) (bool, error) {
+	names, err := List(eng)
 	if err != nil {
 		return false, err
 	}
-	for line := range strings.SplitSeq(out, "\n") {
-		if strings.TrimSpace(line) == name {
+	for _, n := range names {
+		if n == name {
 			return true, nil
 		}
 	}
@@ -147,14 +168,9 @@ func Delete(name string) error {
 // udev DB (the truncate doesn't notify the kernel, so lsblk/ceph-volume would
 // otherwise see a stale "ceph_bluestore" signature and skip the disk). Run AFTER
 // the kind cluster is deleted, when the disks are idle. Best-effort; targets the
-// default data dir (~/.local/share/rooket/<cluster>).
-func ZapISCSIDisks(eng engine.Engine, clusterName string) {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		fmt.Printf("warning: zap OSD disks: resolve home: %v\n", err)
-		return
-	}
-	imgs, _ := filepath.Glob(filepath.Join(home, ".local", "share", "rooket", clusterName, "*.img"))
+// image files in dataDir (the cluster's state directory).
+func ZapISCSIDisks(eng engine.Engine, clusterName, dataDir string) {
+	imgs, _ := filepath.Glob(filepath.Join(dataDir, "*.img"))
 	if len(imgs) == 0 {
 		fmt.Printf("no OSD disk images for cluster %q; skipping zap\n", clusterName)
 		return

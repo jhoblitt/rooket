@@ -12,18 +12,18 @@ import (
 )
 
 var (
-	deployDir            string
-	deployRegistryPort   int
-	deployNamespace      string
-	deployImageName      string
-	deployOperatorName   string
-	deployClusterName    string
-	deployKubeContext    string
-	deployName           string
-	deployWorkers        int
-	deployDiskCount      int
-	deployDiskSizeGB     int
-	deployIQNDate        string
+	deployDir          string
+	deployRegistryPort int
+	deployNamespace    string
+	deployImageName    string
+	deployOperatorName string
+	deployClusterName  string
+	deployKubeContext  string
+	deployName         string
+	deployWorkers      int
+	deployDiskCount    int
+	deployDiskSizeGB   int
+	deployIQNDate      string
 )
 
 var deployCmd = &cobra.Command{
@@ -41,7 +41,7 @@ Example:
   rooket deploy --dir ~/github/rook
 `,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		dir, err := resolveDeployDir()
+		dir, err := deploySetup(cmd)
 		if err != nil {
 			return err
 		}
@@ -68,7 +68,7 @@ Example:
   rooket deploy operator --dir ~/github/rook
 `,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		dir, err := resolveDeployDir()
+		dir, err := deploySetup(cmd)
 		if err != nil {
 			return err
 		}
@@ -90,7 +90,7 @@ Example:
   rooket deploy cluster --dir ~/github/rook
 `,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		dir, err := resolveDeployDir()
+		dir, err := deploySetup(cmd)
 		if err != nil {
 			return err
 		}
@@ -102,7 +102,24 @@ Example:
 	},
 }
 
-func resolveDeployDir() (string, error) {
+// deploySetup resolves everything a deploy needs: the cluster name (pointing
+// $KUBECONFIG at its kubeconfig), the kubectl context, the registry port, and
+// finally the rook source directory, which it returns.
+func deploySetup(cmd *cobra.Command) (string, error) {
+	name, err := useCluster(deployName)
+	if err != nil {
+		return "", err
+	}
+	deployName = name
+	if deployKubeContext == "" {
+		deployKubeContext = "kind-" + name
+	}
+	port, err := resolveRegistryPort(name, deployRegistryPort, cmd.Flags().Changed("registry-port"))
+	if err != nil {
+		return "", err
+	}
+	deployRegistryPort = port
+
 	if deployDir != "" {
 		return deployDir, nil
 	}
@@ -246,13 +263,13 @@ func init() {
 
 	pf := deployCmd.PersistentFlags()
 	pf.StringVar(&deployDir, "dir", "", "path to the rook source directory (default: current directory)")
-	pf.StringVar(&deployKubeContext, "context", "kind-rook", "kubectl context to use")
+	pf.StringVar(&deployKubeContext, "context", "", "kubectl context to use (default: kind-<cluster-name>)")
 	pf.IntVar(&deployRegistryPort, "registry-port", 5001, "host port for the local OCI registry")
 	pf.StringVar(&deployNamespace, "namespace", "rook", "image namespace in the registry")
 	pf.StringVar(&deployImageName, "image-name", "ceph", "image name without architecture suffix")
 	pf.StringVar(&deployOperatorName, "operator-release", "rook-ceph", "rook-ceph operator helm release name")
 	pf.StringVar(&deployClusterName, "cluster-release", "rook-ceph-cluster", "rook-ceph-cluster helm release name")
-	pf.StringVar(&deployName, "name", "rook", "kind cluster name (for node-name and iSCSI by-path derivation)")
+	pf.StringVar(&deployName, "name", "", "kind cluster name (for node-name and iSCSI by-path derivation)")
 	pf.IntVar(&deployWorkers, "workers", 3, "worker node count (for per-node OSD device pinning)")
 	pf.IntVar(&deployDiskCount, "disk-count", 1, "iSCSI disks per worker (0 disables OSD device pinning)")
 	pf.IntVar(&deployDiskSizeGB, "disk-size", 10, "disk size in GiB (matches 'rooket block setup')")

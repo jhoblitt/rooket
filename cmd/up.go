@@ -10,7 +10,7 @@ var (
 	upName            string
 	upWorkers         int
 	upDiskCount       int
-	upDiskSizeGB     int
+	upDiskSizeGB      int
 	upRegistryPort    int
 	upIQNDate         string
 	upRookDir         string
@@ -51,6 +51,19 @@ Example:
 			}
 		}
 
+		name, err := useCluster(upName)
+		if err != nil {
+			return err
+		}
+		upName = name
+		// Resolve the port for fail-fast flag-conflict checking; the create step
+		// re-resolves, repairs a stale recording, and persists the final choice.
+		port, err := resolveRegistryPort(upName, upRegistryPort, cmd.Flags().Changed("registry-port"))
+		if err != nil {
+			return err
+		}
+		upRegistryPort = port
+
 		// --- Step 1: block setup ---
 		if upSkipBlock || upDiskCount == 0 {
 			fmt.Println("==> [1/4] block setup (skipped)")
@@ -78,6 +91,10 @@ Example:
 		if err := createCmd.RunE(createCmd, nil); err != nil {
 			return fmt.Errorf("cluster create: %w", err)
 		}
+		// create may have repaired a stale recorded port; pick up its choice.
+		if p := readRegistryPort(upName); p != 0 {
+			upRegistryPort = p
+		}
 
 		// --- Step 3: build ---
 		if upSkipBuild {
@@ -85,6 +102,7 @@ Example:
 		} else {
 			fmt.Println("==> [3/4] build")
 			buildDir = rookDir
+			buildName = upName
 			buildRegistryPort = upRegistryPort
 			if err := buildCmd.RunE(buildCmd, nil); err != nil {
 				return fmt.Errorf("build: %w", err)
@@ -111,8 +129,12 @@ Example:
 			}
 		}
 
-		fmt.Printf("\nrooket up complete. cluster %q is ready (context: kind-%s).\n",
-			upName, upName)
+		fmt.Printf(`
+rooket up complete. cluster %q is ready.
+
+  kubectl:     rooket k <args>
+  kubeconfig:  export KUBECONFIG="$(rooket kubeconfig --path)"
+`, upName)
 		return nil
 	},
 }
@@ -120,7 +142,7 @@ Example:
 func init() {
 	rootCmd.AddCommand(upCmd)
 
-	upCmd.Flags().StringVar(&upName, "name", "rook", "kind cluster name")
+	upCmd.Flags().StringVar(&upName, "name", "", "kind cluster name")
 	upCmd.Flags().IntVar(&upWorkers, "workers", 3, "number of worker nodes")
 	upCmd.Flags().IntVar(&upDiskCount, "disk-count", 1, "iSCSI disks per worker (0 skips block setup)")
 	upCmd.Flags().IntVar(&upDiskSizeGB, "disk-size", 10, "disk size in GiB")

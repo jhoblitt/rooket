@@ -39,6 +39,9 @@ jobs:
       ROOK_REF: ${{ github.event.inputs.rook_ref || 'master' }}
       WORKERS: ${{ github.event.inputs.workers || '3' }}
       ROOKET_ENGINE: docker
+      # Pin the cluster name: without it every rooket invocation derives the
+      # name from its cwd, which must then never sit inside the rook checkout.
+      ROOKET_NAME: rook
     steps:
       - name: Checkout rooket
         uses: actions/checkout@v4
@@ -103,7 +106,7 @@ jobs:
       - name: Diagnostics (on failure)
         if: failure()
         run: |
-          k() { kubectl --context kind-rook "$@"; }
+          k() { ./rooket kubectl "$@"; }
           k get nodes -o wide || true
           k -n rook-ceph get pods -o wide || true
           k -n rook-ceph get pvc,sc || true

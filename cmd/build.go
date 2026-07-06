@@ -17,6 +17,7 @@ import (
 )
 
 var (
+	buildName         string
 	buildDir          string
 	buildRegistryPort int
 	buildNamespace    string
@@ -24,6 +25,7 @@ var (
 )
 
 var (
+	buildPushName         string
 	buildPushDir          string
 	buildPushRegistryPort int
 	buildPushNamespace    string
@@ -56,6 +58,13 @@ Example:
 				return fmt.Errorf("get working directory: %w", err)
 			}
 		}
+
+		name := clusterName(buildName)
+		port, perr := resolveRegistryPort(name, buildRegistryPort, cmd.Flags().Changed("registry-port"))
+		if perr != nil {
+			return perr
+		}
+		buildRegistryPort = port
 
 		gitRef, err := gitHeadRef(dir)
 		if err != nil {
@@ -203,6 +212,13 @@ Example:
 			}
 		}
 
+		name := clusterName(buildPushName)
+		port, perr := resolveRegistryPort(name, buildPushRegistryPort, cmd.Flags().Changed("registry-port"))
+		if perr != nil {
+			return perr
+		}
+		buildPushRegistryPort = port
+
 		src := buildPushSource
 		if src == "" {
 			regName, err := buildRegistryName(dir)
@@ -243,11 +259,13 @@ func init() {
 	rootCmd.AddCommand(buildCmd)
 	buildCmd.AddCommand(buildPushCmd)
 
+	buildCmd.Flags().StringVar(&buildName, "name", "", "cluster name (selects the registry port)")
 	buildCmd.Flags().StringVar(&buildDir, "dir", "", "path to the rook source directory (default: current directory)")
 	buildCmd.Flags().IntVar(&buildRegistryPort, "registry-port", 5001, "host port for the local OCI registry")
 	buildCmd.Flags().StringVar(&buildNamespace, "namespace", "rook", "image namespace prefix in the registry")
 	buildCmd.Flags().StringVar(&buildTag, "tag", "", "override the full target image reference (e.g. localhost:5001/rook/ceph:v1.2.3)")
 
+	buildPushCmd.Flags().StringVar(&buildPushName, "name", "", "cluster name (selects the registry port)")
 	buildPushCmd.Flags().StringVar(&buildPushDir, "dir", "", "path to the rook source directory (default: current directory)")
 	buildPushCmd.Flags().IntVar(&buildPushRegistryPort, "registry-port", 5001, "host port for the local OCI registry")
 	buildPushCmd.Flags().StringVar(&buildPushNamespace, "namespace", "rook", "image namespace prefix in the registry")

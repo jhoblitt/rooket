@@ -23,9 +23,10 @@ var rootCmd = &cobra.Command{
 Rook development and testing. It drives podman or docker (select with --engine
 or $ROOKET_ENGINE) to create:
 
-  • A local OCI registry (default port 5001) that every cluster node is
-    configured to pull from, so you can push locally-built Rook images with:
-    <engine> push localhost:5001/rook/ceph:dev
+  • A local OCI registry (first free port from 5001, persisted per cluster)
+    that every cluster node is configured to pull from, so you can push
+    locally-built Rook images with:
+    <engine> push localhost:<registry-port>/rook/ceph:dev
 
   • A multi-node kind cluster whose containerd is wired to the local registry.
 
