@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 
@@ -99,10 +100,34 @@ func stateDirNames() (string, []string, error) {
 	return root, names, nil
 }
 
+// clusterNameRE matches a single lowercase RFC-1123 DNS label: what kind
+// accepts as a cluster name and what is safe to join onto the state-dir root as
+// one path segment. It admits no '/', '.', or '..', so a name cannot traverse
+// out of the root.
+var clusterNameRE = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]*[a-z0-9])?$`)
+
+// validateClusterName rejects names that are not a single lowercase DNS label.
+// Enforced centrally in stateDirPath so that an explicit --name or $ROOKET_NAME
+// cannot escape the state-dir root before rooket truncates images or removes
+// directories under it. encodePath already produces conforming names.
+func validateClusterName(name string) error {
+	if len(name) > 63 {
+		return fmt.Errorf("invalid cluster name %q: longer than 63 characters", name)
+	}
+	if !clusterNameRE.MatchString(name) {
+		return fmt.Errorf("invalid cluster name %q: must be a lowercase DNS label (letters, digits, and internal dashes only)", name)
+	}
+	return nil
+}
+
 // stateDirPath returns a cluster's state directory (~/.local/share/rooket/<name>)
 // without creating it. The directory holds the cluster's disk images,
-// kubeconfig, and metadata.
+// kubeconfig, and metadata. The name is validated first so it stays a single
+// path segment within the state root.
 func stateDirPath(name string) (string, error) {
+	if err := validateClusterName(name); err != nil {
+		return "", err
+	}
 	root, err := stateDirRoot()
 	if err != nil {
 		return "", err
