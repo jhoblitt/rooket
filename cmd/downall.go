@@ -12,13 +12,41 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/jhoblitt/rooket/internal/cluster"
+	"github.com/jhoblitt/rooket/internal/engine"
 	"github.com/jhoblitt/rooket/internal/registry"
 )
 
+// scopeTeardownSet decides which clusters 'down --all' acts on. Every state dir
+// is rooket's, so all of them are included. A live kind cluster is included
+// only when it is rooket-owned — it has a state dir, or owns() finds a rooket
+// registry container for it — or inclUnmanaged is set; otherwise it is a
+// foreign kind cluster (someone else's 'kind create cluster') and is returned
+// in unmanaged and left alone. This keeps 'down --all --force' from deleting
+// clusters rooket never created.
+func scopeTeardownSet(live map[string][]engine.Engine, stateNames []string, inclUnmanaged bool, owns func(string, []engine.Engine) bool) (set map[string]bool, unmanaged []string) {
+	set = map[string]bool{}
+	hasState := map[string]bool{}
+	for _, n := range stateNames {
+		hasState[n] = true
+		set[n] = true
+	}
+	for n, engs := range live {
+		switch {
+		case hasState[n] || owns(n, engs) || inclUnmanaged:
+			set[n] = true
+		default:
+			unmanaged = append(unmanaged, n)
+		}
+	}
+	sort.Strings(unmanaged)
+	return set, unmanaged
+}
+
 var (
-	downAll    bool
-	downForce  bool
-	downDryRun bool
+	downAll           bool
+	downForce         bool
+	downDryRun        bool
+	downInclUnmanaged bool
 )
 
 // downAllRun tears down every cluster rooket can see: kind clusters live under
@@ -53,12 +81,20 @@ func downAllRun(cmd *cobra.Command) error {
 	for _, n := range stateNames {
 		hasState[n] = true
 	}
-	all := map[string]bool{}
-	for n := range live {
-		all[n] = true
+	owns := func(name string, engs []engine.Engine) bool {
+		for _, eng := range engs {
+			if registry.Exists(eng, registry.ContainerName(name)) {
+				return true
+			}
+		}
+		return false
 	}
-	for _, n := range stateNames {
-		all[n] = true
+	all, unmanaged := scopeTeardownSet(live, stateNames, downInclUnmanaged, owns)
+	if len(unmanaged) > 0 {
+		fmt.Fprintf(os.Stderr,
+			"skipping %d unmanaged kind cluster(s) with no rooket state or registry: %s\n"+
+				"  (pass --include-unmanaged to tear these down too)\n",
+			len(unmanaged), strings.Join(unmanaged, ", "))
 	}
 	if len(all) == 0 {
 		fmt.Println("nothing to tear down")
@@ -167,7 +203,8 @@ func downAllRun(cmd *cobra.Command) error {
 }
 
 func init() {
-	downCmd.Flags().BoolVar(&downAll, "all", false, "tear down every cluster: live under any engine, plus all state dirs")
+	downCmd.Flags().BoolVar(&downAll, "all", false, "tear down every rooket cluster: rooket-owned clusters live under any engine, plus all state dirs")
 	downCmd.Flags().BoolVar(&downForce, "force", false, "with --all: skip the confirmation prompt")
 	downCmd.Flags().BoolVar(&downDryRun, "dry-run", false, "with --all: list what would be torn down, then exit")
+	downCmd.Flags().BoolVar(&downInclUnmanaged, "include-unmanaged", false, "with --all: also tear down live kind clusters that have no rooket state or registry")
 }
