@@ -144,6 +144,9 @@ func downAllRun(cmd *cobra.Command) error {
 		}
 	}
 
+	// blocked marks clusters that survived a failed delete: their disks may still
+	// be in use, so nothing downstream may zap, teardown, or remove their state.
+	blocked := map[string]bool{}
 	for _, n := range names {
 		engs := live[n]
 		if len(engs) == 0 {
@@ -159,6 +162,13 @@ func downAllRun(cmd *cobra.Command) error {
 				fmt.Printf("warning: delete registry for %q under %s: %v\n", n, eng, err)
 			}
 		}
+		// Confirm the cluster is actually gone before anything truncates or
+		// removes its disks; a survivor still holding them must be left intact.
+		if stillLive(engs, n) {
+			blocked[n] = true
+			fmt.Fprintf(os.Stderr, "warning: cluster %q is still present after delete; leaving its disks and state alone\n", n)
+			continue
+		}
 		if kc != "" {
 			_ = os.Remove(kc)
 		}
@@ -172,7 +182,7 @@ func downAllRun(cmd *cobra.Command) error {
 	if downDeleteDisks && !downSkipBlock {
 		var disks []iscsiDisk
 		for _, n := range names {
-			if hasState[n] {
+			if hasState[n] && !blocked[n] {
 				disks = append(disks, stateDirDisks(n, filepath.Join(root, n), downIQNDate)...)
 			}
 		}
@@ -184,7 +194,7 @@ func downAllRun(cmd *cobra.Command) error {
 			}
 		}
 		for _, n := range names {
-			if !hasState[n] {
+			if !hasState[n] || blocked[n] {
 				continue
 			}
 			dir := filepath.Join(root, n)
@@ -198,8 +208,29 @@ func downAllRun(cmd *cobra.Command) error {
 		fmt.Println("block teardown skipped by --skip-block; disk images and state dirs preserved")
 	}
 
+	if len(blocked) > 0 {
+		names := make([]string, 0, len(blocked))
+		for n := range blocked {
+			names = append(names, n)
+		}
+		sort.Strings(names)
+		return fmt.Errorf("could not delete %d cluster(s), left intact: %s", len(blocked), strings.Join(names, ", "))
+	}
+
 	fmt.Println("\nrooket down --all complete.")
 	return nil
+}
+
+// stillLive reports whether a kind cluster is still present under any of the
+// given engines — used after a delete attempt to decide whether its disks are
+// safe to zap.
+func stillLive(engs []engine.Engine, name string) bool {
+	for _, eng := range engs {
+		if ok, err := cluster.Exists(eng, name); err == nil && ok {
+			return true
+		}
+	}
+	return false
 }
 
 func init() {
