@@ -33,12 +33,15 @@ $ rooket down                 # cluster gone, disks kept for the next up (no roo
 $ rooket down --delete-disks  # full teardown: targets, images, state (needs root)
 ```
 
-To free the whole machine in one shot, `rooket down --all` tears down **every**
-cluster — live under any engine, plus orphaned state dirs — after showing the
-plan and prompting (`--force` skips, `--dry-run` stops at the plan). Add
-`--delete-disks` to also remove every cluster's iSCSI targets, disk images,
-and state dir; all target teardowns are batched into one privileged script, so
-the sweep costs at most a single sudo/pkexec prompt.
+To free the whole machine in one shot, `rooket down --all` tears down every
+**rooket** cluster — all state dirs (orphans included) plus the live kind
+clusters rooket owns — after showing the plan and prompting (`--force` skips,
+`--dry-run` stops at the plan). A live cluster counts as rooket's only if it
+has a state dir or a rooket registry container, so a foreign `kind create
+cluster` is left alone unless you pass `--include-unmanaged`. Add
+`--delete-disks` to also remove every cluster's iSCSI targets, disk images, and
+state dir; all target teardowns are batched into one privileged script, so the
+sweep costs at most a single sudo/pkexec prompt.
 
 `rooket up` finds the rook source via `--dir`, `$ROOK_DIR`, or by walking up
 from the current directory to the enclosing rook clone.
