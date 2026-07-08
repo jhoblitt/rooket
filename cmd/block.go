@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 
@@ -59,6 +60,9 @@ rooket tries sudo -n first, then pkexec.
 
 func blockSetupRun(_ *cobra.Command, _ []string) error {
 	blockSetupName = clusterName(blockSetupName)
+	if err := validateIQNDate(blockSetupIQNDate); err != nil {
+		return err
+	}
 
 	dataDir := blockSetupDataDir
 	if dataDir == "" {
@@ -150,6 +154,9 @@ sudo -n first, then pkexec.
 
 func blockTeardownRun(_ *cobra.Command, _ []string) error {
 	blockTeardownName = clusterName(blockTeardownName)
+	if err := validateIQNDate(blockTeardownIQNDate); err != nil {
+		return err
+	}
 
 	dataDir := blockTeardownDataDir
 	if dataDir == "" {
@@ -221,15 +228,37 @@ func buildISCSITeardownScript(disks []iscsiDisk) string {
 	var sb strings.Builder
 	sb.WriteString("set -e\n")
 	for _, d := range disks {
-		sb.WriteString(fmt.Sprintf("iscsiadm -m node -T %s -u 2>/dev/null || true\n", d.targetIQN))
-		sb.WriteString(fmt.Sprintf("iscsiadm -m node -T %s -o delete 2>/dev/null || true\n", d.targetIQN))
+		sb.WriteString(fmt.Sprintf("iscsiadm -m node -T %s -u 2>/dev/null || true\n", shQuote(d.targetIQN)))
+		sb.WriteString(fmt.Sprintf("iscsiadm -m node -T %s -o delete 2>/dev/null || true\n", shQuote(d.targetIQN)))
 	}
 	for _, d := range disks {
-		sb.WriteString(fmt.Sprintf("targetcli /iscsi delete %s 2>/dev/null || true\n", d.targetIQN))
-		sb.WriteString(fmt.Sprintf("targetcli /backstores/fileio delete %s 2>/dev/null || true\n", d.backstoreName))
+		sb.WriteString(fmt.Sprintf("targetcli /iscsi delete %s 2>/dev/null || true\n", shQuote(d.targetIQN)))
+		sb.WriteString(fmt.Sprintf("targetcli /backstores/fileio delete %s 2>/dev/null || true\n", shQuote(d.backstoreName)))
 	}
 	sb.WriteString("targetcli saveconfig\n")
 	return sb.String()
+}
+
+// shQuote single-quotes s for safe interpolation into a /bin/sh script,
+// escaping any embedded single quote. The iSCSI scripts run through
+// sudo/pkexec, so every dynamic operand — cluster-derived names, IQNs, and
+// image paths — must be quoted rather than pasted in raw.
+func shQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
+}
+
+// iqnDateRE matches the YYYY-MM date component of an IQN.
+var iqnDateRE = regexp.MustCompile(`^[0-9]{4}-[0-9]{2}$`)
+
+// validateIQNDate rejects a malformed --iqn-date. The value lands in every
+// target IQN; constraining it to YYYY-MM keeps a stray character out of the
+// IQNs (and, with shQuote, out of the privileged script) and matches the IQN
+// naming convention.
+func validateIQNDate(date string) error {
+	if !iqnDateRE.MatchString(date) {
+		return fmt.Errorf("invalid --iqn-date %q: want YYYY-MM (e.g. 2003-01)", date)
+	}
+	return nil
 }
 
 // buildISCSIScript generates the privileged shell script that:
@@ -242,24 +271,28 @@ func buildISCSIScript(initIQN string, disks []iscsiDisk, sizeGB int) string {
 	var sb strings.Builder
 	sb.WriteString("set -e\n")
 	sb.WriteString("systemctl start iscsid\n")
-	sb.WriteString(fmt.Sprintf("printf 'InitiatorName=%s\\n' | tee /etc/iscsi/initiatorname.iscsi > /dev/null\n", initIQN))
+	sb.WriteString(fmt.Sprintf("printf 'InitiatorName=%%s\\n' %s | tee /etc/iscsi/initiatorname.iscsi > /dev/null\n", shQuote(initIQN)))
 
 	for _, d := range disks {
+		lunsPath := fmt.Sprintf("/iscsi/%s/tpg1/luns", d.targetIQN)
+		aclsPath := fmt.Sprintf("/iscsi/%s/tpg1/acls", d.targetIQN)
+		aclPath := fmt.Sprintf("/iscsi/%s/tpg1/acls/%s", d.targetIQN, initIQN)
+		backstoreRef := fmt.Sprintf("/backstores/fileio/%s", d.backstoreName)
 		sb.WriteString(fmt.Sprintf(
 			"targetcli /backstores/fileio create %s %s %dG 2>/dev/null || true\n",
-			d.backstoreName, d.imgPath, sizeGB))
+			shQuote(d.backstoreName), shQuote(d.imgPath), sizeGB))
 		sb.WriteString(fmt.Sprintf(
 			"targetcli /iscsi create %s 2>/dev/null || true\n",
-			d.targetIQN))
+			shQuote(d.targetIQN)))
 		sb.WriteString(fmt.Sprintf(
-			"targetcli /iscsi/%s/tpg1/luns create /backstores/fileio/%s 2>/dev/null || true\n",
-			d.targetIQN, d.backstoreName))
+			"targetcli %s create %s 2>/dev/null || true\n",
+			shQuote(lunsPath), shQuote(backstoreRef)))
 		sb.WriteString(fmt.Sprintf(
-			"targetcli /iscsi/%s/tpg1/acls create %s 2>/dev/null || true\n",
-			d.targetIQN, initIQN))
+			"targetcli %s create %s 2>/dev/null || true\n",
+			shQuote(aclsPath), shQuote(initIQN)))
 		sb.WriteString(fmt.Sprintf(
-			"targetcli /iscsi/%s/tpg1/acls/%s create tpg_lun_or_backstore=lun0 mapped_lun=0 2>/dev/null || true\n",
-			d.targetIQN, initIQN))
+			"targetcli %s create tpg_lun_or_backstore=lun0 mapped_lun=0 2>/dev/null || true\n",
+			shQuote(aclPath)))
 	}
 
 	sb.WriteString("targetcli saveconfig\n")
