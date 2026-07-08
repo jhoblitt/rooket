@@ -39,7 +39,18 @@ must be torn down separately if desired.
 		// --- Step 1: kind cluster (releases the OSD disks) ---
 		fmt.Println("==> deleting kind cluster")
 		if err := cluster.Delete(deleteName); err != nil {
-			fmt.Printf("warning: delete cluster: %v\n", err)
+			// kind delete is a no-op success on an absent cluster, so an error
+			// means something went wrong. The zap below truncates the OSD disk
+			// images; doing that while the cluster still holds them corrupts a
+			// live cluster. Only continue if the cluster is confirmed gone.
+			exists, exErr := cluster.Exists(containerEngine, deleteName)
+			if exErr != nil {
+				return fmt.Errorf("delete cluster %q: %w; could not verify it was removed (%v), so not zapping its disks", deleteName, err, exErr)
+			}
+			if exists {
+				return fmt.Errorf("delete cluster %q: %w; cluster still present, not zapping its disks", deleteName, err)
+			}
+			fmt.Printf("warning: delete cluster returned an error but the cluster is gone: %v\n", err)
 		}
 		// kind delete strips the cluster's entries but leaves the (now empty)
 		// kubeconfig file behind; remove it so 'rooket k' reports "is it up?"
