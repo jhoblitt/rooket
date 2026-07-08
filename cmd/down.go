@@ -31,12 +31,15 @@ down needs no root and the next up reuses the devices without prompting either.
 Pass --delete-disks for the full teardown (this is the step that needs
 sudo/pkexec). Use --skip-cluster to omit the cluster step.
 
---all tears down every cluster at once instead of one: kind clusters live
-under any installed engine (rooket-created or not) plus every state directory
-under ~/.local/share/rooket, orphans included. It prompts with the full plan
-first; --force skips the prompt and --dry-run stops at it. With --delete-disks
-all iSCSI target teardowns are batched into a single privileged script, so
-freeing the whole machine costs at most one sudo/pkexec prompt.
+--all tears down every rooket cluster at once instead of one: every state
+directory under ~/.local/share/rooket (orphans included) plus the kind clusters
+rooket owns that are live under any installed engine — a live cluster counts as
+rooket's only if it has a state dir or a rooket registry container, so a
+foreign 'kind create cluster' is left alone (add --include-unmanaged to sweep
+those too). It prompts with the full plan first; --force skips the prompt and
+--dry-run stops at it. With --delete-disks all iSCSI target teardowns are
+batched into a single privileged script, so freeing the whole machine costs at
+most one sudo/pkexec prompt.
 
 Example:
   rooket down                      # cluster gone, disks kept: no root needed
@@ -52,6 +55,9 @@ Example:
 		}
 		if downDryRun {
 			return fmt.Errorf("--dry-run requires --all")
+		}
+		if downInclUnmanaged {
+			return fmt.Errorf("--include-unmanaged requires --all")
 		}
 
 		downName = clusterName(downName)
