@@ -3,6 +3,7 @@ package cluster
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -274,8 +275,11 @@ func Nodes(clusterName string) ([]string, error) {
 //     node-local) and Rook's OSD pods bind-mount the node's /dev, so the mask
 //     reaches ceph-volume. ownDevsByNode maps node name -> the OSD device(s) it keeps.
 //
-// Per-node failures are logged, not fatal. The /run/udev and /dev/disk
-// bind-mounts live in the kind config, not here.
+// Failures across all nodes are collected and returned together (not just
+// logged), so creation aborts before deploying onto a mis-prepared node — for
+// example one whose foreign-device mask failed and can still see another
+// worker's OSD disk. The /run/udev and /dev/disk bind-mounts live in the kind
+// config, not here.
 func PrepareNodes(eng engine.Engine, clusterName string, ownDevsByNode map[string][]string) error {
 	nodes, err := Nodes(clusterName)
 	if err != nil {
@@ -289,15 +293,16 @@ func PrepareNodes(eng engine.Engine, clusterName string, ownDevsByNode map[strin
 		}
 	}
 
+	var errs []error
 	for _, node := range nodes {
 		if err := run.Cmd(eng.String(), "exec", node, "mount", "-o", "remount,rw", "/sys"); err != nil {
-			fmt.Printf("warning: remount /sys read-write on node %s: %v\n", node, err)
+			errs = append(errs, fmt.Errorf("remount /sys read-write on node %s: %w", node, err))
 		}
 		if err := installNodePackages(eng, node); err != nil {
-			fmt.Printf("warning: install lvm2/cryptsetup on node %s: %v\n", node, err)
+			errs = append(errs, fmt.Errorf("install lvm2/cryptsetup on node %s: %w", node, err))
 		}
 		if err := run.Cmd(eng.String(), "exec", node, "dmsetup", "mknodes"); err != nil {
-			fmt.Printf("warning: dmsetup mknodes on node %s: %v\n", node, err)
+			errs = append(errs, fmt.Errorf("dmsetup mknodes on node %s: %w", node, err))
 		}
 		keep := map[string]bool{}
 		for _, d := range ownDevsByNode[node] {
@@ -308,11 +313,11 @@ func PrepareNodes(eng engine.Engine, clusterName string, ownDevsByNode map[strin
 				continue
 			}
 			if err := run.Cmd(eng.String(), "exec", node, "rm", "-f", dev); err != nil {
-				fmt.Printf("warning: mask foreign OSD device %s on node %s: %v\n", dev, node, err)
+				errs = append(errs, fmt.Errorf("mask foreign OSD device %s on node %s: %w", dev, node, err))
 			}
 		}
 	}
-	return nil
+	return errors.Join(errs...)
 }
 
 // installNodePackages installs lvm2 and cryptsetup into a kind node, retrying to
