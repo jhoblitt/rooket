@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 
@@ -148,7 +149,7 @@ func installRookCephOperator(dir string) error {
 	fmt.Printf("    release:    %s\n", deployOperatorName)
 	fmt.Printf("    namespace:  rook-ceph\n")
 
-	return run.Cmd(
+	if err := run.Cmd(
 		"helm",
 		"--kube-context", deployKubeContext,
 		"-n", "rook-ceph",
@@ -157,7 +158,112 @@ func installRookCephOperator(dir string) error {
 		chartPath,
 		"--set", fmt.Sprintf("image.repository=%s", imageRepo),
 		"--set", fmt.Sprintf("image.tag=%s", imageTag),
-	)
+	); err != nil {
+		return err
+	}
+
+	return installCephCsiDrivers(dir)
+}
+
+// csiDriversValues configures the ceph-csi-drivers chart: the RBD and CephFS
+// driver names must carry the operator-namespace prefix that the
+// rook-ceph-cluster chart's StorageClasses use as their provisioner; snapshot
+// support stays off (kind clusters have no VolumeSnapshot CRDs, and the
+// chart's cephfs driver defaults it on); and the nfs and nvmeof drivers,
+// enabled by chart default, are not deployed by rooket.
+const csiDriversValues = `operatorConfig:
+  namespace: rook-ceph
+drivers:
+  rbd:
+    name: rook-ceph.rbd.csi.ceph.com
+    snapshotPolicy: none
+  cephfs:
+    name: rook-ceph.cephfs.csi.ceph.com
+    snapshotPolicy: none
+  nfs:
+    enabled: false
+  nvmeof:
+    enabled: false
+`
+
+// installCephCsiDrivers installs the ceph-csi-drivers helm chart for rook
+// refs that need it. Since v1.20, rook's helm chart installs the
+// ceph-csi-operator but rook no longer creates the csi.ceph.io Driver CRs —
+// they and the driver pods' ServiceAccounts and RBAC moved to the separate
+// ceph-csi-drivers chart, a documented new v1.20 requirement for helm
+// installs; without it no CSI driver pods run and every PVC pends. Earlier
+// refs must NOT get the chart: v1.18/v1.19 deploy a csi-operator too, but
+// their rook still creates the Driver CRs itself and would fight the chart
+// over them. The flow is read from the rook-ceph chart's ceph-csi-operator
+// dependency: v1.20 renamed its gating condition to csi.installCsiOperator
+// in the same move that took Driver creation out of rook, so the condition
+// name identifies the flow, and the dependency's version pin — released in
+// lockstep with the drivers chart — supplies the matching chart version.
+func installCephCsiDrivers(dir string) error {
+	chartYAML := filepath.Join(dir, "deploy", "charts", "rook-ceph", "Chart.yaml")
+	version, condition, err := cephCsiOperatorDep(chartYAML)
+	if err != nil {
+		return err
+	}
+	if condition != "csi.installCsiOperator" {
+		fmt.Println("==> rook ref predates the ceph-csi-drivers chart (rook < 1.20); its operator manages CSI itself")
+		return nil
+	}
+	if version == "" {
+		return fmt.Errorf("ceph-csi-operator dependency in %s has no version, so the matching ceph-csi-drivers chart version is unknown", chartYAML)
+	}
+
+	fmt.Printf("==> deploying ceph-csi-drivers %s (Driver CRs and driver RBAC the rook-ceph chart does not ship)\n", version)
+	var installErr error
+	for attempt := 1; attempt <= 5; attempt++ {
+		if installErr = run.CmdWithStdin(strings.NewReader(csiDriversValues),
+			"helm",
+			"--kube-context", deployKubeContext,
+			"-n", "rook-ceph",
+			"upgrade", "--install",
+			"ceph-csi-drivers", "ceph-csi-drivers",
+			"--repo", "https://ceph.github.io/ceph-csi-operator",
+			"--version", version,
+			"-f", "-",
+		); installErr == nil {
+			return nil
+		}
+		// The csi.ceph.io CRDs arrive with the rook-ceph chart applied
+		// moments earlier and may not be established yet.
+		time.Sleep(5 * time.Second)
+	}
+	return fmt.Errorf("install ceph-csi-drivers chart: %w", installErr)
+}
+
+// cephCsiOperatorDep returns the version and gating condition of the
+// rook-ceph chart's ceph-csi-operator dependency, or empty strings when the
+// chart has no such dependency.
+func cephCsiOperatorDep(chartYAML string) (version, condition string, err error) {
+	data, err := os.ReadFile(chartYAML)
+	if err != nil {
+		return "", "", fmt.Errorf("read %s: %w", chartYAML, err)
+	}
+	inDep := false
+	for _, line := range strings.Split(string(data), "\n") {
+		t := strings.TrimSpace(line)
+		if strings.HasPrefix(t, "- name:") {
+			if inDep {
+				break
+			}
+			inDep = strings.TrimSpace(strings.TrimPrefix(t, "- name:")) == "ceph-csi-operator"
+			continue
+		}
+		if !inDep {
+			continue
+		}
+		if v, ok := strings.CutPrefix(t, "version:"); ok {
+			version = strings.Trim(strings.TrimSpace(v), `"'`)
+		}
+		if c, ok := strings.CutPrefix(t, "condition:"); ok {
+			condition = strings.TrimSpace(c)
+		}
+	}
+	return version, condition, nil
 }
 
 func installRookCephCluster(dir string) error {
