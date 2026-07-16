@@ -17,8 +17,8 @@ on:
   workflow_dispatch:
     inputs:
       rook_ref:
-        description: "rook git ref to build and deploy"
-        default: "master"
+        description: "rook git ref to build and deploy in every matrix job (default: each job's own matrix ref)"
+        default: ""
       workers:
         description: "kind worker nodes (one OSD each)"
         default: "3"
@@ -63,11 +63,19 @@ jobs:
         run: go test -race ./...
 
   e2e:
-    name: rooket up/down e2e (docker)
+    name: rooket up/down e2e (docker, ${{ matrix.rook-ref }})
     runs-on: ubuntu-latest
     timeout-minutes: 120
+    strategy:
+      # Cover both CSI deploy flows rooket must handle: release-1.19, where
+      # the rook operator creates the csi.ceph.io Driver CRs itself, and
+      # release-1.20/master, where rooket installs the separate
+      # ceph-csi-drivers chart.
+      fail-fast: false
+      matrix:
+        rook-ref: [release-1.19, release-1.20, master]
     env:
-      ROOK_REF: ${{ github.event.inputs.rook_ref || 'master' }}
+      ROOK_REF: ${{ github.event.inputs.rook_ref || matrix.rook-ref }}
       WORKERS: ${{ github.event.inputs.workers || '3' }}
       ROOKET_ENGINE: docker
       # Pin the cluster name: without it every rooket invocation derives the

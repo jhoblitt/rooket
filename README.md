@@ -87,11 +87,14 @@ $ export KUBECONFIG="$(rooket kubeconfig --path)"    # or point your own tools a
 Unit tests: `go test ./...`. The end-to-end suite
 (`go test -tags e2e ./test/e2e/ -timeout 60m`, needs `ROOK_DIR` and existing
 block devices) drives a real `rooket up`/`down` and asserts one OSD per
-worker, no loop devices, a settled healthy cluster, RADOS and CSI-PVC I/O,
-the `list`/`kubectl`/`kubeconfig`/`prune` surfaces, registry-port reuse
-across re-ups, `down --all` ownership scoping against a foreign kind
-cluster, and clean teardown. CI runs the suite under docker on every PR,
-alongside a fast unit + vet job.
+worker, no loop devices, a settled healthy cluster, RADOS I/O, CSI block-PVC
+provisioning and CephFS-PVC I/O (krbd mounts need udev-created device nodes,
+which kind nodes lack), the `list`/`kubectl`/`kubeconfig`/`prune` surfaces,
+registry-port reuse across re-ups, `down --all` ownership scoping against a
+foreign kind cluster, and clean teardown. CI runs the suite under docker on
+every PR against rook master, release-1.20, and release-1.19 — covering both
+the ceph-csi-drivers and rook-managed CSI flows — alongside a fast unit + vet
+job.
 
 ## Upgrading from older rooket
 
