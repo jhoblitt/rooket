@@ -81,6 +81,7 @@ $ export KUBECONFIG="$(rooket kubeconfig --path)"    # or point your own tools a
 | `rooket list` | list clusters: live status, registry port, state dir |
 | `rooket prune` | remove state dirs of clusters that no longer exist |
 | `rooket config` | print the kind config that `create` would use |
+| `rooket version` | print the version, commit, build time, and Go toolchain |
 
 ## Tests
 
