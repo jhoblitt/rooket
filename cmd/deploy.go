@@ -244,31 +244,16 @@ func installCephCsiDrivers(dir string) error {
 // rook-ceph chart's ceph-csi-operator dependency, or empty strings when the
 // chart has no such dependency.
 func cephCsiOperatorDep(chartYAML string) (version, condition string, err error) {
-	data, err := os.ReadFile(chartYAML)
+	deps, err := chartDeps(chartYAML)
 	if err != nil {
-		return "", "", fmt.Errorf("read %s: %w", chartYAML, err)
+		return "", "", err
 	}
-	inDep := false
-	for _, line := range strings.Split(string(data), "\n") {
-		t := strings.TrimSpace(line)
-		if strings.HasPrefix(t, "- name:") {
-			if inDep {
-				break
-			}
-			inDep = strings.TrimSpace(strings.TrimPrefix(t, "- name:")) == "ceph-csi-operator"
-			continue
-		}
-		if !inDep {
-			continue
-		}
-		if v, ok := strings.CutPrefix(t, "version:"); ok {
-			version = strings.Trim(strings.TrimSpace(v), `"'`)
-		}
-		if c, ok := strings.CutPrefix(t, "condition:"); ok {
-			condition = strings.TrimSpace(c)
+	for _, d := range deps {
+		if d.name == "ceph-csi-operator" {
+			return d.version, d.condition, nil
 		}
 	}
-	return version, condition, nil
+	return "", "", nil
 }
 
 func installRookCephCluster(dir string) error {

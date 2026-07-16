@@ -72,6 +72,10 @@ Example:
 			gitRef = "latest"
 		}
 
+		if err := pruneStaleChartDeps(dir); err != nil {
+			return fmt.Errorf("prune stale chart dependency archives: %w", err)
+		}
+
 		fmt.Printf("==> running make in %s\n", dir)
 		builtImages, err := runMakeCapture(dir)
 		if err != nil {
