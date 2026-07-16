@@ -158,6 +158,11 @@ func installRookCephOperator(dir string) error {
 		chartPath,
 		"--set", fmt.Sprintf("image.repository=%s", imageRepo),
 		"--set", fmt.Sprintf("image.tag=%s", imageTag),
+		// One provisioner per driver is plenty for a dev cluster, and the HA
+		// pair starves small hosts. Consumed only by refs where rook manages
+		// the CSI drivers itself (<= v1.19); newer refs take the drivers
+		// chart's default of one replica.
+		"--set", "csi.provisionerReplicas=1",
 	); err != nil {
 		return err
 	}
@@ -277,6 +282,10 @@ func installRookCephCluster(dir string) error {
 		chartPath,
 		"--set", "operatorNamespace=rook-ceph",
 		"--set", "toolbox.enabled=true",
+		// A standby mgr adds nothing to a disposable dev cluster and its
+		// requests eat a node's cpu budget — enough to leave the mds and the
+		// detect-version jobs unschedulable on a 4-vCPU host.
+		"--set", "cephClusterSpec.mgr.count=1",
 	}
 
 	fmt.Printf("==> deploying rook-ceph-cluster\n")
@@ -284,48 +293,61 @@ func installRookCephCluster(dir string) error {
 	fmt.Printf("    release:    %s\n", deployClusterName)
 	fmt.Printf("    namespace:  rook-ceph\n")
 
-	// Pin one OSD to each worker's own iSCSI disk with an explicit per-node device
-	// list. Every privileged kind node sees every host disk, so naming the device
-	// per node is what keeps Rook from mis-attributing OSDs; this puts the OSD on
-	// Rook's direct device path, with no local PV or kubelet loop device.
 	if deployWorkers > 0 && deployDiskCount > 0 {
-		valuesPath, err := writeClusterStorageValues()
-		if err != nil {
-			return err
-		}
-		defer os.Remove(valuesPath)
 		fmt.Printf("    storage:    %d node-device OSD(s) (one per worker)\n", deployWorkers*deployDiskCount)
-		args = append(args, "-f", valuesPath)
 	}
+	valuesPath, err := writeClusterValues()
+	if err != nil {
+		return err
+	}
+	defer os.Remove(valuesPath)
+	args = append(args, "-f", valuesPath)
 
 	return run.Cmd("helm", args...)
 }
 
-// writeClusterStorageValues renders a Helm values file pinning one OSD to each
-// worker's own iSCSI disk with an explicit per-node device list. Naming the
-// device per node keeps Rook from mis-attributing OSDs (every privileged kind
-// node sees every host disk), so each worker gets exactly one OSD on its own
-// disk via Rook's direct device path — no local PV, no kubelet loop. Returns the
-// file path; the caller removes it.
-func writeClusterStorageValues() (string, error) {
+// writeClusterValues renders the rook-ceph-cluster Helm values file. It pins
+// one OSD to each worker's own iSCSI disk with an explicit per-node device
+// list — naming the device per node keeps Rook from mis-attributing OSDs
+// (every privileged kind node sees every host disk), so each worker gets
+// exactly one OSD on its own disk via Rook's direct device path, no local PV,
+// no kubelet loop. It also trims the chart's production-HA cpu requests
+// (1 cpu per mon and per OSD): on a small host those fill each node's request
+// budget until later components — the detect-version jobs, the mds — cannot
+// schedule at all, seen as a wedged cluster on 4-vCPU CI runners. Memory
+// requests are left alone (rook derives osd_memory_target from them). Returns
+// the file path; the caller removes it.
+func writeClusterValues() (string, error) {
 	var sb strings.Builder
 	sb.WriteString("cephClusterSpec:\n")
-	sb.WriteString("  storage:\n")
-	sb.WriteString("    useAllNodes: false\n")
-	sb.WriteString("    useAllDevices: false\n")
-	sb.WriteString("    nodes:\n")
-	for i := 0; i < deployWorkers; i++ {
-		node := workerNodeName(deployName, i)
-		sb.WriteString(fmt.Sprintf("      - name: %s\n", node))
-		sb.WriteString("        devices:\n")
-		for d := 0; d < deployDiskCount; d++ {
-			iqn := fmt.Sprintf("iqn.%s.local.rooket:%s-worker%d-disk%d",
-				deployIQNDate, deployName, i, d)
-			dev, err := waitForISCSIDevice(iqn)
-			if err != nil {
-				return "", fmt.Errorf("resolve iSCSI device for worker %d disk %d: %w", i, d, err)
+	sb.WriteString("  resources:\n")
+	sb.WriteString("    mon:\n")
+	sb.WriteString("      requests:\n")
+	sb.WriteString("        cpu: 500m\n")
+	sb.WriteString("    osd:\n")
+	sb.WriteString("      requests:\n")
+	sb.WriteString("        cpu: 500m\n")
+	sb.WriteString("    mgr:\n")
+	sb.WriteString("      requests:\n")
+	sb.WriteString("        cpu: 300m\n")
+	if deployWorkers > 0 && deployDiskCount > 0 {
+		sb.WriteString("  storage:\n")
+		sb.WriteString("    useAllNodes: false\n")
+		sb.WriteString("    useAllDevices: false\n")
+		sb.WriteString("    nodes:\n")
+		for i := 0; i < deployWorkers; i++ {
+			node := workerNodeName(deployName, i)
+			sb.WriteString(fmt.Sprintf("      - name: %s\n", node))
+			sb.WriteString("        devices:\n")
+			for d := 0; d < deployDiskCount; d++ {
+				iqn := fmt.Sprintf("iqn.%s.local.rooket:%s-worker%d-disk%d",
+					deployIQNDate, deployName, i, d)
+				dev, err := waitForISCSIDevice(iqn)
+				if err != nil {
+					return "", fmt.Errorf("resolve iSCSI device for worker %d disk %d: %w", i, d, err)
+				}
+				sb.WriteString(fmt.Sprintf("          - name: %s\n", dev))
 			}
-			sb.WriteString(fmt.Sprintf("          - name: %s\n", dev))
 		}
 	}
 
