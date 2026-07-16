@@ -31,6 +31,37 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # Fast signal in parallel with the e2e job: a compile error, vet finding, or
+  # unit-test failure reds out in ~1 minute instead of partway into a
+  # ~12-minute e2e run.
+  unit:
+    name: unit tests + vet
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout rooket
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      - name: Set up Go
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with:
+          go-version: "1.26"
+
+      - name: gofmt
+        run: |
+          unformatted=$(git ls-files '*.go' | xargs gofmt -l)
+          if [ -n "$unformatted" ]; then
+            echo "gofmt needed on:" && echo "$unformatted" && exit 1
+          fi
+
+      - name: go vet (including the e2e suite)
+        run: |
+          go vet ./...
+          go vet -tags e2e ./test/e2e/
+
+      - name: Unit tests
+        run: go test -race ./...
+
   e2e:
     name: rooket up/down e2e (docker)
     runs-on: ubuntu-latest
@@ -44,7 +75,7 @@ jobs:
       ROOKET_NAME: rook
     steps:
       - name: Checkout rooket
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
 
       - name: Free up runner disk
         run: |
@@ -54,7 +85,7 @@ jobs:
           df -h /
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
           go-version: "1.26"
 
@@ -77,7 +108,7 @@ jobs:
           sudo systemctl enable --now iscsid
 
       - name: Checkout rook
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
           repository: rook/rook
           ref: ${{ env.ROOK_REF }}

@@ -1,0 +1,12 @@
+version: 2
+updates:
+  # Bumps the commit-SHA action pins (pinact's "# vX.Y.Z" comments make them
+  # Dependabot-readable).
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+  - package-ecosystem: gomod
+    directory: /
+    schedule:
+      interval: weekly
