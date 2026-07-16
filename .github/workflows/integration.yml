@@ -17,8 +17,8 @@ on:
   workflow_dispatch:
     inputs:
       rook_ref:
-        description: "rook git ref to build and deploy"
-        default: "master"
+        description: "rook git ref to build and deploy in every matrix job (default: each job's own matrix ref)"
+        default: ""
       workers:
         description: "kind worker nodes (one OSD each)"
         default: "3"
@@ -31,12 +31,51 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # Fast signal in parallel with the e2e job: a compile error, vet finding, or
+  # unit-test failure reds out in ~1 minute instead of partway into a
+  # ~12-minute e2e run.
+  unit:
+    name: unit tests + vet
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout rooket
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      - name: Set up Go
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with:
+          go-version: "1.26"
+
+      - name: gofmt
+        run: |
+          unformatted=$(git ls-files '*.go' | xargs gofmt -l)
+          if [ -n "$unformatted" ]; then
+            echo "gofmt needed on:" && echo "$unformatted" && exit 1
+          fi
+
+      - name: go vet (including the e2e suite)
+        run: |
+          go vet ./...
+          go vet -tags e2e ./test/e2e/
+
+      - name: Unit tests
+        run: go test -race ./...
+
   e2e:
-    name: rooket up/down e2e (docker)
+    name: rooket up/down e2e (docker, ${{ matrix.rook-ref }})
     runs-on: ubuntu-latest
     timeout-minutes: 120
+    strategy:
+      # Cover both CSI deploy flows rooket must handle: release-1.19, where
+      # the rook operator creates the csi.ceph.io Driver CRs itself, and
+      # release-1.20/master, where rooket installs the separate
+      # ceph-csi-drivers chart.
+      fail-fast: false
+      matrix:
+        rook-ref: [release-1.19, release-1.20, master]
     env:
-      ROOK_REF: ${{ github.event.inputs.rook_ref || 'master' }}
+      ROOK_REF: ${{ github.event.inputs.rook_ref || matrix.rook-ref }}
       WORKERS: ${{ github.event.inputs.workers || '3' }}
       ROOKET_ENGINE: docker
       # Pin the cluster name: without it every rooket invocation derives the
@@ -44,7 +83,7 @@ jobs:
       ROOKET_NAME: rook
     steps:
       - name: Checkout rooket
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
 
       - name: Free up runner disk
         run: |
@@ -54,7 +93,7 @@ jobs:
           df -h /
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
           go-version: "1.26"
 
@@ -77,7 +116,7 @@ jobs:
           sudo systemctl enable --now iscsid
 
       - name: Checkout rook
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
           repository: rook/rook
           ref: ${{ env.ROOK_REF }}

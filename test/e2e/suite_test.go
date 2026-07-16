@@ -39,6 +39,7 @@ var (
 
 	rooketBin string // built in BeforeSuite
 	kubeCtx   string // kind-<name>
+	stateDir  string // ~/.local/share/rooket/<name>
 )
 
 func envOr(k, def string) string {
@@ -65,8 +66,8 @@ var _ = BeforeSuite(func() {
 	// ~/.kube/config; point the suite's kubectl/helm calls at it.
 	home, herr := os.UserHomeDir()
 	Expect(herr).NotTo(HaveOccurred())
-	Expect(os.Setenv("KUBECONFIG",
-		filepath.Join(home, ".local", "share", "rooket", clusterName, "kubeconfig"))).To(Succeed())
+	stateDir = filepath.Join(home, ".local", "share", "rooket", clusterName)
+	Expect(os.Setenv("KUBECONFIG", filepath.Join(stateDir, "kubeconfig"))).To(Succeed())
 
 	// Use a prebuilt binary if given (CI builds rooket up front and passes
 	// ROOKET_BIN); otherwise build it from the repo.
@@ -114,6 +115,9 @@ var _ = AfterEach(func() {
 	}{
 		{"pods -o wide", []string{"get", "pods", "-o", "wide"}},
 		{"cephcluster status", []string{"get", "cephcluster", "-o", "jsonpath={.items[0].status.phase} {.items[0].status.message}"}},
+		{"pvc + storageclasses", []string{"get", "pvc,sc"}},
+		{"csi driver CRs", []string{"get", "drivers.csi.ceph.io"}},
+		{"events (recent)", []string{"get", "events", "--sort-by=.lastTimestamp"}},
 		{"osd-prepare logs", []string{"logs", "--prefix", "-l", "app=rook-ceph-osd-prepare", "--tail=120"}},
 		{"osd-prepare describe", []string{"describe", "pods", "-l", "app=rook-ceph-osd-prepare"}},
 		{"operator log tail", []string{"logs", "-l", "app=rook-ceph-operator", "--tail=120"}},
@@ -143,14 +147,48 @@ func nodeDevDump() string {
 // rooketRun runs the rooket binary, streaming output to the Ginkgo log while
 // capturing it; returns the captured output and the exit error.
 func rooketRun(timeout time.Duration, args ...string) (string, error) {
+	return rooketRunEnv(timeout, nil, args...)
+}
+
+// rooketRunEnv is rooketRun with extra environment variables appended — used
+// for commands like 'rooket kubectl' that resolve the cluster name from
+// $ROOKET_NAME rather than a --name flag.
+func rooketRunEnv(timeout time.Duration, extraEnv []string, args ...string) (string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	var buf bytes.Buffer
 	cmd := exec.CommandContext(ctx, rooketBin, args...)
+	if len(extraEnv) > 0 {
+		cmd.Env = append(os.Environ(), extraEnv...)
+	}
 	mw := io.MultiWriter(GinkgoWriter, &buf)
 	cmd.Stdout, cmd.Stderr = mw, mw
 	err := cmd.Run()
 	return buf.String(), err
+}
+
+// kubectlApply pipes a manifest into kubectl apply in the rook-ceph namespace.
+func kubectlApply(manifest string) (string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "kubectl",
+		"--context", kubeCtx, "-n", "rook-ceph", "apply", "-f", "-")
+	cmd.Stdin = strings.NewReader(manifest)
+	out, err := cmd.CombinedOutput()
+	return string(out), err
+}
+
+// kindRun runs kind with the suite's engine provider and an explicit
+// kubeconfig, so foreign-cluster fixtures never touch the rooket cluster's
+// kubeconfig in $KUBECONFIG.
+func kindRun(timeout time.Duration, kubeconfig string, args ...string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "kind", args...)
+	cmd.Env = append(os.Environ(),
+		"KIND_EXPERIMENTAL_PROVIDER="+eng, "KUBECONFIG="+kubeconfig)
+	cmd.Stdout, cmd.Stderr = GinkgoWriter, GinkgoWriter
+	return cmd.Run()
 }
 
 func runOut(timeout time.Duration, name string, args ...string) (string, error) {
