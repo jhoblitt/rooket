@@ -62,19 +62,58 @@ var _ = Describe("rooket up/down", Ordered, func() {
 		}, 2*time.Minute, 15*time.Second).Should(Succeed())
 	})
 
-	It("provisions and serves I/O on a CSI block PVC", func() {
-		// The RADOS round-trip above proves the OSDs store data, but bypasses
-		// CSI. This walks the path users take: PVC on the chart's ceph-block
-		// StorageClass → csi-rbdplugin maps an RBD device on the kind node
-		// (the reason node prep remounts /sys read-write) → pod writes and
-		// reads it back.
+	It("provisions and reclaims a block PVC through CSI", func() {
+		// The RADOS round-trip above bypasses CSI entirely; this exercises the
+		// RBD provisioner: PVC on the chart's ceph-block StorageClass →
+		// csi-rbdplugin creates the image → bind → delete reclaims it. No pod
+		// mounts it: attaching would krbd-map on the node, and the /dev/rbdN
+		// node udev would create on a real host never appears in a kind
+		// node's udev-less tmpfs /dev (which the per-node OSD masking relies
+		// on). The CephFS spec below covers the mount-and-I/O half of CSI.
 		const manifest = `apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
-  name: rooket-e2e-pvc
+  name: rooket-e2e-rbd-pvc
 spec:
   accessModes: ["ReadWriteOnce"]
   storageClassName: ceph-block
+  resources:
+    requests:
+      storage: 1Gi
+`
+		out, err := kubectlApply(manifest)
+		Expect(err).NotTo(HaveOccurred(), "apply block PVC:\n%s", out)
+		DeferCleanup(func() {
+			_, _ = kubectlNS("delete", "pvc", "rooket-e2e-rbd-pvc", "--ignore-not-found", "--timeout=120s")
+		})
+
+		By("binding via the rbd provisioner")
+		Eventually(func(g Gomega) {
+			out, _ := kubectlNS("get", "pvc", "rooket-e2e-rbd-pvc", "-o", "jsonpath={.status.phase}")
+			g.Expect(out).To(Equal("Bound"), "PVC phase")
+		}, 5*time.Minute, 10*time.Second).Should(Succeed())
+
+		By("reclaiming on delete")
+		out, err = kubectlNS("delete", "pvc", "rooket-e2e-rbd-pvc", "--timeout=120s")
+		Expect(err).NotTo(HaveOccurred(), "delete pvc:\n%s", out)
+		Eventually(func() string {
+			out, _ := kubectlNS("get", "pvc", "rooket-e2e-rbd-pvc", "--ignore-not-found")
+			return strings.TrimSpace(out)
+		}, 2*time.Minute, 10*time.Second).Should(BeEmpty(), "PVC not gone after delete")
+	})
+
+	It("serves I/O on a CephFS PVC through CSI", func() {
+		// The full CSI data path — provision, attach, node mount, pod I/O,
+		// detach, reclaim — on the chart's ceph-filesystem StorageClass. The
+		// kernel cephfs client is a network mount and needs no device nodes,
+		// so unlike krbd it works inside kind nodes.
+		const manifest = `apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: rooket-e2e-fs-pvc
+spec:
+  accessModes: ["ReadWriteOnce"]
+  storageClassName: ceph-filesystem
   resources:
     requests:
       storage: 1Gi
@@ -82,7 +121,7 @@ spec:
 apiVersion: v1
 kind: Pod
 metadata:
-  name: rooket-e2e-pvc-io
+  name: rooket-e2e-fs-io
 spec:
   restartPolicy: Never
   containers:
@@ -95,28 +134,28 @@ spec:
   volumes:
     - name: data
       persistentVolumeClaim:
-        claimName: rooket-e2e-pvc
+        claimName: rooket-e2e-fs-pvc
 `
 		out, err := kubectlApply(manifest)
 		Expect(err).NotTo(HaveOccurred(), "apply PVC+pod:\n%s", out)
 		DeferCleanup(func() {
-			_, _ = kubectlNS("delete", "pod", "rooket-e2e-pvc-io", "--ignore-not-found", "--timeout=120s")
-			_, _ = kubectlNS("delete", "pvc", "rooket-e2e-pvc", "--ignore-not-found", "--timeout=120s")
+			_, _ = kubectlNS("delete", "pod", "rooket-e2e-fs-io", "--ignore-not-found", "--timeout=120s")
+			_, _ = kubectlNS("delete", "pvc", "rooket-e2e-fs-pvc", "--ignore-not-found", "--timeout=120s")
 		})
 
-		By("the pod writing and reading back through the RBD mount")
+		By("the pod writing and reading back through the CephFS mount")
 		Eventually(func(g Gomega) {
-			out, _ := kubectlNS("get", "pod", "rooket-e2e-pvc-io", "-o", "jsonpath={.status.phase}")
+			out, _ := kubectlNS("get", "pod", "rooket-e2e-fs-io", "-o", "jsonpath={.status.phase}")
 			g.Expect(out).To(Equal("Succeeded"), "pod phase")
 		}, 5*time.Minute, 10*time.Second).Should(Succeed())
 
 		By("detaching and deleting cleanly")
-		out, err = kubectlNS("delete", "pod", "rooket-e2e-pvc-io", "--timeout=120s")
+		out, err = kubectlNS("delete", "pod", "rooket-e2e-fs-io", "--timeout=120s")
 		Expect(err).NotTo(HaveOccurred(), "delete pod:\n%s", out)
-		out, err = kubectlNS("delete", "pvc", "rooket-e2e-pvc", "--timeout=120s")
+		out, err = kubectlNS("delete", "pvc", "rooket-e2e-fs-pvc", "--timeout=120s")
 		Expect(err).NotTo(HaveOccurred(), "delete pvc:\n%s", out)
 		Eventually(func() string {
-			out, _ := kubectlNS("get", "pvc", "rooket-e2e-pvc", "--ignore-not-found")
+			out, _ := kubectlNS("get", "pvc", "rooket-e2e-fs-pvc", "--ignore-not-found")
 			return strings.TrimSpace(out)
 		}, 2*time.Minute, 10*time.Second).Should(BeEmpty(), "PVC not gone after delete")
 	})
