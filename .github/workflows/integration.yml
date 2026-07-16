@@ -40,7 +40,7 @@ jobs:
     timeout-minutes: 10
     steps:
       - name: Checkout rooket
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
       - name: Set up Go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
@@ -83,7 +83,7 @@ jobs:
       ROOKET_NAME: rook
     steps:
       - name: Checkout rooket
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
       - name: Free up runner disk
         run: |
@@ -116,7 +116,7 @@ jobs:
           sudo systemctl enable --now iscsid
 
       - name: Checkout rook
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           repository: rook/rook
           ref: ${{ env.ROOK_REF }}
