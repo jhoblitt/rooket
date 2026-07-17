@@ -154,8 +154,12 @@ Run 'rooket block setup' before 'rooket cluster create' to prepare block devices
 
 		// --- Step 7: prometheus-operator CRDs ---
 		fmt.Println("==> installing prometheus-operator-crds helm chart")
+		hEnv, err := helmEnv(createName, "rooket")
+		if err != nil {
+			return err
+		}
 		if err := cluster.InstallPrometheusOperatorCRDs(
-			createName, createPromCRDsRelease, createPromCRDsVersion,
+			createName, createPromCRDsRelease, createPromCRDsVersion, hEnv,
 		); err != nil {
 			return fmt.Errorf("install prometheus-operator-crds: %w", err)
 		}
@@ -180,6 +184,6 @@ func init() {
 	createCmd.Flags().IntVar(&createRegistryPort, "registry-port", 5001, "host port for the local OCI registry")
 	createCmd.Flags().IntVar(&createDiskCount, "disk-count", 1, "number of iSCSI disks per worker (0 to skip)")
 	createCmd.Flags().StringVar(&createISCSIQNDate, "iqn-date", "2003-01", "IQN date component matching 'rooket block setup' (YYYY-MM)")
-	createCmd.Flags().StringVar(&createPromCRDsVersion, "prometheus-operator-crds-version", "29.0.0", "version of the prometheus-operator-crds helm chart to install")
+	createCmd.Flags().StringVar(&createPromCRDsVersion, "prometheus-operator-crds-version", "29.0.0", "version of the prometheus-operator-crds helm chart to install (exact versions enable the reinstall skip)")
 	createCmd.Flags().StringVar(&createPromCRDsRelease, "prometheus-operator-crds-release", "my-prometheus-operator-crds", "helm release name for prometheus-operator-crds")
 }

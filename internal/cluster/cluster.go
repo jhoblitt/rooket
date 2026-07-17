@@ -3,13 +3,18 @@ package cluster
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"text/template"
 	"time"
+
+	"go.yaml.in/yaml/v3"
 
 	"github.com/jhoblitt/rooket/internal/engine"
 	"github.com/jhoblitt/rooket/internal/run"
@@ -377,37 +382,112 @@ func ConfigureRegistry(eng engine.Engine, clusterName, registryName string, host
 }
 
 // InstallPrometheusOperatorCRDs installs the prometheus-operator-crds helm
-// chart from the prometheus-community repository into the cluster. The install
-// is idempotent: the repo is added with --force-update and the chart is
-// applied with 'helm upgrade --install'.
-func InstallPrometheusOperatorCRDs(clusterName, releaseName, version string) error {
-	if err := run.Cmd(
-		"helm", "repo", "add", "--force-update",
-		"prometheus-community",
-		"https://prometheus-community.github.io/helm-charts",
-	); err != nil {
-		return fmt.Errorf("add prometheus-community helm repo: %w", err)
+// chart directly from the prometheus-community repository URL (no repo
+// entry needed). The upgrade is skipped when promCRDsCurrent proves the
+// release is already deployed at the requested version with its CRDs
+// intact; otherwise 'helm upgrade --install' reconciles it.
+func InstallPrometheusOperatorCRDs(clusterName, releaseName, version string, extraEnv []string) error {
+	if promCRDsCurrent(clusterName, releaseName, version, extraEnv) {
+		fmt.Printf("prometheus-operator-crds %s already deployed with its CRDs present, skipping\n", version)
+		return nil
 	}
-
-	if err := run.Cmd(
-		"helm", "repo", "update", "prometheus-community",
-	); err != nil {
-		return fmt.Errorf("update prometheus-community helm repo: %w", err)
-	}
-
 	// Pin the release namespace: rooket later switches the kube-context's default
 	// namespace to rook-ceph, so an unpinned install lands in a different namespace
 	// on re-run and collides with the CRDs' helm ownership annotations.
-	return run.Cmd(
+	return run.CmdWithEnv(extraEnv,
 		"helm",
 		"--kube-context", "kind-"+clusterName,
 		"-n", "rook-ceph",
 		"upgrade", "--install",
 		releaseName,
-		"prometheus-community/prometheus-operator-crds",
+		"prometheus-operator-crds",
+		"--repo", "https://prometheus-community.github.io/helm-charts",
 		"--version", version,
 		"--create-namespace",
 	)
+}
+
+// promCRDsCurrent reports whether the prometheus-operator-crds release is
+// already deployed at the requested chart version AND every CRD in its
+// manifest still exists. A deployed release alone doesn't prove its
+// resources survived — the upgrade is the reconciler — so both halves must
+// hold before the install is skipped. Any probe failure means "not current".
+func promCRDsCurrent(clusterName, releaseName, version string, extraEnv []string) bool {
+	out, err := run.OutputWithEnv(extraEnv, "helm",
+		"--kube-context", "kind-"+clusterName,
+		"-n", "rook-ceph",
+		"list", "-o", "json",
+		"--filter", "^"+regexp.QuoteMeta(releaseName)+"$",
+	)
+	if err != nil {
+		return false
+	}
+	var releases []struct {
+		Name   string `json:"name"`
+		Chart  string `json:"chart"`
+		Status string `json:"status"`
+	}
+	if json.Unmarshal([]byte(out), &releases) != nil {
+		return false
+	}
+	deployed := false
+	for _, r := range releases {
+		if r.Name == releaseName && r.Status == "deployed" &&
+			r.Chart == "prometheus-operator-crds-"+version {
+			deployed = true
+		}
+	}
+	if !deployed {
+		return false
+	}
+
+	manifest, err := run.OutputWithEnv(extraEnv, "helm",
+		"--kube-context", "kind-"+clusterName,
+		"-n", "rook-ceph",
+		"get", "manifest", releaseName,
+	)
+	if err != nil {
+		return false
+	}
+	crds, err := manifestCRDNames(manifest)
+	if err != nil || len(crds) == 0 {
+		return false
+	}
+	args := append([]string{"get", "crd", "--context", "kind-" + clusterName, "-o", "name"}, crds...)
+	_, err = run.Output("kubectl", args...)
+	return err == nil
+}
+
+// manifestCRDNames extracts the metadata names of every
+// CustomResourceDefinition document in a rendered helm manifest. Documents
+// are decoded structurally; any document that fails to decode, or a CRD
+// without a metadata.name, is an error so the caller cannot skip based on a
+// partial view of the chart's CRDs.
+func manifestCRDNames(manifest string) ([]string, error) {
+	dec := yaml.NewDecoder(strings.NewReader(manifest))
+	var names []string
+	for {
+		var doc struct {
+			Kind     string `yaml:"kind"`
+			Metadata struct {
+				Name string `yaml:"name"`
+			} `yaml:"metadata"`
+		}
+		err := dec.Decode(&doc)
+		if errors.Is(err, io.EOF) {
+			return names, nil
+		}
+		if err != nil {
+			return nil, fmt.Errorf("decode manifest document: %w", err)
+		}
+		if doc.Kind != "CustomResourceDefinition" {
+			continue
+		}
+		if doc.Metadata.Name == "" {
+			return nil, fmt.Errorf("CustomResourceDefinition document without metadata.name")
+		}
+		names = append(names, doc.Metadata.Name)
+	}
 }
 
 // ApplyRegistryConfigMap creates the standard registry ConfigMap.

@@ -77,6 +77,7 @@ $ export KUBECONFIG="$(rooket kubeconfig --path)"    # or point your own tools a
 | `rooket deploy` | install the rook-ceph and rook-ceph-cluster charts |
 | `rooket load <image>` | push any local image into the cluster's registry |
 | `rooket kubectl` (`k`) | run kubectl with `KUBECONFIG` set for the cluster |
+| `rooket helm` | run helm with the cluster's kubeconfig and isolated per-cluster helm config |
 | `rooket kubeconfig` | print the cluster's kubeconfig (`--path` for its path) |
 | `rooket list` | list clusters: live status, registry port, state dir |
 | `rooket prune` | remove state dirs of clusters that no longer exist |

@@ -21,6 +21,7 @@ var (
 	deployClusterName  string
 	deployKubeContext  string
 	deployName         string
+	deployHelmEnv      []string
 	deployWorkers      int
 	deployDiskCount    int
 	deployDiskSizeGB   int
@@ -115,6 +116,9 @@ func deploySetup(cmd *cobra.Command) (string, error) {
 	if deployKubeContext == "" {
 		deployKubeContext = "kind-" + name
 	}
+	if deployHelmEnv, err = helmEnv(name, "rooket"); err != nil {
+		return "", err
+	}
 	port, err := resolveRegistryPort(name, deployRegistryPort, cmd.Flags().Changed("registry-port"))
 	if err != nil {
 		return "", err
@@ -149,7 +153,7 @@ func installRookCephOperator(dir string) error {
 	fmt.Printf("    release:    %s\n", deployOperatorName)
 	fmt.Printf("    namespace:  rook-ceph\n")
 
-	if err := run.Cmd(
+	if err := run.CmdWithEnv(deployHelmEnv,
 		"helm",
 		"--kube-context", deployKubeContext,
 		"-n", "rook-ceph",
@@ -221,7 +225,7 @@ func installCephCsiDrivers(dir string) error {
 	fmt.Printf("==> deploying ceph-csi-drivers %s (Driver CRs and driver RBAC the rook-ceph chart does not ship)\n", version)
 	var installErr error
 	for attempt := 1; attempt <= 5; attempt++ {
-		if installErr = run.CmdWithStdin(strings.NewReader(csiDriversValues),
+		if installErr = run.CmdWithStdinEnv(strings.NewReader(csiDriversValues), deployHelmEnv,
 			"helm",
 			"--kube-context", deployKubeContext,
 			"-n", "rook-ceph",
@@ -288,7 +292,7 @@ func installRookCephCluster(dir string) error {
 	defer os.Remove(valuesPath)
 	args = append(args, "-f", valuesPath)
 
-	return run.Cmd("helm", args...)
+	return run.CmdWithEnv(deployHelmEnv, "helm", args...)
 }
 
 // writeClusterValues renders the rook-ceph-cluster Helm values file. It pins
