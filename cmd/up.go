@@ -1,7 +1,11 @@
 package cmd
 
 import (
+	"errors"
 	"fmt"
+	"io"
+	"os"
+	"sync"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -83,36 +87,27 @@ Example:
 			return err
 		}
 
-		if err := upStep("[2/4] cluster create", false, func() error {
-			createName = upName
-			createWorkers = upWorkers
-			createRegistryPort = upRegistryPort
-			createDiskCount = upDiskCount
-			createISCSIQNDate = upIQNDate
-			createPromCRDsVersion = upPromVersion
-			createPromCRDsRelease = upPromRelease
-			if err := createCmd.RunE(createCmd, nil); err != nil {
+		portExplicit := cmd.Flags().Changed("registry-port")
+		createRun := func(w io.Writer) error {
+			if err := createClusterRun(w, upName, upRegistryPort, portExplicit,
+				upWorkers, upDiskCount, upIQNDate, upPromVersion, upPromRelease); err != nil {
 				return fmt.Errorf("cluster create: %w", err)
 			}
 			return nil
-		}); err != nil {
-			return err
-		}
-		// create may have repaired a stale recorded port; pick up its choice.
-		if p := readRegistryPort(upName); p != 0 {
-			upRegistryPort = p
 		}
 
-		if err := upStep("[3/4] build", upSkipBuild, func() error {
-			buildDir = rookDir
-			buildName = upName
-			buildRegistryPort = upRegistryPort
-			buildForce = upForceBuild
-			if err := buildCmd.RunE(buildCmd, nil); err != nil {
-				return fmt.Errorf("build: %w", err)
+		if upSkipBuild {
+			if err := upStep("[2/4] cluster create", false, func() error {
+				return createRun(os.Stdout)
+			}); err != nil {
+				return err
 			}
-			return nil
-		}); err != nil {
+			// create may have repaired a stale recorded port; pick up its choice.
+			if p := readRegistryPort(upName); p != 0 {
+				upRegistryPort = p
+			}
+			run.Printf("==> [3/4] build (skipped)\n")
+		} else if err := upCreateAndBuild(createRun, rookDir); err != nil {
 			return err
 		}
 
@@ -143,6 +138,117 @@ rooket up complete in %s. cluster %q is ready.
 `, fmtDur(time.Since(upStart)), upName)
 		return nil
 	},
+}
+
+// upCreateAndBuild runs cluster create concurrently with the make portion of
+// build. make owns the terminal (it is the long pole a user watches); create
+// writes into a switchWriter whose backlog flushes — then streams live — the
+// moment the build side stops streaming. The pre-create skip probe is only a
+// scheduling hint: the authoritative gate runs after the join, against the
+// registry and port that create may have just repaired, so a wrong hint
+// degrades to sequential speed, never to a wrong image. When the hint says
+// make is needed it starts immediately; a built result goes straight to the
+// push phase with no gate re-run (a re-run would see the still-unstamped
+// mismatch and build a second time).
+//
+// Neither side is cancelled on the other's failure: killing make would
+// orphan the container build it spawned, and its warm caches help the retry.
+// The failing side prints an immediate one-line notice; both errors surface
+// after the join.
+func upCreateAndBuild(createRun func(io.Writer) error, rookDir string) error {
+	buildForce = upForceBuild
+	gitRef, gitErr := gitHeadRef(rookDir)
+	if gitErr != nil {
+		gitRef = "latest"
+	}
+	fp, fpErr := treeFingerprint(rookDir)
+
+	startMake := upForceBuild
+	makeReason := "forced by --force-build"
+	if !startMake {
+		stamp := readBuildStamp(upName)
+		// The hint probe is silent (io.Discard): when it misses, the
+		// authoritative post-join gate repeats and traces the same probes.
+		reason, repush := buildSkipCheck(io.Discard, fp, fpErr, stamp, containerEngine, rookDir, upName,
+			upRegistryPort, buildNamespace, "", gitRef)
+		// Only a compile-side miss starts make early; publish-side gaps wait
+		// for the post-join gate (the registry may not even exist yet).
+		startMake = reason != "" && repush == nil
+		makeReason = reason
+	}
+	if gitErr != nil && startMake {
+		run.Printf("warning: could not determine git branch (%v); using \"latest\"\n", gitErr)
+	}
+
+	sw := newSwitchWriter("=== cluster create output (ran concurrently with build) ===\n")
+	run.Printf("==> [2/4] cluster create (concurrent with [3/4] build)\n")
+	run.Printf("==> [3/4] build\n")
+
+	var (
+		wg                 sync.WaitGroup
+		createErr, makeErr error
+		images             []string
+		createDur, makeDur time.Duration
+	)
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		started := time.Now()
+		createErr = createRun(sw)
+		createDur = time.Since(started)
+		if createErr != nil {
+			run.Printf("cluster create failed (%v)\n", createErr)
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		started := time.Now()
+		if startMake {
+			run.Printf("==> building: %s\n", makeReason)
+			images, makeErr = buildMakePhase(os.Stdout, rookDir, upName)
+			if makeErr != nil {
+				makeErr = fmt.Errorf("build: %w", makeErr)
+				run.Printf("build failed (%v)\n", makeErr)
+			}
+		}
+		makeDur = time.Since(started)
+		sw.Promote(os.Stdout)
+	}()
+	wg.Wait()
+	sw.Promote(os.Stdout)
+	if createErr != nil {
+		run.Printf("==> [2/4] cluster create failed after %s\n", fmtDur(createDur))
+	} else {
+		run.Printf("==> [2/4] cluster create done in %s\n", fmtDur(createDur))
+	}
+	if makeErr != nil {
+		run.Printf("==> [3/4] build failed after %s\n", fmtDur(makeDur))
+	}
+	if createErr != nil || makeErr != nil {
+		return errors.Join(createErr, makeErr)
+	}
+
+	// create may have repaired a stale recorded port; pick up its choice
+	// before the authoritative publish-side work.
+	if p := readRegistryPort(upName); p != 0 {
+		upRegistryPort = p
+	}
+
+	buildStarted := time.Now()
+	buildErr := func() error {
+		if startMake {
+			return buildPushPhase(os.Stdout, images, upRegistryPort, buildNamespace, "",
+				gitRef, upName, rookDir, fp, fpErr)
+		}
+		// The full gate, against the final port and live registry.
+		return buildRun(os.Stdout, rookDir, upName, upRegistryPort)
+	}()
+	if buildErr != nil {
+		run.Printf("==> [3/4] build failed after %s\n", fmtDur(makeDur+time.Since(buildStarted)))
+		return fmt.Errorf("build: %w", buildErr)
+	}
+	run.Printf("==> [3/4] build done in %s\n", fmtDur(makeDur+time.Since(buildStarted)))
+	return nil
 }
 
 // upStep runs one numbered up step, printing its banner and, when it ran, its

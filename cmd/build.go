@@ -68,44 +68,48 @@ Example:
 			return perr
 		}
 		buildRegistryPort = port
+		return buildRun(os.Stdout, dir, name, port)
+	},
+}
 
-		gitRef, err := gitHeadRef(dir)
-		if err != nil {
-			fmt.Printf("warning: could not determine git branch (%v); using \"latest\"\n", err)
-			gitRef = "latest"
+// buildRun is the build core: the skip gate, then repush, make, and push as
+// the gate dictates.
+func buildRun(out io.Writer, dir, name string, port int) error {
+	gitRef, err := gitHeadRef(dir)
+	if err != nil {
+		run.Fprintf(out, "warning: could not determine git branch (%v); using \"latest\"\n", err)
+		gitRef = "latest"
+	}
+
+	// The fingerprint is computed BEFORE make: edits made while make runs
+	// must invalidate the next stamp, not be attributed to this build.
+	fp, fpErr := treeFingerprint(dir)
+	if !buildForce {
+		stamp := readBuildStamp(name)
+		reason, repush := buildSkipCheck(out, fp, fpErr, stamp, containerEngine, dir, name, port, buildNamespace, buildTag, gitRef)
+		if reason == "" {
+			run.Fprintf(out, "==> build skipped: rook tree unchanged since last push; %s present in registry (--force-build to rebuild)\n",
+				stampRefs(stamp.Images))
+			return nil
 		}
-
-		// The fingerprint is computed BEFORE make: edits made while make
-		// runs must invalidate the next stamp, not be attributed to this
-		// build.
-		fp, fpErr := treeFingerprint(dir)
-		if !buildForce {
-			stamp := readBuildStamp(name)
-			reason, repush := buildSkipCheck(fp, fpErr, stamp, containerEngine, dir, name, port, buildNamespace, buildTag, gitRef)
-			if reason == "" {
-				run.Printf("==> build skipped: rook tree unchanged since last push; %s present in registry (--force-build to rebuild)\n",
-					stampRefs(stamp.Images))
+		if repush != nil {
+			run.Fprintf(out, "==> rook tree unchanged since last build (%s); pushing the existing image without make\n", reason)
+			imgs, rerr := repushStampedImages(out, repush, port)
+			if rerr == nil {
+				stampBuild(out, name, dir, fp, fpErr, gitRef, imgs)
 				return nil
 			}
-			if repush != nil {
-				run.Printf("==> rook tree unchanged since last build (%s); pushing the existing image without make\n", reason)
-				imgs, rerr := repushStampedImages(os.Stdout, repush, port)
-				if rerr == nil {
-					stampBuild(os.Stdout, name, dir, fp, fpErr, gitRef, imgs)
-					return nil
-				}
-				run.Printf("==> cannot reuse the previous image (%v); building\n", rerr)
-			} else if stamp != nil {
-				run.Printf("==> building: %s\n", reason)
-			}
+			run.Fprintf(out, "==> cannot reuse the previous image (%v); building\n", rerr)
+		} else if stamp != nil {
+			run.Fprintf(out, "==> building: %s\n", reason)
 		}
+	}
 
-		builtImages, err := buildMakePhase(os.Stdout, dir, name)
-		if err != nil {
-			return err
-		}
-		return buildPushPhase(os.Stdout, builtImages, port, buildNamespace, buildTag, gitRef, name, dir, fp, fpErr)
-	},
+	builtImages, err := buildMakePhase(out, dir, name)
+	if err != nil {
+		return err
+	}
+	return buildPushPhase(out, builtImages, port, buildNamespace, buildTag, gitRef, name, dir, fp, fpErr)
 }
 
 // buildMakePhase produces the container images: stale chart-dep pruning, the

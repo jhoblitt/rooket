@@ -310,12 +310,12 @@ func manifestDigest(port int, repo, tag string) (string, bool) {
 // container is running AND publishes the expected host port — a stopped
 // container, or a foreign registry that happens to hold a stale recorded
 // port, must not validate a skip.
-func registryRunningWithPort(eng engine.Engine, container string, port int) bool {
-	state, err := run.Output(eng.String(), "inspect", "-f", "{{.State.Running}}", container)
+func registryRunningWithPort(out io.Writer, eng engine.Engine, container string, port int) bool {
+	state, err := run.OutputTo(out, eng.String(), "inspect", "-f", "{{.State.Running}}", container)
 	if err != nil || strings.TrimSpace(state) != "true" {
 		return false
 	}
-	ports, err := run.Output(eng.String(), "port", container, "5000/tcp")
+	ports, err := run.OutputTo(out, eng.String(), "port", container, "5000/tcp")
 	return err == nil && portsOutputHasPort(ports, port)
 }
 
@@ -353,7 +353,7 @@ func expectedStampImages(stamp *buildStamp, port int, namespace, tagOverride, gi
 		if host != registry && host != fmt.Sprintf("127.0.0.1:%d", port) {
 			return nil, fmt.Errorf("--tag targets %s, not this cluster's registry", host)
 		}
-		imgs = append(imgs, stampImage{Source: img.Source, Ref: ref, Repo: repo, Tag: tag})
+		imgs = append(imgs, stampImage{Source: img.Source, SourceID: img.SourceID, Ref: ref, Repo: repo, Tag: tag})
 	}
 	return imgs, nil
 }
@@ -364,7 +364,7 @@ func expectedStampImages(stamp *buildStamp, port int, namespace, tagOverride, gi
 //     is not current (registry recreated, ref/tag changed, digest gone) —
 //     re-pushing the stamped local source images suffices.
 //   - reason and nil: run make.
-func buildSkipCheck(fp treeFP, fpErr error, stamp *buildStamp, eng engine.Engine, dir, name string, port int, namespace, tagOverride, gitRef string) (string, []stampImage) {
+func buildSkipCheck(out io.Writer, fp treeFP, fpErr error, stamp *buildStamp, eng engine.Engine, dir, name string, port int, namespace, tagOverride, gitRef string) (string, []stampImage) {
 	if fpErr != nil {
 		return fmt.Sprintf("fingerprint unavailable: %v", fpErr), nil
 	}
@@ -388,7 +388,7 @@ func buildSkipCheck(fp treeFP, fpErr error, stamp *buildStamp, eng engine.Engine
 	if err != nil {
 		return err.Error(), nil
 	}
-	if !registryRunningWithPort(eng, registry.ContainerName(name), port) {
+	if !registryRunningWithPort(out, eng, registry.ContainerName(name), port) {
 		return "cluster registry not running on the expected port", expected
 	}
 	for i, img := range expected {
