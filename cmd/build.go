@@ -76,8 +76,17 @@ Example:
 			return fmt.Errorf("prune stale chart dependency archives: %w", err)
 		}
 
+		// Isolate the helm runs inside rook's make from the host helm config:
+		// rook's `helm dependency build` refreshes EVERY repo in whatever
+		// repositories.yaml it sees, so the host's repo list (27 entries here,
+		// some timing out) turns into dead time on each build that trips it.
+		makeEnv, err := helmEnv(name, "make")
+		if err != nil {
+			return err
+		}
+
 		fmt.Printf("==> running make in %s\n", dir)
-		builtImages, err := runMakeCapture(dir)
+		builtImages, err := runMakeCapture(dir, makeEnv)
 		if err != nil {
 			return fmt.Errorf("make: %w", err)
 		}
@@ -114,10 +123,13 @@ Example:
 // runMakeCapture runs make in dir, streams its stdout to the terminal, and
 // returns all image names found on lines matching "=== container build <image>".
 // stderr is passed through to the terminal directly.
-func runMakeCapture(dir string) ([]string, error) {
+func runMakeCapture(dir string, extraEnv []string) ([]string, error) {
 	c := exec.Command("make")
 	c.Dir = dir
 	c.Stderr = os.Stderr
+	if len(extraEnv) > 0 {
+		c.Env = append(os.Environ(), extraEnv...)
+	}
 
 	stdout, err := c.StdoutPipe()
 	if err != nil {

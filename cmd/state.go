@@ -156,6 +156,50 @@ func kubeconfigPath(name string) (string, error) {
 	return filepath.Join(dir, "kubeconfig"), nil
 }
 
+// helmEnv returns environment variables pointing helm at a per-cluster,
+// per-purpose config/cache/data triplet inside the cluster's state dir,
+// creating the directories. Each cluster gets its own helm world — repos
+// added via 'rooket helm' belong to that cluster only, and rooket never
+// touches (or is slowed by) the host's helm configuration. The "make"
+// purpose is kept separate from "rooket" so rook's `helm dependency` runs
+// inside make can never contend on helm's non-atomic config and cache files
+// with rooket's own helm invocations.
+//
+// Helm honors path-specific variables (HELM_REPOSITORY_CONFIG etc.)
+// independently of the three homes, so those are pinned explicitly too —
+// otherwise a value exported in the parent environment would silently
+// bypass the triplet. Helm is a Go program, and Go children resolve
+// duplicate environment entries last-wins, so appending these to the
+// inherited environment overrides any ambient values.
+func helmEnv(name, purpose string) ([]string, error) {
+	dir, err := stateDirPath(name)
+	if err != nil {
+		return nil, err
+	}
+	base := filepath.Join(dir, "helm", purpose)
+	homes := map[string]string{}
+	env := make([]string, 0, 7)
+	for _, sub := range []struct{ envVar, subdir string }{
+		{"HELM_CONFIG_HOME", "config"},
+		{"HELM_CACHE_HOME", "cache"},
+		{"HELM_DATA_HOME", "data"},
+	} {
+		p := filepath.Join(base, sub.subdir)
+		if err := os.MkdirAll(p, 0o755); err != nil {
+			return nil, fmt.Errorf("create helm %s dir: %w", sub.subdir, err)
+		}
+		homes[sub.subdir] = p
+		env = append(env, sub.envVar+"="+p)
+	}
+	env = append(env,
+		"HELM_REPOSITORY_CONFIG="+filepath.Join(homes["config"], "repositories.yaml"),
+		"HELM_REPOSITORY_CACHE="+filepath.Join(homes["cache"], "repository"),
+		"HELM_REGISTRY_CONFIG="+filepath.Join(homes["config"], "registry", "config.json"),
+		"HELM_PLUGINS="+filepath.Join(homes["data"], "plugins"),
+	)
+	return env, nil
+}
+
 // useCluster resolves the cluster name and points $KUBECONFIG at the cluster's
 // own kubeconfig, so kind, kubectl, and helm all operate on that file instead
 // of ~/.kube/config. It does not create the state directory — commands that

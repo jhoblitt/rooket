@@ -119,10 +119,19 @@ func OutputInteractive(name string, args ...string) (string, error) {
 
 // CmdWithStdin runs a command with stdin piped from the provided reader.
 func CmdWithStdin(stdin io.Reader, name string, args ...string) error {
+	return CmdWithStdinEnv(stdin, nil, name, args...)
+}
+
+// CmdWithStdinEnv runs a command with stdin piped from the provided reader
+// and additional environment variables appended to the current environment.
+func CmdWithStdinEnv(stdin io.Reader, extraEnv []string, name string, args ...string) error {
 	cmd := exec.Command(name, args...)
 	cmd.Stdin = stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
+	if len(extraEnv) > 0 {
+		cmd.Env = append(os.Environ(), extraEnv...)
+	}
 	trace(name, args)
 	return cmd.Run()
 }
