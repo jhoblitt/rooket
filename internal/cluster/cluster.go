@@ -10,7 +10,9 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
+	"sync"
 	"text/template"
 	"time"
 
@@ -285,6 +287,10 @@ func Nodes(clusterName string) ([]string, error) {
 // example one whose foreign-device mask failed and can still see another
 // worker's OSD disk. The /run/udev and /dev/disk bind-mounts live in the kind
 // config, not here.
+//
+// Each node runs ONE shell script (piped over stdin, so the trace stays
+// short) and all nodes run concurrently; a node's output is buffered and
+// flushed as a block afterwards, in node order, so logs stay readable.
 func PrepareNodes(eng engine.Engine, clusterName string, ownDevsByNode map[string][]string) error {
 	nodes, err := Nodes(clusterName)
 	if err != nil {
@@ -298,64 +304,156 @@ func PrepareNodes(eng engine.Engine, clusterName string, ownDevsByNode map[strin
 		}
 	}
 
-	var errs []error
-	for _, node := range nodes {
-		if err := run.Cmd(eng.String(), "exec", node, "mount", "-o", "remount,rw", "/sys"); err != nil {
-			errs = append(errs, fmt.Errorf("remount /sys read-write on node %s: %w", node, err))
-		}
-		if err := installNodePackages(eng, node); err != nil {
-			errs = append(errs, fmt.Errorf("install lvm2/cryptsetup on node %s: %w", node, err))
-		}
-		if err := run.Cmd(eng.String(), "exec", node, "dmsetup", "mknodes"); err != nil {
-			errs = append(errs, fmt.Errorf("dmsetup mknodes on node %s: %w", node, err))
-		}
+	return forEachNode(nodes, func(node string, out *bytes.Buffer) []error {
 		keep := map[string]bool{}
 		for _, d := range ownDevsByNode[node] {
 			keep[d] = true
 		}
+		var foreign []string
 		for dev := range allOSDDevs {
-			if keep[dev] {
-				continue
-			}
-			if err := run.Cmd(eng.String(), "exec", node, "rm", "-f", dev); err != nil {
-				errs = append(errs, fmt.Errorf("mask foreign OSD device %s on node %s: %w", dev, node, err))
+			if !keep[dev] {
+				foreign = append(foreign, dev)
 			}
 		}
+		sort.Strings(foreign)
+		return runNodeScript(eng, out, node, nodePrepScript(foreign))
+	})
+}
+
+// runNodeScript executes a marker-protocol script inside a node and converts
+// the outcome into per-operation errors.
+//
+// The script travels over stdin, but the shell must not READ it from stdin:
+// children like apt-get inherit the shell's fd 0, and a child that reads
+// stdin would consume the rest of the script — silently skipping the
+// safety-critical device masking. `eval "$(cat)"` slurps the whole script
+// before executing it, so children only ever see the drained stream.
+//
+// The trailing ROOKET_DONE sentinel proves the script ran to its end; a run
+// without it (exec died, or something still consumed the script) is retried
+// — every script operation is idempotent — and is an error even when earlier
+// markers were already emitted.
+func runNodeScript(eng engine.Engine, out *bytes.Buffer, node, script string) []error {
+	const attempts = 3
+	for attempt := 1; ; attempt++ {
+		var buf bytes.Buffer
+		err := run.CmdWithStdinTo(&buf, strings.NewReader(script),
+			eng.String(), "exec", "-i", node, "sh", "-c", `eval "$(cat)"`)
+		out.Write(buf.Bytes())
+		output := buf.String()
+		if strings.Contains(output, "ROOKET_DONE") {
+			return nodeScriptErrors(node, output, err)
+		}
+		if attempt == attempts {
+			errs := nodeScriptErrors(node, output, nil)
+			if err == nil {
+				err = fmt.Errorf("script output ended before ROOKET_DONE")
+			}
+			return append(errs, fmt.Errorf("node script did not complete on node %s after %d attempts: %w", node, attempts, err))
+		}
+		run.Fprintf(out, "node script did not complete on node %s (attempt %d/%d); retrying\n", node, attempt, attempts)
+		time.Sleep(5 * time.Second)
+	}
+}
+
+// forEachNode runs fn for every node concurrently, buffering each node's
+// output and flushing the blocks in node order once all are done. The
+// per-node error lists are combined into one error.
+func forEachNode(nodes []string, fn func(node string, out *bytes.Buffer) []error) error {
+	outs := make([]bytes.Buffer, len(nodes))
+	errLists := make([][]error, len(nodes))
+	var wg sync.WaitGroup
+	for i, node := range nodes {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			errLists[i] = fn(node, &outs[i])
+		}()
+	}
+	wg.Wait()
+	var errs []error
+	for i := range nodes {
+		os.Stdout.Write(outs[i].Bytes())
+		errs = append(errs, errLists[i]...)
 	}
 	return errors.Join(errs...)
 }
 
-// installNodePackages installs lvm2 and cryptsetup into a kind node, retrying to
-// ride out transient apt failures. Nodes of a reused cluster already carry the
-// packages from their first prep, so probe for the tools and skip apt — and its
-// deb.debian.org network dependency — when both are present.
-func installNodePackages(eng engine.Engine, node string) error {
-	if run.Cmd(eng.String(), "exec", node, "sh", "-c",
-		"command -v vgs >/dev/null && command -v cryptsetup >/dev/null") == nil {
-		fmt.Printf("lvm2 and cryptsetup already present on node %s\n", node)
-		return nil
+// nodePrepScript renders the per-node preparation script. Operations do NOT
+// stop at the first failure — a failed remount must not skip the
+// safety-critical device masking — so each failure emits a ROOKET_FAIL
+// marker that nodeScriptErrors converts back into a per-operation error.
+//
+// lvm2 and cryptsetup are absent from kindest/node images but required for
+// LVM-backed and encrypted OSDs; nodes of a reused cluster already carry
+// them from their first prep, so the probe skips apt — and its
+// deb.debian.org network dependency — when both are present. apt retries
+// ride out transient network failures.
+func nodePrepScript(foreignDevs []string) string {
+	var b strings.Builder
+	b.WriteString(`rc=0
+mount -o remount,rw /sys || { echo "ROOKET_FAIL:remount /sys read-write"; rc=1; }
+if command -v vgs >/dev/null && command -v cryptsetup >/dev/null; then
+  echo "lvm2 and cryptsetup already present"
+else
+  ok=""
+  for attempt in 1 2 3; do
+    if apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y lvm2 cryptsetup; then ok=1; break; fi
+    if [ "$attempt" -lt 3 ]; then echo "apt install attempt $attempt/3 failed; retrying"; sleep 5; fi
+  done
+  [ -n "$ok" ] || { echo "ROOKET_FAIL:install lvm2/cryptsetup"; rc=1; }
+fi
+dmsetup mknodes || { echo "ROOKET_FAIL:dmsetup mknodes"; rc=1; }
+`)
+	for _, dev := range foreignDevs {
+		marker := "ROOKET_FAIL:mask foreign OSD device " + dev
+		fmt.Fprintf(&b, "rm -f %s || { echo %s; rc=1; }\n", shellQuote(dev), shellQuote(marker))
 	}
-	const script = "apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y lvm2 cryptsetup"
-	var err error
-	for attempt := 1; attempt <= 3; attempt++ {
-		if err = run.Cmd(eng.String(), "exec", node, "sh", "-c", script); err == nil {
-			return nil
-		}
-		if attempt < 3 {
-			fmt.Printf("apt install attempt %d/3 on node %s failed: %v; retrying\n", attempt, node, err)
-			time.Sleep(5 * time.Second)
-		}
-	}
-	return err
+	b.WriteString("echo ROOKET_DONE\nexit $rc\n")
+	return b.String()
 }
 
-// ConfigureRegistry creates the containerd registry hosts.toml on every node.
+// nodeScriptErrors converts a node script's ROOKET_FAIL markers back into
+// per-operation errors. A failed run with no markers (e.g. the exec itself
+// failed) yields one generic error.
+func nodeScriptErrors(node, output string, runErr error) []error {
+	var errs []error
+	for _, line := range strings.Split(output, "\n") {
+		if op, ok := strings.CutPrefix(strings.TrimSpace(line), "ROOKET_FAIL:"); ok {
+			errs = append(errs, fmt.Errorf("%s on node %s", op, node))
+		}
+	}
+	if runErr != nil && len(errs) == 0 {
+		errs = append(errs, fmt.Errorf("node script on node %s: %w", node, runErr))
+	}
+	return errs
+}
+
+// shellQuote single-quotes s for safe interpolation into a shell script.
+func shellQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
+}
+
+// ConfigureRegistry creates the containerd registry hosts.toml on every node,
+// one script per node, all nodes concurrently (see PrepareNodes).
 func ConfigureRegistry(eng engine.Engine, clusterName, registryName string, hostPort int) error {
 	nodes, err := Nodes(clusterName)
 	if err != nil {
 		return err
 	}
+	script := registryScript(registryName, hostPort)
+	return forEachNode(nodes, func(node string, out *bytes.Buffer) []error {
+		errs := runNodeScript(eng, out, node, script)
+		if len(errs) == 0 {
+			run.Fprintf(out, "configured registry on node %s\n", node)
+		}
+		return errs
+	})
+}
 
+// registryScript renders the script that wires a node's containerd to the
+// local registry; the hosts.toml content is embedded via a quoted heredoc.
+func registryScript(registryName string, hostPort int) string {
 	hostsToml := fmt.Sprintf(`server = "http://%s:5000"
 
 [host."http://%s:5000"]
@@ -363,22 +461,14 @@ func ConfigureRegistry(eng engine.Engine, clusterName, registryName string, host
 `, registryName, registryName)
 
 	dir := fmt.Sprintf("/etc/containerd/certs.d/localhost:%d", hostPort)
-
-	for _, node := range nodes {
-		if err := run.Cmd(eng.String(), "exec", node, "mkdir", "-p", dir); err != nil {
-			return fmt.Errorf("mkdir on node %s: %w", node, err)
-		}
-		hostsPath := dir + "/hosts.toml"
-		if err := run.CmdWithStdin(
-			strings.NewReader(hostsToml),
-			eng.String(), "exec", "-i", node,
-			"sh", "-c", "cat > "+hostsPath,
-		); err != nil {
-			return fmt.Errorf("write hosts.toml on node %s: %w", node, err)
-		}
-		fmt.Printf("configured registry on node %s\n", node)
-	}
-	return nil
+	return fmt.Sprintf(`rc=0
+mkdir -p %[1]s || { echo %[3]s; rc=1; }
+[ "$rc" = 0 ] && { cat > %[1]s/hosts.toml <<'ROOKET_EOF' || { echo "ROOKET_FAIL:write hosts.toml"; rc=1; }
+%[2]sROOKET_EOF
+}
+echo ROOKET_DONE
+exit $rc
+`, shellQuote(dir), hostsToml, shellQuote("ROOKET_FAIL:mkdir "+dir))
 }
 
 // InstallPrometheusOperatorCRDs installs the prometheus-operator-crds helm

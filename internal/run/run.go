@@ -28,6 +28,12 @@ func SetTimestamps(on bool) { timestamps = on }
 // another caller's text. Child-process output is never routed through here
 // and streams unprefixed.
 func Printf(format string, a ...any) {
+	Fprintf(os.Stdout, format, a...)
+}
+
+// Fprintf is Printf writing to an explicit writer — used by callers that
+// buffer a concurrent task's output for later, ordered flushing.
+func Fprintf(w io.Writer, format string, a ...any) {
 	msg := fmt.Sprintf(format, a...)
 	if timestamps {
 		prefix := fmt.Sprintf("[%6.1fs] ", time.Since(startTime).Seconds())
@@ -39,7 +45,7 @@ func Printf(format string, a ...any) {
 		}
 		msg = strings.Join(lines, "\n")
 	}
-	fmt.Print(msg)
+	fmt.Fprint(w, msg)
 }
 
 func trace(name string, args []string) {
@@ -133,5 +139,17 @@ func CmdWithStdinEnv(stdin io.Reader, extraEnv []string, name string, args ...st
 		cmd.Env = append(os.Environ(), extraEnv...)
 	}
 	trace(name, args)
+	return cmd.Run()
+}
+
+// CmdWithStdinTo runs a command with stdin piped from the provided reader,
+// writing the trace line and BOTH child output streams to w. Used for
+// commands run concurrently, whose output is buffered and flushed in order.
+func CmdWithStdinTo(w io.Writer, stdin io.Reader, name string, args ...string) error {
+	cmd := exec.Command(name, args...)
+	cmd.Stdin = stdin
+	cmd.Stdout = w
+	cmd.Stderr = w
+	Fprintf(w, "+ %s %s\n", name, strings.Join(args, " "))
 	return cmd.Run()
 }
