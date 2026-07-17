@@ -4,6 +4,7 @@ package registry
 
 import (
 	"fmt"
+	"io"
 	"strings" // for Exists
 
 	"github.com/jhoblitt/rooket/internal/engine"
@@ -45,12 +46,12 @@ func (c *Config) InClusterAddr() string {
 }
 
 // Exists returns true if the registry container already exists (running or stopped).
-func Exists(eng engine.Engine, name string) bool {
-	out, err := run.Output(eng.String(), "ps", "-a", "--filter", "name=^"+name+"$", "--format", "{{.Names}}")
+func Exists(out io.Writer, eng engine.Engine, name string) bool {
+	res, err := run.OutputTo(out, eng.String(), "ps", "-a", "--filter", "name=^"+name+"$", "--format", "{{.Names}}")
 	if err != nil {
 		return false
 	}
-	for line := range strings.SplitSeq(out, "\n") {
+	for line := range strings.SplitSeq(res, "\n") {
 		if strings.TrimSpace(line) == name {
 			return true
 		}
@@ -62,9 +63,9 @@ func Exists(eng engine.Engine, name string) bool {
 // The registry must be created after the kind cluster so that cfg.Network
 // ("kind") already exists; attaching at creation time makes it reachable by
 // name from the cluster nodes.
-func Create(cfg Config) error {
-	if Exists(cfg.Engine, cfg.Name) {
-		fmt.Printf("registry container %q already exists, skipping creation\n", cfg.Name)
+func Create(out io.Writer, cfg Config) error {
+	if Exists(out, cfg.Engine, cfg.Name) {
+		run.Fprintf(out, "registry container %q already exists, skipping creation\n", cfg.Name)
 		return nil
 	}
 	args := []string{
@@ -77,15 +78,15 @@ func Create(cfg Config) error {
 		args = append(args, "--network="+cfg.Network)
 	}
 	args = append(args, RegistryImage)
-	return run.Cmd(cfg.Engine.String(), args...)
+	return run.CmdTo(out, cfg.Engine.String(), args...)
 }
 
 // Delete stops and removes the registry container. The -v removes the
 // container's anonymous volume (registry:2 declares VOLUME /var/lib/registry);
 // without it each create/delete cycle leaks a ~600MB volume.
-func Delete(eng engine.Engine, name string) error {
-	if !Exists(eng, name) {
+func Delete(out io.Writer, eng engine.Engine, name string) error {
+	if !Exists(out, eng, name) {
 		return nil
 	}
-	return run.Cmd(eng.String(), "rm", "-f", "-v", name)
+	return run.CmdTo(out, eng.String(), "rm", "-f", "-v", name)
 }

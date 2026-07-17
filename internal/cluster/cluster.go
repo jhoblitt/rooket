@@ -106,8 +106,8 @@ func GenerateConfig(cfg Config) ([]byte, error) {
 // provider. The provider is passed explicitly (overriding the ambient
 // KIND_EXPERIMENTAL_PROVIDER) so callers like prune and list can query engines
 // other than the session's resolved one.
-func List(eng engine.Engine) ([]string, error) {
-	out, err := run.OutputWithEnv(
+func List(w io.Writer, eng engine.Engine) ([]string, error) {
+	out, err := run.OutputWithEnvTo(w,
 		[]string{"KIND_EXPERIMENTAL_PROVIDER=" + eng.String()},
 		"kind", "get", "clusters")
 	if err != nil {
@@ -124,8 +124,8 @@ func List(eng engine.Engine) ([]string, error) {
 
 // Exists returns true if a kind cluster with the given name already exists
 // under the given engine's kind provider.
-func Exists(eng engine.Engine, name string) (bool, error) {
-	names, err := List(eng)
+func Exists(w io.Writer, eng engine.Engine, name string) (bool, error) {
+	names, err := List(w, eng)
 	if err != nil {
 		return false, err
 	}
@@ -138,7 +138,7 @@ func Exists(eng engine.Engine, name string) (bool, error) {
 }
 
 // Create creates the kind cluster using the provided configuration.
-func Create(cfg Config) error {
+func Create(w io.Writer, cfg Config) error {
 	configBytes, err := GenerateConfig(cfg)
 	if err != nil {
 		return fmt.Errorf("generate kind config: %w", err)
@@ -150,11 +150,11 @@ func Create(cfg Config) error {
 	}
 	defer os.Remove(tmpFile)
 
-	fmt.Printf("kind cluster config:\n%s\n", configBytes)
+	run.Fprintf(w, "kind cluster config:\n%s\n", configBytes)
 
 	// The kind provider comes from KIND_EXPERIMENTAL_PROVIDER, which the root
 	// command exports from the selected engine.
-	return run.Cmd(
+	return run.CmdTo(w,
 		"kind", "create", "cluster",
 		"--name", cfg.Name,
 		"--config", tmpFile,
@@ -252,8 +252,8 @@ func kindNodeImageID(eng engine.Engine) string {
 }
 
 // Nodes returns the list of node container names for the cluster.
-func Nodes(clusterName string) ([]string, error) {
-	out, err := run.Output("kind", "get", "nodes", "--name", clusterName)
+func Nodes(w io.Writer, clusterName string) ([]string, error) {
+	out, err := run.OutputTo(w, "kind", "get", "nodes", "--name", clusterName)
 	if err != nil {
 		return nil, err
 	}
@@ -291,8 +291,8 @@ func Nodes(clusterName string) ([]string, error) {
 // Each node runs ONE shell script (piped over stdin, so the trace stays
 // short) and all nodes run concurrently; a node's output is buffered and
 // flushed as a block afterwards, in node order, so logs stay readable.
-func PrepareNodes(eng engine.Engine, clusterName string, ownDevsByNode map[string][]string) error {
-	nodes, err := Nodes(clusterName)
+func PrepareNodes(w io.Writer, eng engine.Engine, clusterName string, ownDevsByNode map[string][]string) error {
+	nodes, err := Nodes(w, clusterName)
 	if err != nil {
 		return err
 	}
@@ -304,7 +304,7 @@ func PrepareNodes(eng engine.Engine, clusterName string, ownDevsByNode map[strin
 		}
 	}
 
-	return forEachNode(nodes, func(node string, out *bytes.Buffer) []error {
+	return forEachNode(w, nodes, func(node string, out *bytes.Buffer) []error {
 		keep := map[string]bool{}
 		for _, d := range ownDevsByNode[node] {
 			keep[d] = true
@@ -359,7 +359,7 @@ func runNodeScript(eng engine.Engine, out *bytes.Buffer, node, script string) []
 // forEachNode runs fn for every node concurrently, buffering each node's
 // output and flushing the blocks in node order once all are done. The
 // per-node error lists are combined into one error.
-func forEachNode(nodes []string, fn func(node string, out *bytes.Buffer) []error) error {
+func forEachNode(w io.Writer, nodes []string, fn func(node string, out *bytes.Buffer) []error) error {
 	outs := make([]bytes.Buffer, len(nodes))
 	errLists := make([][]error, len(nodes))
 	var wg sync.WaitGroup
@@ -373,7 +373,7 @@ func forEachNode(nodes []string, fn func(node string, out *bytes.Buffer) []error
 	wg.Wait()
 	var errs []error
 	for i := range nodes {
-		os.Stdout.Write(outs[i].Bytes())
+		w.Write(outs[i].Bytes())
 		errs = append(errs, errLists[i]...)
 	}
 	return errors.Join(errs...)
@@ -436,13 +436,13 @@ func shellQuote(s string) string {
 
 // ConfigureRegistry creates the containerd registry hosts.toml on every node,
 // one script per node, all nodes concurrently (see PrepareNodes).
-func ConfigureRegistry(eng engine.Engine, clusterName, registryName string, hostPort int) error {
-	nodes, err := Nodes(clusterName)
+func ConfigureRegistry(w io.Writer, eng engine.Engine, clusterName, registryName string, hostPort int) error {
+	nodes, err := Nodes(w, clusterName)
 	if err != nil {
 		return err
 	}
 	script := registryScript(registryName, hostPort)
-	return forEachNode(nodes, func(node string, out *bytes.Buffer) []error {
+	return forEachNode(w, nodes, func(node string, out *bytes.Buffer) []error {
 		errs := runNodeScript(eng, out, node, script)
 		if len(errs) == 0 {
 			run.Fprintf(out, "configured registry on node %s\n", node)
@@ -476,15 +476,15 @@ exit $rc
 // entry needed). The upgrade is skipped when promCRDsCurrent proves the
 // release is already deployed at the requested version with its CRDs
 // intact; otherwise 'helm upgrade --install' reconciles it.
-func InstallPrometheusOperatorCRDs(clusterName, releaseName, version string, extraEnv []string) error {
-	if promCRDsCurrent(clusterName, releaseName, version, extraEnv) {
-		fmt.Printf("prometheus-operator-crds %s already deployed with its CRDs present, skipping\n", version)
+func InstallPrometheusOperatorCRDs(w io.Writer, clusterName, releaseName, version string, extraEnv []string) error {
+	if promCRDsCurrent(w, clusterName, releaseName, version, extraEnv) {
+		run.Fprintf(w, "prometheus-operator-crds %s already deployed with its CRDs present, skipping\n", version)
 		return nil
 	}
 	// Pin the release namespace: rooket later switches the kube-context's default
 	// namespace to rook-ceph, so an unpinned install lands in a different namespace
 	// on re-run and collides with the CRDs' helm ownership annotations.
-	return run.CmdWithEnv(extraEnv,
+	return run.CmdWithEnvTo(w, extraEnv,
 		"helm",
 		"--kube-context", "kind-"+clusterName,
 		"-n", "rook-ceph",
@@ -502,8 +502,8 @@ func InstallPrometheusOperatorCRDs(clusterName, releaseName, version string, ext
 // manifest still exists. A deployed release alone doesn't prove its
 // resources survived — the upgrade is the reconciler — so both halves must
 // hold before the install is skipped. Any probe failure means "not current".
-func promCRDsCurrent(clusterName, releaseName, version string, extraEnv []string) bool {
-	out, err := run.OutputWithEnv(extraEnv, "helm",
+func promCRDsCurrent(w io.Writer, clusterName, releaseName, version string, extraEnv []string) bool {
+	out, err := run.OutputWithEnvTo(w, extraEnv, "helm",
 		"--kube-context", "kind-"+clusterName,
 		"-n", "rook-ceph",
 		"list", "-o", "json",
@@ -531,7 +531,7 @@ func promCRDsCurrent(clusterName, releaseName, version string, extraEnv []string
 		return false
 	}
 
-	manifest, err := run.OutputWithEnv(extraEnv, "helm",
+	manifest, err := run.OutputWithEnvTo(w, extraEnv, "helm",
 		"--kube-context", "kind-"+clusterName,
 		"-n", "rook-ceph",
 		"get", "manifest", releaseName,
@@ -544,7 +544,7 @@ func promCRDsCurrent(clusterName, releaseName, version string, extraEnv []string
 		return false
 	}
 	args := append([]string{"get", "crd", "--context", "kind-" + clusterName, "-o", "name"}, crds...)
-	_, err = run.Output("kubectl", args...)
+	_, err = run.OutputTo(w, "kubectl", args...)
 	return err == nil
 }
 
@@ -581,7 +581,7 @@ func manifestCRDNames(manifest string) ([]string, error) {
 }
 
 // ApplyRegistryConfigMap creates the standard registry ConfigMap.
-func ApplyRegistryConfigMap(clusterName, registryName string, hostPort int) error {
+func ApplyRegistryConfigMap(w io.Writer, clusterName, registryName string, hostPort int) error {
 	cm := fmt.Sprintf(`apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -594,7 +594,8 @@ data:
     help: "https://kind.sigs.k8s.io/docs/user/local-registry/"
 `, hostPort, registryName)
 
-	return run.CmdWithStdin(
+	return run.CmdWithStdinTo(
+		w,
 		strings.NewReader(cm),
 		"kubectl", "apply",
 		"--context", "kind-"+clusterName,

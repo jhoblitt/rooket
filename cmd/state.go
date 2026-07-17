@@ -299,7 +299,7 @@ func liveClusters() (live map[string][]engine.Engine, consulted, failed []engine
 		if _, err := exec.LookPath(eng.String()); err != nil {
 			continue
 		}
-		names, err := cluster.List(eng)
+		names, err := cluster.List(os.Stdout, eng)
 		if err != nil {
 			failed = append(failed, eng)
 			continue

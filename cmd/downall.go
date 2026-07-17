@@ -83,7 +83,7 @@ func downAllRun(cmd *cobra.Command) error {
 	}
 	owns := func(name string, engs []engine.Engine) bool {
 		for _, eng := range engs {
-			if registry.Exists(eng, registry.ContainerName(name)) {
+			if registry.Exists(os.Stdout, eng, registry.ContainerName(name)) {
 				return true
 			}
 		}
@@ -158,7 +158,7 @@ func downAllRun(cmd *cobra.Command) error {
 			if err := cluster.DeleteWith(eng, n, kc); err != nil {
 				fmt.Printf("warning: delete cluster %q under %s: %v\n", n, eng, err)
 			}
-			if err := registry.Delete(eng, registry.ContainerName(n)); err != nil {
+			if err := registry.Delete(os.Stdout, eng, registry.ContainerName(n)); err != nil {
 				fmt.Printf("warning: delete registry for %q under %s: %v\n", n, eng, err)
 			}
 		}
@@ -226,7 +226,7 @@ func downAllRun(cmd *cobra.Command) error {
 // safe to zap.
 func stillLive(engs []engine.Engine, name string) bool {
 	for _, eng := range engs {
-		if ok, err := cluster.Exists(eng, name); err == nil && ok {
+		if ok, err := cluster.Exists(os.Stdout, eng, name); err == nil && ok {
 			return true
 		}
 	}

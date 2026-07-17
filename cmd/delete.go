@@ -43,7 +43,7 @@ must be torn down separately if desired.
 			// means something went wrong. The zap below truncates the OSD disk
 			// images; doing that while the cluster still holds them corrupts a
 			// live cluster. Only continue if the cluster is confirmed gone.
-			exists, exErr := cluster.Exists(containerEngine, deleteName)
+			exists, exErr := cluster.Exists(os.Stdout, containerEngine, deleteName)
 			if exErr != nil {
 				return fmt.Errorf("delete cluster %q: %w; could not verify it was removed (%v), so not zapping its disks", deleteName, err, exErr)
 			}
@@ -71,7 +71,7 @@ must be torn down separately if desired.
 
 		// --- Step 3: registry container ---
 		fmt.Println("==> deleting local OCI registry")
-		if err := registry.Delete(containerEngine, regName); err != nil {
+		if err := registry.Delete(os.Stdout, containerEngine, regName); err != nil {
 			fmt.Printf("warning: delete registry: %v\n", err)
 		}
 

@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"io"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -123,7 +124,7 @@ func TestPruneStaleChartDeps(t *testing.T) {
 			t.Fatal(err)
 		}
 
-		if err := pruneStaleChartDeps(root); err != nil {
+		if err := pruneStaleChartDeps(io.Discard, root); err != nil {
 			t.Fatal(err)
 		}
 
@@ -142,7 +143,7 @@ func TestPruneStaleChartDeps(t *testing.T) {
 	t.Run("archives without a Chart.yaml are left alone", func(t *testing.T) {
 		root := t.TempDir()
 		depDir := writeChartTree(t, root, "mystery", "", "mystery-dep-1.2.3.tgz")
-		if err := pruneStaleChartDeps(root); err != nil {
+		if err := pruneStaleChartDeps(io.Discard, root); err != nil {
 			t.Fatal(err)
 		}
 		if _, err := os.Lstat(filepath.Join(depDir, "mystery-dep-1.2.3.tgz")); err != nil {
@@ -159,13 +160,13 @@ func TestPruneStaleChartDeps(t *testing.T) {
 		if err := os.WriteFile(filepath.Join(dir, "Chart.yaml"), []byte("name: library\n"), 0o644); err != nil {
 			t.Fatal(err)
 		}
-		if err := pruneStaleChartDeps(root); err != nil {
+		if err := pruneStaleChartDeps(io.Discard, root); err != nil {
 			t.Fatal(err)
 		}
 	})
 
 	t.Run("missing deploy/charts is a no-op", func(t *testing.T) {
-		if err := pruneStaleChartDeps(t.TempDir()); err != nil {
+		if err := pruneStaleChartDeps(io.Discard, t.TempDir()); err != nil {
 			t.Fatal(err)
 		}
 	})

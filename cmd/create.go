@@ -2,11 +2,14 @@ package cmd
 
 import (
 	"fmt"
+	"io"
+	"os"
 
 	"github.com/spf13/cobra"
 
 	"github.com/jhoblitt/rooket/internal/cluster"
 	"github.com/jhoblitt/rooket/internal/registry"
+	"github.com/jhoblitt/rooket/internal/run"
 )
 
 var (
@@ -45,135 +48,144 @@ Run 'rooket block setup' before 'rooket cluster create' to prepare block devices
 			return err
 		}
 		createName = name
+		return createClusterRun(os.Stdout, name, createRegistryPort,
+			cmd.Flags().Changed("registry-port"), createWorkers, createDiskCount,
+			createISCSIQNDate, createPromCRDsVersion, createPromCRDsRelease)
+	},
+}
 
-		port, err := resolveRegistryPort(createName, createRegistryPort, cmd.Flags().Changed("registry-port"))
-		if err != nil {
+// createClusterRun is the cluster-create core, writing every rooket-emitted
+// line and child stream to out. It must not mutate process-global state
+// (useCluster's Setenv stays in the cobra wrapper) so a caller can run it
+// concurrently with other phases.
+func createClusterRun(out io.Writer, name string, requestedPort int, portExplicit bool,
+	workers, diskCount int, iqnDate, promVersion, promRelease string) error {
+	port, err := resolveRegistryPort(name, requestedPort, portExplicit)
+	if err != nil {
+		return err
+	}
+	regName := registry.ContainerName(name)
+
+	// A recorded port can go stale: this cluster's registry is gone and
+	// something else (typically another rooket cluster's registry) now holds
+	// the port. With no registry container of our own to preserve, re-pick a
+	// free port — the steps below (re)wire containerd and the ConfigMap to
+	// whatever port ends up in use.
+	if !registry.Exists(out, containerEngine, regName) && !portFree(port) {
+		old := port
+		if port, err = freePort(5001); err != nil {
 			return err
 		}
-		regName := registry.ContainerName(createName)
+		run.Fprintf(out, "recorded registry port %d is now in use elsewhere; using %d instead\n", old, port)
+	}
+	if err := writeRegistryPort(name, port); err != nil {
+		return err
+	}
 
-		// A recorded port can go stale: this cluster's registry is gone and
-		// something else (typically another rooket cluster's registry) now holds
-		// the port. With no registry container of our own to preserve, re-pick a
-		// free port — the steps below (re)wire containerd and the ConfigMap to
-		// whatever port ends up in use.
-		if !registry.Exists(containerEngine, regName) && !portFree(port) {
-			old := port
-			if port, err = freePort(5001); err != nil {
-				return err
-			}
-			fmt.Printf("recorded registry port %d is now in use elsewhere; using %d instead\n", old, port)
-		}
-		if err := writeRegistryPort(createName, port); err != nil {
-			return err
-		}
-		createRegistryPort = port
-
-		// --- Step 1: Locate iSCSI block devices ---
-		workerDisks := make(map[int][]cluster.Disk)
-		if createDiskCount > 0 {
-			fmt.Println("==> locating iSCSI block devices")
-			for i := 0; i < createWorkers; i++ {
-				for d := 0; d < createDiskCount; d++ {
-					iqn := fmt.Sprintf("iqn.%s.local.rooket:%s-worker%d-disk%d",
-						createISCSIQNDate, createName, i, d)
-					dev, err := waitForISCSIDevice(iqn)
-					if err != nil {
-						return fmt.Errorf("iSCSI device for worker %d disk %d not found "+
-							"(run 'rooket block setup' first): %w", i, d, err)
-					}
-					fmt.Printf("worker%d disk%d: %s\n", i, d, dev)
-					workerDisks[i] = append(workerDisks[i], cluster.Disk{
-						HostPath:      dev,
-						ContainerPath: dev,
-					})
+	// --- Step 1: Locate iSCSI block devices ---
+	workerDisks := make(map[int][]cluster.Disk)
+	if diskCount > 0 {
+		run.Fprintf(out, "==> locating iSCSI block devices\n")
+		for i := 0; i < workers; i++ {
+			for d := 0; d < diskCount; d++ {
+				iqn := fmt.Sprintf("iqn.%s.local.rooket:%s-worker%d-disk%d",
+					iqnDate, name, i, d)
+				dev, err := waitForISCSIDevice(iqn)
+				if err != nil {
+					return fmt.Errorf("iSCSI device for worker %d disk %d not found "+
+						"(run 'rooket block setup' first): %w", i, d, err)
 				}
+				run.Fprintf(out, "worker%d disk%d: %s\n", i, d, dev)
+				workerDisks[i] = append(workerDisks[i], cluster.Disk{
+					HostPath:      dev,
+					ContainerPath: dev,
+				})
 			}
 		}
+	}
 
-		// --- Step 2: kind cluster ---
-		// This also creates the "kind" network used by the registry.
-		fmt.Println("==> creating kind cluster")
-		clusterCfg := cluster.Config{
-			Name:             createName,
-			Workers:          createWorkers,
-			RegistryName:     regName,
-			RegistryHostPort: createRegistryPort,
-			WorkerDisks:      workerDisks,
+	// --- Step 2: kind cluster ---
+	// This also creates the "kind" network used by the registry.
+	run.Fprintf(out, "==> creating kind cluster\n")
+	clusterCfg := cluster.Config{
+		Name:             name,
+		Workers:          workers,
+		RegistryName:     regName,
+		RegistryHostPort: port,
+		WorkerDisks:      workerDisks,
+	}
+	exists, err := cluster.Exists(out, containerEngine, name)
+	if err != nil {
+		return fmt.Errorf("check cluster existence: %w", err)
+	}
+	if exists {
+		run.Fprintf(out, "cluster %q already exists, skipping creation\n", name)
+	} else {
+		if err := cluster.Create(out, clusterCfg); err != nil {
+			return fmt.Errorf("create cluster: %w", err)
 		}
-		exists, err := cluster.Exists(containerEngine, createName)
-		if err != nil {
-			return fmt.Errorf("check cluster existence: %w", err)
-		}
-		if exists {
-			fmt.Printf("cluster %q already exists, skipping creation\n", createName)
-		} else {
-			if err := cluster.Create(clusterCfg); err != nil {
-				return fmt.Errorf("create cluster: %w", err)
-			}
-		}
+	}
 
-		// --- Step 3: Prepare nodes for OSD provisioning ---
-		fmt.Println("==> preparing nodes for OSD provisioning")
-		ownDevsByNode := make(map[string][]string)
-		for i := 0; i < createWorkers; i++ {
-			name := workerNodeName(createName, i)
-			for _, d := range workerDisks[i] {
-				ownDevsByNode[name] = append(ownDevsByNode[name], d.HostPath)
-			}
+	// --- Step 3: Prepare nodes for OSD provisioning ---
+	run.Fprintf(out, "==> preparing nodes for OSD provisioning\n")
+	ownDevsByNode := make(map[string][]string)
+	for i := 0; i < workers; i++ {
+		node := workerNodeName(name, i)
+		for _, d := range workerDisks[i] {
+			ownDevsByNode[node] = append(ownDevsByNode[node], d.HostPath)
 		}
-		if err := cluster.PrepareNodes(containerEngine, createName, ownDevsByNode); err != nil {
-			return fmt.Errorf("prepare nodes: %w", err)
-		}
+	}
+	if err := cluster.PrepareNodes(out, containerEngine, name, ownDevsByNode); err != nil {
+		return fmt.Errorf("prepare nodes: %w", err)
+	}
 
-		// --- Step 4: Registry ---
-		// Created after the cluster so the "kind" network exists.
-		// --network=kind makes the container reachable by name from cluster nodes.
-		fmt.Println("==> creating local OCI registry on the kind network")
-		regCfg := registry.Config{
-			Engine:   containerEngine,
-			Name:     regName,
-			HostPort: createRegistryPort,
-			Network:  "kind",
-		}
-		if err := registry.Create(regCfg); err != nil {
-			return fmt.Errorf("create registry: %w", err)
-		}
+	// --- Step 4: Registry ---
+	// Created after the cluster so the "kind" network exists.
+	// --network=kind makes the container reachable by name from cluster nodes.
+	run.Fprintf(out, "==> creating local OCI registry on the kind network\n")
+	regCfg := registry.Config{
+		Engine:   containerEngine,
+		Name:     regName,
+		HostPort: port,
+		Network:  "kind",
+	}
+	if err := registry.Create(out, regCfg); err != nil {
+		return fmt.Errorf("create registry: %w", err)
+	}
 
-		// --- Step 5: Configure containerd registry on each node ---
-		fmt.Println("==> configuring containerd registry on cluster nodes")
-		if err := cluster.ConfigureRegistry(containerEngine, createName, regName, createRegistryPort); err != nil {
-			return fmt.Errorf("configure registry on nodes: %w", err)
-		}
+	// --- Step 5: Configure containerd registry on each node ---
+	run.Fprintf(out, "==> configuring containerd registry on cluster nodes\n")
+	if err := cluster.ConfigureRegistry(out, containerEngine, name, regName, port); err != nil {
+		return fmt.Errorf("configure registry on nodes: %w", err)
+	}
 
-		// --- Step 6: Registry ConfigMap ---
-		fmt.Println("==> applying local-registry-hosting ConfigMap")
-		if err := cluster.ApplyRegistryConfigMap(createName, regName, createRegistryPort); err != nil {
-			return fmt.Errorf("apply registry ConfigMap: %w", err)
-		}
+	// --- Step 6: Registry ConfigMap ---
+	run.Fprintf(out, "==> applying local-registry-hosting ConfigMap\n")
+	if err := cluster.ApplyRegistryConfigMap(out, name, regName, port); err != nil {
+		return fmt.Errorf("apply registry ConfigMap: %w", err)
+	}
 
-		// --- Step 7: prometheus-operator CRDs ---
-		fmt.Println("==> installing prometheus-operator-crds helm chart")
-		hEnv, err := helmEnv(createName, "rooket")
-		if err != nil {
-			return err
-		}
-		if err := cluster.InstallPrometheusOperatorCRDs(
-			createName, createPromCRDsRelease, createPromCRDsVersion, hEnv,
-		); err != nil {
-			return fmt.Errorf("install prometheus-operator-crds: %w", err)
-		}
+	// --- Step 7: prometheus-operator CRDs ---
+	run.Fprintf(out, "==> installing prometheus-operator-crds helm chart\n")
+	hEnv, err := helmEnv(name, "rooket")
+	if err != nil {
+		return err
+	}
+	if err := cluster.InstallPrometheusOperatorCRDs(
+		out, name, promRelease, promVersion, hEnv,
+	); err != nil {
+		return fmt.Errorf("install prometheus-operator-crds: %w", err)
+	}
 
-		fmt.Printf(`
+	run.Fprintf(out, `
 Cluster %q is ready.
 
   kubectl:           rooket k <args>   (or: export KUBECONFIG="$(rooket kubeconfig --path)")
   local registry:    localhost:%d
   push images with:  %s push localhost:%d/<image>
 
-`, createName, createRegistryPort, containerEngine.String(), createRegistryPort)
-		return nil
-	},
+`, name, port, containerEngine.String(), port)
+	return nil
 }
 
 func init() {

@@ -48,20 +48,29 @@ func Fprintf(w io.Writer, format string, a ...any) {
 	fmt.Fprint(w, msg)
 }
 
-func trace(name string, args []string) {
-	Printf("+ %s %s\n", name, strings.Join(args, " "))
-}
-
 // Cmd runs a command, streaming stdout/stderr to the terminal.
 // stdin is connected to the process's controlling terminal so that programs
 // like sudo can prompt for a password interactively.
 func Cmd(name string, args ...string) error {
-	return CmdWithEnv(nil, name, args...)
+	return CmdWithEnvTo(os.Stdout, nil, name, args...)
+}
+
+// CmdTo is Cmd writing the trace line and BOTH child output streams to w —
+// for commands run concurrently whose output is buffered and flushed in
+// order.
+func CmdTo(w io.Writer, name string, args ...string) error {
+	return CmdWithEnvTo(w, nil, name, args...)
 }
 
 // CmdWithEnv runs a command with additional environment variables appended to
 // the current environment.
 func CmdWithEnv(extraEnv []string, name string, args ...string) error {
+	return CmdWithEnvTo(os.Stdout, extraEnv, name, args...)
+}
+
+// CmdWithEnvTo is CmdWithEnv with the trace line and both child streams
+// routed to w.
+func CmdWithEnvTo(w io.Writer, extraEnv []string, name string, args ...string) error {
 	cmd := exec.Command(name, args...)
 	// Use /dev/tty so interactive programs (e.g. sudo) can prompt even when
 	// os.Stdin is /dev/null inside a systemd scope.
@@ -71,26 +80,38 @@ func CmdWithEnv(extraEnv []string, name string, args ...string) error {
 	} else {
 		cmd.Stdin = os.Stdin
 	}
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
+	cmd.Stdout = w
+	cmd.Stderr = w
 	if len(extraEnv) > 0 {
 		cmd.Env = append(os.Environ(), extraEnv...)
 	}
-	trace(name, args)
+	Fprintf(w, "+ %s %s\n", name, strings.Join(args, " "))
 	return cmd.Run()
 }
 
 // Output runs a command and returns its stdout output as a string.
 // stdin is /dev/null; use OutputInteractive when the command may prompt.
 func Output(name string, args ...string) (string, error) {
-	return OutputWithEnv(nil, name, args...)
+	return OutputWithEnvTo(os.Stdout, nil, name, args...)
+}
+
+// OutputTo is Output with the trace line routed to w. The RETURNED stdout
+// stays clean for machine parsing, and child stderr stays captured (surfaced
+// via *exec.ExitError), exactly like Output.
+func OutputTo(w io.Writer, name string, args ...string) (string, error) {
+	return OutputWithEnvTo(w, nil, name, args...)
 }
 
 // OutputWithEnv runs a command with additional environment variables appended
 // to the current environment (later entries override earlier ones) and returns
 // its stdout output as a string.
 func OutputWithEnv(extraEnv []string, name string, args ...string) (string, error) {
-	trace(name, args)
+	return OutputWithEnvTo(os.Stdout, extraEnv, name, args...)
+}
+
+// OutputWithEnvTo is OutputWithEnv with the trace line routed to w.
+func OutputWithEnvTo(w io.Writer, extraEnv []string, name string, args ...string) (string, error) {
+	Fprintf(w, "+ %s %s\n", name, strings.Join(args, " "))
 	cmd := exec.Command(name, args...)
 	if len(extraEnv) > 0 {
 		cmd.Env = append(os.Environ(), extraEnv...)
@@ -116,7 +137,7 @@ func OutputInteractive(name string, args ...string) (string, error) {
 	}
 	cmd.Stdout = &buf
 	cmd.Stderr = os.Stderr
-	trace(name, args)
+	Printf("+ %s %s\n", name, strings.Join(args, " "))
 	if err := cmd.Run(); err != nil {
 		return "", err
 	}
@@ -138,7 +159,7 @@ func CmdWithStdinEnv(stdin io.Reader, extraEnv []string, name string, args ...st
 	if len(extraEnv) > 0 {
 		cmd.Env = append(os.Environ(), extraEnv...)
 	}
-	trace(name, args)
+	Printf("+ %s %s\n", name, strings.Join(args, " "))
 	return cmd.Run()
 }
 
