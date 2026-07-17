@@ -3,10 +3,12 @@ package cmd
 import (
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/spf13/cobra"
 
 	"github.com/jhoblitt/rooket/internal/engine"
+	"github.com/jhoblitt/rooket/internal/run"
 )
 
 // engineFlag is the raw --engine value; containerEngine is the validated engine
@@ -14,6 +16,7 @@ import (
 var (
 	engineFlag      string
 	containerEngine engine.Engine
+	timestampsFlag  bool
 )
 
 var rootCmd = &cobra.Command{
@@ -34,6 +37,7 @@ or $ROOKET_ENGINE) to create:
     so Rook/Ceph can consume them as raw block OSDs.
 `,
 	PersistentPreRunE: func(cmd *cobra.Command, _ []string) error {
+		run.SetTimestamps(timestampsFlag)
 		requested, err := engine.Parse(engineFlag)
 		if err != nil {
 			return err
@@ -78,4 +82,17 @@ func init() {
 	}
 	rootCmd.PersistentFlags().StringVar(&engineFlag, "engine", defaultEngine,
 		"container engine to drive: podman or docker (also via $ROOKET_ENGINE)")
+	rootCmd.PersistentFlags().BoolVar(&timestampsFlag, "timestamps", envTruthy("ROOKET_TIMESTAMPS"),
+		"prefix rooket-emitted lines (command traces, step banners) with elapsed time (also via $ROOKET_TIMESTAMPS)")
+}
+
+// envTruthy reports whether an environment variable is set to anything other
+// than an explicit off value: "", "0", "false", "no", or "off"
+// (case-insensitive, whitespace-trimmed).
+func envTruthy(name string) bool {
+	switch strings.TrimSpace(strings.ToLower(os.Getenv(name))) {
+	case "", "0", "false", "no", "off":
+		return false
+	}
+	return true
 }

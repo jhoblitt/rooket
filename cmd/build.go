@@ -124,7 +124,7 @@ func runMakeCapture(dir string) ([]string, error) {
 		return nil, err
 	}
 
-	fmt.Printf("+ make\n")
+	run.Printf("+ make\n")
 	if err := c.Start(); err != nil {
 		return nil, err
 	}
