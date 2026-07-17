@@ -262,8 +262,8 @@ func Nodes(clusterName string) ([]string, error) {
 // PrepareNodes readies every node for Rook OSD provisioning:
 //   - remounts /sys read-write (kind mounts it read-only, but ceph-volume and
 //     kernel RBD mapping must write it),
-//   - installs lvm2 and cryptsetup (absent from kindest/node images, but
-//     required for LVM-backed and encrypted OSDs),
+//   - installs lvm2 and cryptsetup when missing (absent from kindest/node
+//     images, but required for LVM-backed and encrypted OSDs),
 //   - runs 'dmsetup mknodes' to create /dev/mapper entries for the host's
 //     device-mapper devices: the node shares the host's /sys (which advertises
 //     those dm devices) but not its /dev/mapper, so ceph-volume's full-device
@@ -321,8 +321,15 @@ func PrepareNodes(eng engine.Engine, clusterName string, ownDevsByNode map[strin
 }
 
 // installNodePackages installs lvm2 and cryptsetup into a kind node, retrying to
-// ride out transient apt failures.
+// ride out transient apt failures. Nodes of a reused cluster already carry the
+// packages from their first prep, so probe for the tools and skip apt — and its
+// deb.debian.org network dependency — when both are present.
 func installNodePackages(eng engine.Engine, node string) error {
+	if run.Cmd(eng.String(), "exec", node, "sh", "-c",
+		"command -v vgs >/dev/null && command -v cryptsetup >/dev/null") == nil {
+		fmt.Printf("lvm2 and cryptsetup already present on node %s\n", node)
+		return nil
+	}
 	const script = "apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y lvm2 cryptsetup"
 	var err error
 	for attempt := 1; attempt <= 3; attempt++ {
