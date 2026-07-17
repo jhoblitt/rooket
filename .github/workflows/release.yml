@@ -1,0 +1,79 @@
+name: release
+
+# Publishes a GitHub release with prebuilt rooket binaries when a v* tag is
+# pushed. Versioning relies on Go's -buildvcs stamping: building from an
+# exactly-tagged, clean checkout embeds the tag as the module version, which
+# `rooket version` (runtime/debug.ReadBuildInfo) reports -- no ldflags
+# injection. The stamp-check step fails the release if any binary carries a
+# pseudo-version or +dirty suffix instead of the bare tag.
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      TAG: ${{ github.ref_name }}
+    steps:
+      - name: Checkout rooket
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          # -buildvcs stamping needs the tag itself plus enough history to
+          # resolve it; a shallow checkout yields a pseudo-version instead.
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+
+      - name: Unit tests
+        run: go test ./...
+
+      - name: Build release binaries
+        run: |
+          set -eux
+          # Build outside the work tree: an untracked artifact in the checkout
+          # flips vcs.modified, so every binary after the first would be
+          # stamped +dirty.
+          DIST="$RUNNER_TEMP/dist"
+          echo "DIST=$DIST" >> "$GITHUB_ENV"
+          # linux only: rooket's data path (LIO/targetcli iSCSI targets,
+          # open-iscsi, host /dev passthrough into kind nodes) is Linux-bound,
+          # so darwin binaries would fail at their primary purpose.
+          for platform in linux/amd64 linux/arm64; do
+            goos=${platform%/*} goarch=${platform#*/}
+            out="$DIST/rooket-$TAG-$goos-$goarch"
+            mkdir -p "$out"
+            GOOS=$goos GOARCH=$goarch CGO_ENABLED=0 \
+              go build -trimpath -buildvcs=true -ldflags='-s -w' -o "$out/rooket" .
+            cp LICENSE README.md "$out"
+            tar -czf "$out.tar.gz" -C "$out" rooket LICENSE README.md
+          done
+
+      - name: Verify version stamping
+        run: |
+          set -eux
+          for bin in "$DIST"/rooket-*/rooket; do
+            stamped=$(go version -m "$bin" | awk '$1 == "mod" { print $3 }')
+            [ "$stamped" = "$TAG" ] || {
+              echo "$bin stamped '$stamped', want '$TAG'"; exit 1
+            }
+          done
+          "$DIST/rooket-$TAG-linux-amd64/rooket" version | grep -F "rooket $TAG"
+
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eux
+          cd "$DIST"
+          sha256sum ./*.tar.gz > checksums.txt
+          gh release create "$TAG" --verify-tag --title "$TAG" \
+            --generate-notes ./*.tar.gz checksums.txt
