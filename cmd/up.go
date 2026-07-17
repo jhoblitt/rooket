@@ -24,6 +24,7 @@ var (
 	upSkipBlock       bool
 	upSkipBuild       bool
 	upSkipDeploy      bool
+	upForceBuild      bool
 )
 
 var upCmd = &cobra.Command{
@@ -106,6 +107,7 @@ Example:
 			buildDir = rookDir
 			buildName = upName
 			buildRegistryPort = upRegistryPort
+			buildForce = upForceBuild
 			if err := buildCmd.RunE(buildCmd, nil); err != nil {
 				return fmt.Errorf("build: %w", err)
 			}
@@ -181,4 +183,6 @@ func init() {
 	upCmd.Flags().BoolVar(&upSkipBlock, "skip-block", false, "skip 'block setup'")
 	upCmd.Flags().BoolVar(&upSkipBuild, "skip-build", false, "skip 'build'")
 	upCmd.Flags().BoolVar(&upSkipDeploy, "skip-deploy", false, "skip 'deploy'")
+	upCmd.Flags().BoolVar(&upForceBuild, "force-build", false, "run make even when the rook tree is unchanged since the last push")
+	upCmd.MarkFlagsMutuallyExclusive("skip-build", "force-build")
 }

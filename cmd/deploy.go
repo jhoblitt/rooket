@@ -146,6 +146,9 @@ func installRookCephOperator(dir string) error {
 	imageTag := gitRef // already sanitized by gitHeadRef
 
 	chartPath := filepath.Join(dir, "deploy", "charts", "rook-ceph")
+	if err := ensureChartDeps(dir, "rook-ceph"); err != nil {
+		return err
+	}
 
 	fmt.Printf("==> deploying rook-ceph operator\n")
 	fmt.Printf("    chart:      %s\n", chartPath)
@@ -153,8 +156,7 @@ func installRookCephOperator(dir string) error {
 	fmt.Printf("    release:    %s\n", deployOperatorName)
 	fmt.Printf("    namespace:  rook-ceph\n")
 
-	if err := run.CmdWithEnv(deployHelmEnv,
-		"helm",
+	args := []string{
 		"--kube-context", deployKubeContext,
 		"-n", "rook-ceph",
 		"upgrade", "--install", "--create-namespace",
@@ -167,7 +169,22 @@ func installRookCephOperator(dir string) error {
 		// the CSI drivers itself (<= v1.19); newer refs take the drivers
 		// chart's default of one replica.
 		"--set", "csi.provisionerReplicas=1",
-	); err != nil {
+	}
+	// The deploy tag is a mutable branch name and the chart defaults to
+	// IfNotPresent, so a rebuild that pushes the same tag would neither roll
+	// the Deployment nor beat a node-cached image. Pinning the registry's
+	// current digest as a pod-template annotation makes the operator roll
+	// exactly when image content changed.
+	if digest, ok := manifestDigest(deployRegistryPort, deployNamespace+"/"+deployImageName, imageTag); ok {
+		// Always-pull is required for the roll to matter: with IfNotPresent a
+		// replacement pod happily reuses the node-cached image behind the
+		// same mutable tag. The registry is on localhost, so the pull check
+		// is cheap.
+		args = append(args,
+			"--set-string", "annotations.rooket-image-digest="+digest,
+			"--set", "image.pullPolicy=Always")
+	}
+	if err := run.CmdWithEnv(deployHelmEnv, "helm", args...); err != nil {
 		return err
 	}
 
@@ -262,6 +279,9 @@ func cephCsiOperatorDep(chartYAML string) (version, condition string, err error)
 
 func installRookCephCluster(dir string) error {
 	chartPath := filepath.Join(dir, "deploy", "charts", "rook-ceph-cluster")
+	if err := ensureChartDeps(dir, "rook-ceph-cluster"); err != nil {
+		return err
+	}
 
 	args := []string{
 		"--kube-context", deployKubeContext,

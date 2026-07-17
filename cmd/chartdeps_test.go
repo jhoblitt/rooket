@@ -30,8 +30,9 @@ dependencies:
 			t.Fatal(err)
 		}
 		want := []chartDep{
-			{name: "library", version: "0.0.1"},
-			{name: "ceph-csi-operator", version: "1.0.4", condition: "csi.installCsiOperator"},
+			{name: "library", version: "0.0.1", repository: "file://../library"},
+			{name: "ceph-csi-operator", version: "1.0.4",
+				repository: "https://ceph.github.io/ceph-csi-operator", condition: "csi.installCsiOperator"},
 		}
 		if !reflect.DeepEqual(deps, want) {
 			t.Fatalf("got %+v, want %+v", deps, want)
@@ -51,7 +52,7 @@ dependencies:
 		if err != nil {
 			t.Fatal(err)
 		}
-		want := []chartDep{{name: "library", version: "0.0.1"}}
+		want := []chartDep{{name: "library", version: "0.0.1", repository: "file://../library"}}
 		if !reflect.DeepEqual(deps, want) {
 			t.Fatalf("got %+v, want %+v", deps, want)
 		}

@@ -230,6 +230,56 @@ spec:
 		}, 3*time.Minute, 15*time.Second).Should(Succeed())
 	})
 
+	It("auto-skips the build on an unchanged tree and rebuilds on change", func() {
+		operatorImageID := func() string {
+			out, err := kubectlNS("get", "pod", "-l", "app=rook-ceph-operator",
+				"-o", "jsonpath={.items[0].status.containerStatuses[0].imageID}")
+			Expect(err).NotTo(HaveOccurred(), "read operator imageID:\n%s", out)
+			return strings.TrimSpace(out)
+		}
+
+		// No --skip-build: the auto-skip gate must detect the unchanged tree.
+		args := []string{"up", "--dir", rookDir, "--workers", workers, "--name", clusterName}
+		if skipBlock {
+			args = append(args, "--skip-block")
+		}
+		out, err := rooketRun(15*time.Minute, args...)
+		Expect(err).NotTo(HaveOccurred(), "no-flag re-up failed:\n%s", tail(out, 40))
+		Expect(out).To(ContainSubstring("build skipped: rook tree unchanged"),
+			"auto-skip did not fire on an unchanged tree:\n%s", tail(out, 60))
+
+		digestBefore := operatorImageID()
+
+		By("rebuilding after a source change")
+		// Appending an unreferenced package-level var changes the compiled
+		// binary (rook's vet allows it) and must flip the fingerprint.
+		mainGo := filepath.Join(rookDir, "cmd", "rook", "main.go")
+		orig, err := os.ReadFile(mainGo)
+		Expect(err).NotTo(HaveOccurred())
+		DeferCleanup(func() {
+			Expect(os.WriteFile(mainGo, orig, 0o644)).To(Succeed(),
+				"restore %s after the rebuild spec", mainGo)
+		})
+		Expect(os.WriteFile(mainGo,
+			append(append([]byte{}, orig...), []byte("\nvar rooketE2EProbe = \"rebuild\"\n")...), 0o644)).To(Succeed())
+
+		out, err = rooketRun(30*time.Minute, args...)
+		Expect(err).NotTo(HaveOccurred(), "re-up after source change failed:\n%s", tail(out, 40))
+		Expect(out).NotTo(ContainSubstring("build skipped"),
+			"build skipped despite a source change:\n%s", tail(out, 60))
+
+		By("rolling the operator to the new image digest")
+		Eventually(func(g Gomega) {
+			out, err := kubectlNS("get", "pod", "-l", "app=rook-ceph-operator",
+				"--field-selector", "status.phase=Running",
+				"-o", "jsonpath={.items[0].status.containerStatuses[0].imageID}")
+			g.Expect(err).NotTo(HaveOccurred())
+			id := strings.TrimSpace(out)
+			g.Expect(id).NotTo(BeEmpty(), "operator pod has no imageID yet")
+			g.Expect(id).NotTo(Equal(digestBefore), "operator still runs the pre-change image")
+		}, 5*time.Minute, 15*time.Second).Should(Succeed())
+	})
+
 	It("tears the cluster down and leaves the disks clean", func() {
 		args := []string{"down", "--workers", workers, "--name", clusterName}
 		if skipBlock {
