@@ -10,6 +10,7 @@ import (
 	"regexp"
 	"runtime"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 
@@ -22,6 +23,7 @@ var (
 	buildRegistryPort int
 	buildNamespace    string
 	buildTag          string
+	buildForce        bool
 )
 
 var (
@@ -72,6 +74,31 @@ Example:
 			gitRef = "latest"
 		}
 
+		// The fingerprint is computed BEFORE make: edits made while make
+		// runs must invalidate the next stamp, not be attributed to this
+		// build.
+		fp, fpErr := treeFingerprint(dir)
+		if !buildForce {
+			stamp := readBuildStamp(name)
+			reason, repush := buildSkipCheck(fp, fpErr, stamp, containerEngine, dir, name, port, buildNamespace, buildTag, gitRef)
+			if reason == "" {
+				run.Printf("==> build skipped: rook tree unchanged since last push; %s present in registry (--force-build to rebuild)\n",
+					stampRefs(stamp.Images))
+				return nil
+			}
+			if repush != nil {
+				run.Printf("==> rook tree unchanged since last build (%s); pushing the existing image without make\n", reason)
+				imgs, rerr := repushStampedImages(repush, port)
+				if rerr == nil {
+					stampBuild(name, dir, fp, fpErr, gitRef, imgs)
+					return nil
+				}
+				run.Printf("==> cannot reuse the previous image (%v); building\n", rerr)
+			} else if stamp != nil {
+				run.Printf("==> building: %s\n", reason)
+			}
+		}
+
 		if err := pruneStaleChartDeps(dir); err != nil {
 			return fmt.Errorf("prune stale chart dependency archives: %w", err)
 		}
@@ -96,28 +123,129 @@ Example:
 				"(expected lines matching '=== container build <image>')")
 		}
 
-		registry := fmt.Sprintf("localhost:%d", buildRegistryPort)
+		registryHost := fmt.Sprintf("localhost:%d", buildRegistryPort)
+		var stamped []stampImage
+		local := true
 		for _, src := range builtImages {
 			target := buildTag
 			if target == "" {
-				target = deriveTag(registry, buildNamespace, src, gitRef)
+				target = deriveTag(registryHost, buildNamespace, src, gitRef)
 			}
-
-			fmt.Printf("==> tagging %s → %s\n", src, target)
-			if err := run.Cmd(containerEngine.String(), "tag", src, target); err != nil {
-				return fmt.Errorf("tag %s: %w", src, err)
+			if err := pushImage(src, target); err != nil {
+				return err
 			}
-
-			fmt.Printf("==> pushing %s\n", target)
-			if err := run.Cmd(containerEngine.String(), containerEngine.PushArgs(target)...); err != nil {
-				return fmt.Errorf("push %s: %w", target, err)
+			host, repo, tag, perr := parseImageRef(target)
+			if perr != nil || (host != registryHost && host != fmt.Sprintf("127.0.0.1:%d", buildRegistryPort)) {
+				// A --tag override pointing elsewhere can't be verified
+				// against this cluster's registry, so it is never stamped.
+				local = false
+				continue
 			}
-
-			fmt.Printf("pushed %s\n", target)
+			digest, _ := manifestDigest(buildRegistryPort, repo, tag)
+			id := localImageID(src)
+			stamped = append(stamped, stampImage{Source: src, SourceID: id, Ref: target, Repo: repo, Tag: tag, Digest: digest})
 		}
-
+		if local {
+			stampBuild(name, dir, fp, fpErr, gitRef, stamped)
+		}
 		return nil
 	},
+}
+
+// stampRefs renders the refs of a stamp's images for messages.
+func stampRefs(imgs []stampImage) string {
+	refs := make([]string, len(imgs))
+	for i, img := range imgs {
+		refs[i] = img.Ref
+	}
+	return strings.Join(refs, ", ")
+}
+
+// pushImage tags a source image and pushes it to the local registry.
+func pushImage(src, target string) error {
+	fmt.Printf("==> tagging %s → %s\n", src, target)
+	if err := run.Cmd(containerEngine.String(), "tag", src, target); err != nil {
+		return fmt.Errorf("tag %s: %w", src, err)
+	}
+	fmt.Printf("==> pushing %s\n", target)
+	if err := run.Cmd(containerEngine.String(), containerEngine.PushArgs(target)...); err != nil {
+		return fmt.Errorf("push %s: %w", target, err)
+	}
+	fmt.Printf("pushed %s\n", target)
+	return nil
+}
+
+// repushStampedImages re-publishes the images recorded by the last build —
+// used when the tree is unchanged but the registry no longer has (or never
+// had) the expected refs, e.g. after 'rooket down' recreated it or a branch
+// rename retagged the deploy ref. Publication state alone never justifies
+// re-running make.
+func repushStampedImages(imgs []stampImage, port int) ([]stampImage, error) {
+	for _, img := range imgs {
+		id := localImageID(img.Source)
+		if id == "" {
+			return nil, fmt.Errorf("source image %s no longer present locally", img.Source)
+		}
+		// The source tag is mutable — a later build (another branch, another
+		// cluster) may have retagged it. Only the stamped content may be
+		// republished under this stamp.
+		if img.SourceID == "" || id != img.SourceID {
+			return nil, fmt.Errorf("source image %s changed since it was stamped", img.Source)
+		}
+	}
+	out := make([]stampImage, 0, len(imgs))
+	for _, img := range imgs {
+		if err := pushImage(img.Source, img.Ref); err != nil {
+			return nil, err
+		}
+		digest, ok := manifestDigest(port, img.Repo, img.Tag)
+		if !ok {
+			return nil, fmt.Errorf("pushed %s but could not read its digest back", img.Ref)
+		}
+		img.Digest = digest
+		out = append(out, img)
+	}
+	return out, nil
+}
+
+// localImageID returns the engine's image ID for a local ref, or "".
+func localImageID(ref string) string {
+	id, err := run.Output(containerEngine.String(), "image", "inspect", "--format", "{{.Id}}", ref)
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(id)
+}
+
+// stampBuild records a fully-pushed build. Failures only warn: a missing
+// stamp merely costs a rebuild next time.
+func stampBuild(name, dir string, fp treeFP, fpErr error, gitRef string, imgs []stampImage) {
+	if fpErr != nil || len(imgs) == 0 {
+		return
+	}
+	// With BUILD_CONTAINER_IMAGE=false rook's make prints the container-build
+	// line without building, so the pushed image is whatever the source tag
+	// already pointed at — never bless that as this fingerprint's output.
+	if os.Getenv("BUILD_CONTAINER_IMAGE") == "false" {
+		return
+	}
+	for _, img := range imgs {
+		if img.Digest == "" || img.SourceID == "" {
+			return
+		}
+	}
+	s := &buildStamp{
+		Version:       buildStampVersion,
+		Dir:           dir,
+		Fingerprint:   fp,
+		GitRef:        gitRef,
+		Images:        imgs,
+		PushedAt:      time.Now().UTC().Format(time.RFC3339),
+		RooketVersion: rooketVersion(),
+	}
+	if err := writeBuildStamp(name, s); err != nil {
+		fmt.Printf("warning: could not record build stamp: %v\n", err)
+	}
 }
 
 // runMakeCapture runs make in dir, streams its stdout to the terminal, and
@@ -280,6 +408,7 @@ func init() {
 	buildCmd.Flags().IntVar(&buildRegistryPort, "registry-port", 5001, "host port for the local OCI registry")
 	buildCmd.Flags().StringVar(&buildNamespace, "namespace", "rook", "image namespace prefix in the registry")
 	buildCmd.Flags().StringVar(&buildTag, "tag", "", "override the full target image reference (e.g. localhost:5001/rook/ceph:v1.2.3)")
+	buildCmd.Flags().BoolVar(&buildForce, "force-build", false, "run make even when the rook tree is unchanged since the last push")
 
 	buildPushCmd.Flags().StringVar(&buildPushName, "name", "", "cluster name (selects the registry port)")
 	buildPushCmd.Flags().StringVar(&buildPushDir, "dir", "", "path to the rook source directory (default: current directory)")

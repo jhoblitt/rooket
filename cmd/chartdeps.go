@@ -7,18 +7,21 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/jhoblitt/rooket/internal/run"
 )
 
 // chartDep is one entry of a helm Chart.yaml dependencies block.
 type chartDep struct {
-	name      string
-	version   string
-	condition string
+	name       string
+	version    string
+	repository string
+	condition  string
 }
 
 // chartDeps parses the dependency entries of a helm Chart.yaml: entries
-// begin at "- name:" lines and carry the version/condition fields that
-// follow, until the next "- name:" line.
+// begin at "- name:" lines and carry the version/repository/condition
+// fields that follow, until the next "- name:" line.
 func chartDeps(chartYAML string) ([]chartDep, error) {
 	data, err := os.ReadFile(chartYAML)
 	if err != nil {
@@ -38,11 +41,51 @@ func chartDeps(chartYAML string) ([]chartDep, error) {
 		if v, ok := strings.CutPrefix(t, "version:"); ok {
 			cur.version = strings.Trim(strings.TrimSpace(v), `"'`)
 		}
+		if r, ok := strings.CutPrefix(t, "repository:"); ok {
+			cur.repository = strings.Trim(strings.TrimSpace(r), `"'`)
+		}
 		if c, ok := strings.CutPrefix(t, "condition:"); ok {
 			cur.condition = strings.TrimSpace(c)
 		}
 	}
 	return deps, nil
+}
+
+// ensureChartDeps restores a chart's fetchable dependency archives before a
+// deploy from the source tree. The archives are gitignored build INPUTS of
+// the deploy (helm refuses to install a chart dir with missing deps): rook's
+// make normally leaves them behind, but 'make clean' deletes them while the
+// build-skip stamp and registry stay valid, so deploy must not depend on
+// make having run. file:// dependencies live in the tree and need nothing.
+func ensureChartDeps(rookDir, chart string) error {
+	chartDir := filepath.Join(rookDir, "deploy", "charts", chart)
+	deps, err := chartDeps(filepath.Join(chartDir, "Chart.yaml"))
+	if err != nil {
+		return err
+	}
+	missing := false
+	for _, d := range deps {
+		if d.version == "" || !strings.HasPrefix(d.repository, "http") {
+			continue
+		}
+		if _, err := os.Stat(filepath.Join(chartDir, "charts", d.name+"-"+d.version+".tgz")); err != nil {
+			missing = true
+		}
+	}
+	if !missing {
+		return nil
+	}
+	env, err := helmEnv(deployName, "make")
+	if err != nil {
+		return err
+	}
+	run.Printf("==> restoring helm chart dependencies for %s\n", chart)
+	if err := run.CmdWithEnv(env, "helm", "dependency", "build", chartDir); err != nil {
+		// A Chart.lock out of sync with Chart.yaml fails 'build'; resolve
+		// afresh instead.
+		return run.CmdWithEnv(env, "helm", "dependency", "update", chartDir)
+	}
+	return nil
 }
 
 // pruneStaleChartDeps deletes archives under deploy/charts/*/charts/ whose
