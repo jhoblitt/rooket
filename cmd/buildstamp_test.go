@@ -235,7 +235,7 @@ func TestBuildStampRoundTrip(t *testing.T) {
 }
 
 func TestExpectedStampImages(t *testing.T) {
-	stamp := &buildStamp{Images: []stampImage{{Source: "build-x/ceph-amd64"}}}
+	stamp := &buildStamp{Images: []stampImage{{Source: "build-x/ceph-amd64", SourceID: "sha256:local"}}}
 
 	imgs, err := expectedStampImages(stamp, 5001, "rook", "", "mybranch")
 	if err != nil || len(imgs) != 1 {
@@ -243,6 +243,11 @@ func TestExpectedStampImages(t *testing.T) {
 	}
 	if imgs[0].Ref != "localhost:5001/rook/ceph:mybranch" || imgs[0].Repo != "rook/ceph" || imgs[0].Tag != "mybranch" {
 		t.Fatalf("got %+v", imgs[0])
+	}
+	// The repush path verifies the local image against this identity; losing
+	// it here silently disabled repush entirely once.
+	if imgs[0].SourceID != "sha256:local" {
+		t.Fatalf("SourceID dropped: %+v", imgs[0])
 	}
 
 	if _, err := expectedStampImages(stamp, 5001, "rook", "quay.io/other/img:v1", "b"); err == nil {
