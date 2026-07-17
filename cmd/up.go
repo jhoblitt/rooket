@@ -2,8 +2,11 @@ package cmd
 
 import (
 	"fmt"
+	"time"
 
 	"github.com/spf13/cobra"
+
+	"github.com/jhoblitt/rooket/internal/run"
 )
 
 var (
@@ -40,6 +43,7 @@ Example:
   rooket up --dir ~/github/rook
 `,
 	RunE: func(cmd *cobra.Command, args []string) error {
+		upStart := time.Now()
 		// Resolve the rook source dir up front so a missing clone fails fast,
 		// before we stand up a cluster. Only build and deploy consume it.
 		var rookDir string
@@ -64,11 +68,7 @@ Example:
 		}
 		upRegistryPort = port
 
-		// --- Step 1: block setup ---
-		if upSkipBlock || upDiskCount == 0 {
-			fmt.Println("==> [1/4] block setup (skipped)")
-		} else {
-			fmt.Println("==> [1/4] block setup")
+		if err := upStep("[1/4] block setup", upSkipBlock || upDiskCount == 0, func() error {
 			blockSetupName = upName
 			blockSetupWorkers = upWorkers
 			blockSetupDiskCount = upDiskCount
@@ -77,43 +77,44 @@ Example:
 			if err := blockSetupRun(nil, nil); err != nil {
 				return fmt.Errorf("block setup: %w", err)
 			}
+			return nil
+		}); err != nil {
+			return err
 		}
 
-		// --- Step 2: cluster create ---
-		fmt.Println("==> [2/4] cluster create")
-		createName = upName
-		createWorkers = upWorkers
-		createRegistryPort = upRegistryPort
-		createDiskCount = upDiskCount
-		createISCSIQNDate = upIQNDate
-		createPromCRDsVersion = upPromVersion
-		createPromCRDsRelease = upPromRelease
-		if err := createCmd.RunE(createCmd, nil); err != nil {
-			return fmt.Errorf("cluster create: %w", err)
+		if err := upStep("[2/4] cluster create", false, func() error {
+			createName = upName
+			createWorkers = upWorkers
+			createRegistryPort = upRegistryPort
+			createDiskCount = upDiskCount
+			createISCSIQNDate = upIQNDate
+			createPromCRDsVersion = upPromVersion
+			createPromCRDsRelease = upPromRelease
+			if err := createCmd.RunE(createCmd, nil); err != nil {
+				return fmt.Errorf("cluster create: %w", err)
+			}
+			return nil
+		}); err != nil {
+			return err
 		}
 		// create may have repaired a stale recorded port; pick up its choice.
 		if p := readRegistryPort(upName); p != 0 {
 			upRegistryPort = p
 		}
 
-		// --- Step 3: build ---
-		if upSkipBuild {
-			fmt.Println("==> [3/4] build (skipped)")
-		} else {
-			fmt.Println("==> [3/4] build")
+		if err := upStep("[3/4] build", upSkipBuild, func() error {
 			buildDir = rookDir
 			buildName = upName
 			buildRegistryPort = upRegistryPort
 			if err := buildCmd.RunE(buildCmd, nil); err != nil {
 				return fmt.Errorf("build: %w", err)
 			}
+			return nil
+		}); err != nil {
+			return err
 		}
 
-		// --- Step 4: deploy ---
-		if upSkipDeploy {
-			fmt.Println("==> [4/4] deploy (skipped)")
-		} else {
-			fmt.Println("==> [4/4] deploy")
+		if err := upStep("[4/4] deploy", upSkipDeploy, func() error {
 			deployDir = rookDir
 			deployRegistryPort = upRegistryPort
 			deployKubeContext = "kind-" + upName
@@ -127,16 +128,40 @@ Example:
 			if err := deployCmd.RunE(deployCmd, nil); err != nil {
 				return fmt.Errorf("deploy: %w", err)
 			}
+			return nil
+		}); err != nil {
+			return err
 		}
 
-		fmt.Printf(`
-rooket up complete. cluster %q is ready.
+		run.Printf(`
+rooket up complete in %s. cluster %q is ready.
 
   kubectl:     rooket k <args>
   kubeconfig:  export KUBECONFIG="$(rooket kubeconfig --path)"
-`, upName)
+`, fmtDur(time.Since(upStart)), upName)
 		return nil
 	},
+}
+
+// upStep runs one numbered up step, printing its banner and, when it ran, its
+// duration on completion.
+func upStep(banner string, skipped bool, fn func() error) error {
+	if skipped {
+		run.Printf("==> %s (skipped)\n", banner)
+		return nil
+	}
+	run.Printf("==> %s\n", banner)
+	started := time.Now()
+	if err := fn(); err != nil {
+		run.Printf("==> %s failed after %s\n", banner, fmtDur(time.Since(started)))
+		return err
+	}
+	run.Printf("==> %s done in %s\n", banner, fmtDur(time.Since(started)))
+	return nil
+}
+
+func fmtDur(d time.Duration) string {
+	return d.Round(100 * time.Millisecond).String()
 }
 
 func init() {

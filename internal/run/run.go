@@ -9,7 +9,42 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"time"
 )
+
+var (
+	timestamps bool
+	startTime  = time.Now()
+)
+
+// SetTimestamps enables the elapsed-time prefix on Printf output. It must be
+// called before commands run (the root command's PersistentPreRunE) and never
+// concurrently with them.
+func SetTimestamps(on bool) { timestamps = on }
+
+// Printf prints rooket-emitted output, applying the --timestamps elapsed-time
+// prefix to each non-empty line when enabled. The message is assembled and
+// written in one call so concurrent printers cannot interleave a prefix with
+// another caller's text. Child-process output is never routed through here
+// and streams unprefixed.
+func Printf(format string, a ...any) {
+	msg := fmt.Sprintf(format, a...)
+	if timestamps {
+		prefix := fmt.Sprintf("[%6.1fs] ", time.Since(startTime).Seconds())
+		lines := strings.Split(msg, "\n")
+		for i, l := range lines {
+			if l != "" {
+				lines[i] = prefix + l
+			}
+		}
+		msg = strings.Join(lines, "\n")
+	}
+	fmt.Print(msg)
+}
+
+func trace(name string, args []string) {
+	Printf("+ %s %s\n", name, strings.Join(args, " "))
+}
 
 // Cmd runs a command, streaming stdout/stderr to the terminal.
 // stdin is connected to the process's controlling terminal so that programs
@@ -35,7 +70,7 @@ func CmdWithEnv(extraEnv []string, name string, args ...string) error {
 	if len(extraEnv) > 0 {
 		cmd.Env = append(os.Environ(), extraEnv...)
 	}
-	fmt.Printf("+ %s %s\n", name, strings.Join(args, " "))
+	trace(name, args)
 	return cmd.Run()
 }
 
@@ -49,7 +84,7 @@ func Output(name string, args ...string) (string, error) {
 // to the current environment (later entries override earlier ones) and returns
 // its stdout output as a string.
 func OutputWithEnv(extraEnv []string, name string, args ...string) (string, error) {
-	fmt.Printf("+ %s %s\n", name, strings.Join(args, " "))
+	trace(name, args)
 	cmd := exec.Command(name, args...)
 	if len(extraEnv) > 0 {
 		cmd.Env = append(os.Environ(), extraEnv...)
@@ -75,7 +110,7 @@ func OutputInteractive(name string, args ...string) (string, error) {
 	}
 	cmd.Stdout = &buf
 	cmd.Stderr = os.Stderr
-	fmt.Printf("+ %s %s\n", name, strings.Join(args, " "))
+	trace(name, args)
 	if err := cmd.Run(); err != nil {
 		return "", err
 	}
@@ -88,6 +123,6 @@ func CmdWithStdin(stdin io.Reader, name string, args ...string) error {
 	cmd.Stdin = stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
-	fmt.Printf("+ %s %s\n", name, strings.Join(args, " "))
+	trace(name, args)
 	return cmd.Run()
 }
