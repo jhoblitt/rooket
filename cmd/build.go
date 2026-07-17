@@ -10,6 +10,7 @@ import (
 	"regexp"
 	"runtime"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -88,9 +89,9 @@ Example:
 			}
 			if repush != nil {
 				run.Printf("==> rook tree unchanged since last build (%s); pushing the existing image without make\n", reason)
-				imgs, rerr := repushStampedImages(repush, port)
+				imgs, rerr := repushStampedImages(os.Stdout, repush, port)
 				if rerr == nil {
-					stampBuild(name, dir, fp, fpErr, gitRef, imgs)
+					stampBuild(os.Stdout, name, dir, fp, fpErr, gitRef, imgs)
 					return nil
 				}
 				run.Printf("==> cannot reuse the previous image (%v); building\n", rerr)
@@ -99,57 +100,68 @@ Example:
 			}
 		}
 
-		if err := pruneStaleChartDeps(dir); err != nil {
-			return fmt.Errorf("prune stale chart dependency archives: %w", err)
-		}
-
-		// Isolate the helm runs inside rook's make from the host helm config:
-		// rook's `helm dependency build` refreshes EVERY repo in whatever
-		// repositories.yaml it sees, so the host's repo list (27 entries here,
-		// some timing out) turns into dead time on each build that trips it.
-		makeEnv, err := helmEnv(name, "make")
+		builtImages, err := buildMakePhase(os.Stdout, dir, name)
 		if err != nil {
 			return err
 		}
-
-		fmt.Printf("==> running make in %s\n", dir)
-		builtImages, err := runMakeCapture(dir, makeEnv)
-		if err != nil {
-			return fmt.Errorf("make: %w", err)
-		}
-
-		if len(builtImages) == 0 {
-			return fmt.Errorf("no container images detected in make output " +
-				"(expected lines matching '=== container build <image>')")
-		}
-
-		registryHost := fmt.Sprintf("localhost:%d", buildRegistryPort)
-		var stamped []stampImage
-		local := true
-		for _, src := range builtImages {
-			target := buildTag
-			if target == "" {
-				target = deriveTag(registryHost, buildNamespace, src, gitRef)
-			}
-			if err := pushImage(src, target); err != nil {
-				return err
-			}
-			host, repo, tag, perr := parseImageRef(target)
-			if perr != nil || (host != registryHost && host != fmt.Sprintf("127.0.0.1:%d", buildRegistryPort)) {
-				// A --tag override pointing elsewhere can't be verified
-				// against this cluster's registry, so it is never stamped.
-				local = false
-				continue
-			}
-			digest, _ := manifestDigest(buildRegistryPort, repo, tag)
-			id := localImageID(src)
-			stamped = append(stamped, stampImage{Source: src, SourceID: id, Ref: target, Repo: repo, Tag: tag, Digest: digest})
-		}
-		if local {
-			stampBuild(name, dir, fp, fpErr, gitRef, stamped)
-		}
-		return nil
+		return buildPushPhase(os.Stdout, builtImages, port, buildNamespace, buildTag, gitRef, name, dir, fp, fpErr)
 	},
+}
+
+// buildMakePhase produces the container images: stale chart-dep pruning, the
+// isolated helm env, and make itself, streaming to out.
+func buildMakePhase(out io.Writer, dir, name string) ([]string, error) {
+	if err := pruneStaleChartDeps(out, dir); err != nil {
+		return nil, fmt.Errorf("prune stale chart dependency archives: %w", err)
+	}
+	// Isolate the helm runs inside rook's make from the host helm config:
+	// rook's `helm dependency build` refreshes EVERY repo in whatever
+	// repositories.yaml it sees, so the host's repo list (27 entries here,
+	// some timing out) turns into dead time on each build that trips it.
+	makeEnv, err := helmEnv(name, "make")
+	if err != nil {
+		return nil, err
+	}
+	run.Fprintf(out, "==> running make in %s\n", dir)
+	images, err := runMakeCapture(out, dir, makeEnv)
+	if err != nil {
+		return nil, fmt.Errorf("make: %w", err)
+	}
+	if len(images) == 0 {
+		return nil, fmt.Errorf("no container images detected in make output " +
+			"(expected lines matching '=== container build <image>')")
+	}
+	return images, nil
+}
+
+// buildPushPhase tags and pushes the built images and records the stamp.
+func buildPushPhase(out io.Writer, images []string, port int, namespace, tagOverride, gitRef, name, dir string, fp treeFP, fpErr error) error {
+	registryHost := fmt.Sprintf("localhost:%d", port)
+	var stamped []stampImage
+	local := true
+	for _, src := range images {
+		target := tagOverride
+		if target == "" {
+			target = deriveTag(registryHost, namespace, src, gitRef)
+		}
+		if err := pushImage(out, src, target); err != nil {
+			return err
+		}
+		host, repo, tag, perr := parseImageRef(target)
+		if perr != nil || (host != registryHost && host != fmt.Sprintf("127.0.0.1:%d", port)) {
+			// A --tag override pointing elsewhere can't be verified
+			// against this cluster's registry, so it is never stamped.
+			local = false
+			continue
+		}
+		digest, _ := manifestDigest(port, repo, tag)
+		id := localImageID(out, src)
+		stamped = append(stamped, stampImage{Source: src, SourceID: id, Ref: target, Repo: repo, Tag: tag, Digest: digest})
+	}
+	if local {
+		stampBuild(out, name, dir, fp, fpErr, gitRef, stamped)
+	}
+	return nil
 }
 
 // stampRefs renders the refs of a stamp's images for messages.
@@ -162,16 +174,16 @@ func stampRefs(imgs []stampImage) string {
 }
 
 // pushImage tags a source image and pushes it to the local registry.
-func pushImage(src, target string) error {
-	fmt.Printf("==> tagging %s → %s\n", src, target)
-	if err := run.Cmd(containerEngine.String(), "tag", src, target); err != nil {
+func pushImage(out io.Writer, src, target string) error {
+	run.Fprintf(out, "==> tagging %s → %s\n", src, target)
+	if err := run.CmdTo(out, containerEngine.String(), "tag", src, target); err != nil {
 		return fmt.Errorf("tag %s: %w", src, err)
 	}
-	fmt.Printf("==> pushing %s\n", target)
-	if err := run.Cmd(containerEngine.String(), containerEngine.PushArgs(target)...); err != nil {
+	run.Fprintf(out, "==> pushing %s\n", target)
+	if err := run.CmdTo(out, containerEngine.String(), containerEngine.PushArgs(target)...); err != nil {
 		return fmt.Errorf("push %s: %w", target, err)
 	}
-	fmt.Printf("pushed %s\n", target)
+	run.Fprintf(out, "pushed %s\n", target)
 	return nil
 }
 
@@ -180,9 +192,9 @@ func pushImage(src, target string) error {
 // had) the expected refs, e.g. after 'rooket down' recreated it or a branch
 // rename retagged the deploy ref. Publication state alone never justifies
 // re-running make.
-func repushStampedImages(imgs []stampImage, port int) ([]stampImage, error) {
+func repushStampedImages(out io.Writer, imgs []stampImage, port int) ([]stampImage, error) {
 	for _, img := range imgs {
-		id := localImageID(img.Source)
+		id := localImageID(out, img.Source)
 		if id == "" {
 			return nil, fmt.Errorf("source image %s no longer present locally", img.Source)
 		}
@@ -193,9 +205,9 @@ func repushStampedImages(imgs []stampImage, port int) ([]stampImage, error) {
 			return nil, fmt.Errorf("source image %s changed since it was stamped", img.Source)
 		}
 	}
-	out := make([]stampImage, 0, len(imgs))
+	pushed := make([]stampImage, 0, len(imgs))
 	for _, img := range imgs {
-		if err := pushImage(img.Source, img.Ref); err != nil {
+		if err := pushImage(out, img.Source, img.Ref); err != nil {
 			return nil, err
 		}
 		digest, ok := manifestDigest(port, img.Repo, img.Tag)
@@ -203,14 +215,14 @@ func repushStampedImages(imgs []stampImage, port int) ([]stampImage, error) {
 			return nil, fmt.Errorf("pushed %s but could not read its digest back", img.Ref)
 		}
 		img.Digest = digest
-		out = append(out, img)
+		pushed = append(pushed, img)
 	}
-	return out, nil
+	return pushed, nil
 }
 
 // localImageID returns the engine's image ID for a local ref, or "".
-func localImageID(ref string) string {
-	id, err := run.Output(containerEngine.String(), "image", "inspect", "--format", "{{.Id}}", ref)
+func localImageID(out io.Writer, ref string) string {
+	id, err := run.OutputTo(out, containerEngine.String(), "image", "inspect", "--format", "{{.Id}}", ref)
 	if err != nil {
 		return ""
 	}
@@ -219,7 +231,7 @@ func localImageID(ref string) string {
 
 // stampBuild records a fully-pushed build. Failures only warn: a missing
 // stamp merely costs a rebuild next time.
-func stampBuild(name, dir string, fp treeFP, fpErr error, gitRef string, imgs []stampImage) {
+func stampBuild(out io.Writer, name, dir string, fp treeFP, fpErr error, gitRef string, imgs []stampImage) {
 	if fpErr != nil || len(imgs) == 0 {
 		return
 	}
@@ -244,17 +256,33 @@ func stampBuild(name, dir string, fp treeFP, fpErr error, gitRef string, imgs []
 		RooketVersion: rooketVersion(),
 	}
 	if err := writeBuildStamp(name, s); err != nil {
-		fmt.Printf("warning: could not record build stamp: %v\n", err)
+		run.Fprintf(out, "warning: could not record build stamp: %v\n", err)
 	}
+}
+
+// syncWriter serializes writes from multiple goroutines onto one writer.
+type syncWriter struct {
+	mu sync.Mutex
+	w  io.Writer
+}
+
+func (s *syncWriter) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.w.Write(p)
 }
 
 // runMakeCapture runs make in dir, streams its stdout to the terminal, and
 // returns all image names found on lines matching "=== container build <image>".
 // stderr is passed through to the terminal directly.
-func runMakeCapture(dir string, extraEnv []string) ([]string, error) {
+func runMakeCapture(out io.Writer, dir string, extraEnv []string) ([]string, error) {
+	// The child's stderr is copied by exec's internal goroutine while this
+	// goroutine tees stdout to the same writer; serialize the two so a
+	// non-goroutine-safe writer (a buffering concurrent caller) stays valid.
+	sw := &syncWriter{w: out}
 	c := exec.Command("make")
 	c.Dir = dir
-	c.Stderr = os.Stderr
+	c.Stderr = sw
 	if len(extraEnv) > 0 {
 		c.Env = append(os.Environ(), extraEnv...)
 	}
@@ -264,13 +292,13 @@ func runMakeCapture(dir string, extraEnv []string) ([]string, error) {
 		return nil, err
 	}
 
-	run.Printf("+ make\n")
+	run.Fprintf(out, "+ make\n")
 	if err := c.Start(); err != nil {
 		return nil, err
 	}
 
 	var images []string
-	scanner := bufio.NewScanner(io.TeeReader(stdout, os.Stdout))
+	scanner := bufio.NewScanner(io.TeeReader(stdout, sw))
 	for scanner.Scan() {
 		if m := containerBuildRe.FindStringSubmatch(scanner.Text()); m != nil {
 			images = append(images, m[1])

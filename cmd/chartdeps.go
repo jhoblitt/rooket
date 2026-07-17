@@ -3,6 +3,7 @@ package cmd
 import (
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -95,7 +96,7 @@ func ensureChartDeps(rookDir, chart string) error {
 // archives, so an archive left by a build at another rook ref (older pin, or
 // another branch) kills make mid-run with "No rule to make target". Removing
 // it before make parses keeps the frozen prerequisite list consistent.
-func pruneStaleChartDeps(rookDir string) error {
+func pruneStaleChartDeps(out io.Writer, rookDir string) error {
 	chartsDir := filepath.Join(rookDir, "deploy", "charts")
 	charts, err := os.ReadDir(chartsDir)
 	if err != nil {
@@ -132,7 +133,7 @@ func pruneStaleChartDeps(rookDir string) error {
 			if fi, err := os.Lstat(a); err != nil || !fi.Mode().IsRegular() {
 				continue
 			}
-			fmt.Printf("pruning stale helm dependency archive %s\n", a)
+			run.Fprintf(out, "pruning stale helm dependency archive %s\n", a)
 			if err := os.Remove(a); err != nil {
 				return fmt.Errorf("remove %s: %w", a, err)
 			}
