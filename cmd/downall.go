@@ -14,6 +14,7 @@ import (
 	"github.com/jhoblitt/rooket/internal/cluster"
 	"github.com/jhoblitt/rooket/internal/engine"
 	"github.com/jhoblitt/rooket/internal/registry"
+	"github.com/jhoblitt/rooket/internal/run"
 )
 
 // scopeTeardownSet decides which clusters 'down --all' acts on. Every state dir
@@ -97,7 +98,7 @@ func downAllRun(cmd *cobra.Command) error {
 			len(unmanaged), strings.Join(unmanaged, ", "))
 	}
 	if len(all) == 0 {
-		fmt.Println("nothing to tear down")
+		run.Printf("nothing to tear down\n")
 		return nil
 	}
 	names := make([]string, 0, len(all))
@@ -106,7 +107,7 @@ func downAllRun(cmd *cobra.Command) error {
 	}
 	sort.Strings(names)
 
-	fmt.Println("The following clusters will be torn down:")
+	run.Printf("The following clusters will be torn down:\n")
 	w := tabwriter.NewWriter(os.Stdout, 2, 8, 2, ' ', 0)
 	fmt.Fprintln(w, "  NAME\tLIVE\tSTATE DIR")
 	for _, n := range names {
@@ -128,18 +129,18 @@ func downAllRun(cmd *cobra.Command) error {
 		return err
 	}
 	if downDeleteDisks {
-		fmt.Println("Full teardown: iSCSI targets, disk images, and state directories will be removed.")
+		run.Printf("Full teardown: iSCSI targets, disk images, and state directories will be removed.\n")
 	} else {
-		fmt.Println("Disk images and iSCSI targets will be preserved (pass --delete-disks to remove them).")
+		run.Printf("Disk images and iSCSI targets will be preserved (pass --delete-disks to remove them).\n")
 	}
 	if downDryRun {
 		return nil
 	}
 	if !downForce {
-		fmt.Printf("Proceed? [y/N] ")
+		run.Printf("Proceed? [y/N] ")
 		line, _ := bufio.NewReader(os.Stdin).ReadString('\n')
 		if strings.TrimSpace(strings.ToLower(line)) != "y" {
-			fmt.Println("aborted")
+			run.Printf("aborted\n")
 			return nil
 		}
 	}
@@ -152,14 +153,14 @@ func downAllRun(cmd *cobra.Command) error {
 		if len(engs) == 0 {
 			continue
 		}
-		fmt.Printf("==> deleting cluster %q\n", n)
+		run.Printf("==> deleting cluster %q\n", n)
 		kc, _ := kubeconfigPath(n)
 		for _, eng := range engs {
 			if err := cluster.DeleteWith(eng, n, kc); err != nil {
-				fmt.Printf("warning: delete cluster %q under %s: %v\n", n, eng, err)
+				run.Printf("warning: delete cluster %q under %s: %v\n", n, eng, err)
 			}
 			if err := registry.Delete(os.Stdout, eng, registry.ContainerName(n)); err != nil {
-				fmt.Printf("warning: delete registry for %q under %s: %v\n", n, eng, err)
+				run.Printf("warning: delete registry for %q under %s: %v\n", n, eng, err)
 			}
 		}
 		// Confirm the cluster is actually gone before anything truncates or
@@ -187,7 +188,7 @@ func downAllRun(cmd *cobra.Command) error {
 			}
 		}
 		if len(disks) > 0 {
-			fmt.Println("==> tearing down iSCSI targets (all clusters in one privileged run)")
+			run.Printf("==> tearing down iSCSI targets (all clusters in one privileged run)\n")
 			script := buildISCSITeardownScript(disks)
 			if err := runPrivilegedScript(script); err != nil {
 				return fmt.Errorf("iSCSI teardown failed.\n\nRun the following script manually with root privileges:\n\n%s\nError: %w", script, err)
@@ -199,13 +200,13 @@ func downAllRun(cmd *cobra.Command) error {
 			}
 			dir := filepath.Join(root, n)
 			if err := os.RemoveAll(dir); err != nil {
-				fmt.Printf("warning: remove state dir %s: %v\n", dir, err)
+				run.Printf("warning: remove state dir %s: %v\n", dir, err)
 			} else {
-				fmt.Printf("removed state dir %s\n", dir)
+				run.Printf("removed state dir %s\n", dir)
 			}
 		}
 	} else if downDeleteDisks {
-		fmt.Println("block teardown skipped by --skip-block; disk images and state dirs preserved")
+		run.Printf("block teardown skipped by --skip-block; disk images and state dirs preserved\n")
 	}
 
 	if len(blocked) > 0 {
@@ -217,7 +218,7 @@ func downAllRun(cmd *cobra.Command) error {
 		return fmt.Errorf("could not delete %d cluster(s), left intact: %s", len(blocked), strings.Join(names, ", "))
 	}
 
-	fmt.Println("\nrooket down --all complete.")
+	run.Printf("\nrooket down --all complete.\n")
 	return nil
 }
 

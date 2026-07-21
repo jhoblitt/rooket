@@ -296,7 +296,7 @@ func runMakeCapture(out io.Writer, dir string, extraEnv []string) ([]string, err
 		return nil, err
 	}
 
-	run.Fprintf(out, "+ make\n")
+	run.Tracef(out, "make")
 	if err := c.Start(); err != nil {
 		return nil, err
 	}
@@ -406,7 +406,7 @@ Example:
 
 		gitRef, err := gitHeadRef(dir)
 		if err != nil {
-			fmt.Printf("warning: could not determine git branch (%v); using \"latest\"\n", err)
+			run.Printf("warning: could not determine git branch (%v); using \"latest\"\n", err)
 			gitRef = "latest"
 		}
 
@@ -416,17 +416,17 @@ Example:
 			target = deriveTag(registry, buildPushNamespace, src, gitRef)
 		}
 
-		fmt.Printf("==> tagging %s → %s\n", src, target)
+		run.Printf("==> tagging %s → %s\n", src, target)
 		if err := run.Cmd(containerEngine.String(), "tag", src, target); err != nil {
 			return fmt.Errorf("tag %s: %w", src, err)
 		}
 
-		fmt.Printf("==> pushing %s\n", target)
+		run.Printf("==> pushing %s\n", target)
 		if err := run.Cmd(containerEngine.String(), containerEngine.PushArgs(target)...); err != nil {
 			return fmt.Errorf("push %s: %w", target, err)
 		}
 
-		fmt.Printf("pushed %s\n", target)
+		run.Printf("pushed %s\n", target)
 		return nil
 	},
 }

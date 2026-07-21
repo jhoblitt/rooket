@@ -17,6 +17,7 @@ var (
 	engineFlag      string
 	containerEngine engine.Engine
 	timestampsFlag  bool
+	colorFlag       string
 )
 
 var rootCmd = &cobra.Command{
@@ -38,6 +39,11 @@ or $ROOKET_ENGINE) to create:
 `,
 	PersistentPreRunE: func(cmd *cobra.Command, _ []string) error {
 		run.SetTimestamps(timestampsFlag)
+		useColor, err := resolveColor(colorFlag, os.Stdout)
+		if err != nil {
+			return err
+		}
+		run.SetColor(useColor)
 		requested, err := engine.Parse(engineFlag)
 		if err != nil {
 			return err
@@ -49,7 +55,7 @@ or $ROOKET_ENGINE) to create:
 		// selected podman that is rootless (or unusable) warns and falls back to
 		// docker, while an explicit one errors. An unusable docker is a hard error.
 		eng, err := engine.Resolve(requested, explicit, engine.DefaultProber, func(msg string) {
-			fmt.Printf("warning: %s\n", msg)
+			run.Printf("warning: %s\n", msg)
 		})
 		if err != nil {
 			return err
@@ -84,6 +90,8 @@ func init() {
 		"container engine to drive: podman or docker (also via $ROOKET_ENGINE)")
 	rootCmd.PersistentFlags().BoolVar(&timestampsFlag, "timestamps", envTruthy("ROOKET_TIMESTAMPS"),
 		"prefix rooket-emitted lines (command traces, step banners) with elapsed time (also via $ROOKET_TIMESTAMPS)")
+	rootCmd.PersistentFlags().StringVar(&colorFlag, "color", "auto",
+		"colorize rooket's own status output: auto (a terminal only), always, or never")
 }
 
 // envTruthy reports whether an environment variable is set to anything other
@@ -95,4 +103,31 @@ func envTruthy(name string) bool {
 		return false
 	}
 	return true
+}
+
+// resolveColor decides whether to colorize rooket's output. "always"/"never"
+// force it; "auto" colors only when stdout is a terminal and the NO_COLOR
+// convention (https://no-color.org) has not opted out. NO_COLOR does not
+// override an explicit "always".
+func resolveColor(mode string, stdout *os.File) (bool, error) {
+	switch mode {
+	case "always":
+		return true, nil
+	case "never":
+		return false, nil
+	case "auto", "":
+		if _, noColor := os.LookupEnv("NO_COLOR"); noColor {
+			return false, nil
+		}
+		return isTerminal(stdout), nil
+	default:
+		return false, fmt.Errorf("invalid --color %q: want auto, always, or never", mode)
+	}
+}
+
+// isTerminal reports whether f is a character device (a terminal), so that
+// piped or redirected output — and captured test/CI output — stays unstyled.
+func isTerminal(f *os.File) bool {
+	fi, err := f.Stat()
+	return err == nil && fi.Mode()&os.ModeCharDevice != 0
 }

@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/jhoblitt/rooket/internal/run"
 	"github.com/spf13/cobra"
 )
 
@@ -42,7 +43,7 @@ is the everything-at-once teardown that removes those too).
 			return fmt.Errorf("cannot determine live clusters (no queryable container engine); not pruning")
 		}
 		for _, eng := range failed {
-			fmt.Printf("warning: %s is installed but could not be queried; "+
+			run.Printf("warning: %s is installed but could not be queried; "+
 				"its clusters (if any) would be misread as orphaned — not pruning\n", eng)
 		}
 		if len(failed) > 0 {
@@ -56,7 +57,7 @@ is the everything-at-once teardown that removes those too).
 			}
 		}
 		if len(orphans) == 0 {
-			fmt.Println("nothing to prune")
+			run.Printf("nothing to prune\n")
 			return nil
 		}
 
@@ -64,28 +65,28 @@ is the everything-at-once teardown that removes those too).
 		for i, eng := range consulted {
 			engNames[i] = eng.String()
 		}
-		fmt.Printf("Orphaned cluster state directories (no live kind cluster under %s):\n",
+		run.Printf("Orphaned cluster state directories (no live kind cluster under %s):\n",
 			strings.Join(engNames, " or "))
 		for _, o := range orphans {
-			fmt.Printf("  %s\n", filepath.Join(root, o))
+			run.Printf("  %s\n", filepath.Join(root, o))
 		}
 		if pruneDryRun {
 			return nil
 		}
 		if !pruneForce {
-			fmt.Printf("Remove these %d directories? [y/N] ", len(orphans))
+			run.Printf("Remove these %d directories? [y/N] ", len(orphans))
 			line, _ := bufio.NewReader(os.Stdin).ReadString('\n')
 			if strings.TrimSpace(strings.ToLower(line)) != "y" {
-				fmt.Println("aborted")
+				run.Printf("aborted\n")
 				return nil
 			}
 		}
 		for _, o := range orphans {
 			p := filepath.Join(root, o)
 			if err := os.RemoveAll(p); err != nil {
-				fmt.Printf("warning: remove %s: %v\n", p, err)
+				run.Printf("warning: remove %s: %v\n", p, err)
 			} else {
-				fmt.Printf("removed %s\n", p)
+				run.Printf("removed %s\n", p)
 			}
 		}
 		return nil

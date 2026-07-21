@@ -150,11 +150,11 @@ func installRookCephOperator(dir string) error {
 		return err
 	}
 
-	fmt.Printf("==> deploying rook-ceph operator\n")
-	fmt.Printf("    chart:      %s\n", chartPath)
-	fmt.Printf("    image:      %s:%s\n", imageRepo, imageTag)
-	fmt.Printf("    release:    %s\n", deployOperatorName)
-	fmt.Printf("    namespace:  rook-ceph\n")
+	run.Printf("==> deploying rook-ceph operator\n")
+	run.Printf("    chart:      %s\n", chartPath)
+	run.Printf("    image:      %s:%s\n", imageRepo, imageTag)
+	run.Printf("    release:    %s\n", deployOperatorName)
+	run.Printf("    namespace:  rook-ceph\n")
 
 	args := []string{
 		"--kube-context", deployKubeContext,
@@ -232,14 +232,14 @@ func installCephCsiDrivers(dir string) error {
 		return err
 	}
 	if condition != "csi.installCsiOperator" {
-		fmt.Println("==> rook ref predates the ceph-csi-drivers chart (rook < 1.20); its operator manages CSI itself")
+		run.Printf("==> rook ref predates the ceph-csi-drivers chart (rook < 1.20); its operator manages CSI itself\n")
 		return nil
 	}
 	if version == "" {
 		return fmt.Errorf("ceph-csi-operator dependency in %s has no version, so the matching ceph-csi-drivers chart version is unknown", chartYAML)
 	}
 
-	fmt.Printf("==> deploying ceph-csi-drivers %s (Driver CRs and driver RBAC the rook-ceph chart does not ship)\n", version)
+	run.Printf("==> deploying ceph-csi-drivers %s (Driver CRs and driver RBAC the rook-ceph chart does not ship)\n", version)
 	var installErr error
 	for attempt := 1; attempt <= 5; attempt++ {
 		if installErr = run.CmdWithStdinEnv(strings.NewReader(csiDriversValues), deployHelmEnv,
@@ -297,13 +297,13 @@ func installRookCephCluster(dir string) error {
 		"--set", "cephClusterSpec.mgr.count=1",
 	}
 
-	fmt.Printf("==> deploying rook-ceph-cluster\n")
-	fmt.Printf("    chart:      %s\n", chartPath)
-	fmt.Printf("    release:    %s\n", deployClusterName)
-	fmt.Printf("    namespace:  rook-ceph\n")
+	run.Printf("==> deploying rook-ceph-cluster\n")
+	run.Printf("    chart:      %s\n", chartPath)
+	run.Printf("    release:    %s\n", deployClusterName)
+	run.Printf("    namespace:  rook-ceph\n")
 
 	if deployWorkers > 0 && deployDiskCount > 0 {
-		fmt.Printf("    storage:    %d node-device OSD(s) (one per worker)\n", deployWorkers*deployDiskCount)
+		run.Printf("    storage:    %d node-device OSD(s) (one per worker)\n", deployWorkers*deployDiskCount)
 	}
 	valuesPath, err := writeClusterValues()
 	if err != nil {

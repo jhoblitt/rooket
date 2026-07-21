@@ -1,9 +1,55 @@
 package cmd
 
 import (
+	"os"
 	"testing"
 	"time"
 )
+
+func TestResolveColor(t *testing.T) {
+	// A regular file is not a terminal (unlike /dev/null, which is a char
+	// device); use it to exercise the auto path's negative case.
+	reg, err := os.CreateTemp(t.TempDir(), "notatty")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reg.Close()
+
+	if orig, ok := os.LookupEnv("NO_COLOR"); ok {
+		defer os.Setenv("NO_COLOR", orig)
+	} else {
+		defer os.Unsetenv("NO_COLOR")
+	}
+	os.Unsetenv("NO_COLOR")
+
+	for _, c := range []struct {
+		mode string
+		want bool
+	}{
+		{"always", true},
+		{"never", false},
+		{"auto", false}, // regular file → not a terminal
+		{"", false},
+	} {
+		got, err := resolveColor(c.mode, reg)
+		if err != nil || got != c.want {
+			t.Errorf("resolveColor(%q) = (%v, %v), want (%v, nil)", c.mode, got, err, c.want)
+		}
+	}
+
+	os.Setenv("NO_COLOR", "")
+	if got, _ := resolveColor("auto", reg); got {
+		t.Error("NO_COLOR present must disable auto")
+	}
+	if got, _ := resolveColor("always", reg); !got {
+		t.Error("explicit always must override NO_COLOR")
+	}
+	os.Unsetenv("NO_COLOR")
+
+	if _, err := resolveColor("bogus", reg); err == nil {
+		t.Error("invalid --color value should error")
+	}
+}
 
 func TestEnvTruthy(t *testing.T) {
 	for val, want := range map[string]bool{

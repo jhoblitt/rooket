@@ -47,17 +47,17 @@ After loading, reference the image in your Rook manifests as:
 		destBase := imageBasename(src)
 		dest := fmt.Sprintf("localhost:%d/%s", loadRegistryPort, destBase)
 
-		fmt.Printf("==> tagging %s → %s\n", src, dest)
+		run.Printf("==> tagging %s → %s\n", src, dest)
 		if err := run.Cmd(containerEngine.String(), "tag", src, dest); err != nil {
 			return fmt.Errorf("tag image: %w", err)
 		}
 
-		fmt.Printf("==> pushing %s\n", dest)
+		run.Printf("==> pushing %s\n", dest)
 		if err := run.Cmd(containerEngine.String(), containerEngine.PushArgs(dest)...); err != nil {
 			return fmt.Errorf("push image: %w", err)
 		}
 
-		fmt.Printf("\nImage available inside the cluster as:\n  %s\n", dest)
+		run.Printf("\nImage available inside the cluster as:\n  %s\n", dest)
 		return nil
 	},
 }

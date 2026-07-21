@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 
+	"github.com/jhoblitt/rooket/internal/run"
 	"github.com/spf13/cobra"
 )
 
@@ -63,9 +64,9 @@ Example:
 		downName = clusterName(downName)
 
 		if downSkipCluster {
-			fmt.Println("==> [1/2] cluster delete (skipped)")
+			run.Printf("==> [1/2] cluster delete (skipped)\n")
 		} else {
-			fmt.Println("==> [1/2] cluster delete")
+			run.Printf("==> [1/2] cluster delete\n")
 			deleteName = downName
 			if err := deleteCmd.RunE(deleteCmd, nil); err != nil {
 				return fmt.Errorf("cluster delete: %w", err)
@@ -77,9 +78,9 @@ Example:
 		// them lets the next up skip its privileged block setup too. So a plain
 		// down leaves them alone; --delete-disks is the full, privileged teardown.
 		if downSkipBlock || downDiskCount == 0 || !downDeleteDisks {
-			fmt.Println("==> [2/2] block teardown (skipped; disk images and iSCSI targets preserved — pass --delete-disks to remove them)")
+			run.Printf("==> [2/2] block teardown (skipped; disk images and iSCSI targets preserved — pass --delete-disks to remove them)\n")
 		} else {
-			fmt.Println("==> [2/2] block teardown")
+			run.Printf("==> [2/2] block teardown\n")
 			blockTeardownName = downName
 			blockTeardownWorkers = downWorkers
 			blockTeardownDiskCount = downDiskCount
@@ -94,15 +95,15 @@ Example:
 			if downDeleteDisks {
 				if dir, err := stateDirPath(downName); err == nil {
 					if err := os.RemoveAll(dir); err != nil {
-						fmt.Printf("warning: remove state dir %s: %v\n", dir, err)
+						run.Printf("warning: remove state dir %s: %v\n", dir, err)
 					} else {
-						fmt.Printf("removed state dir %s\n", dir)
+						run.Printf("removed state dir %s\n", dir)
 					}
 				}
 			}
 		}
 
-		fmt.Println("\nrooket down complete.")
+		run.Printf("\nrooket down complete.\n")
 		return nil
 	},
 }

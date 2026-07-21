@@ -9,6 +9,7 @@ import (
 	"strings"
 	"text/tabwriter"
 
+	"github.com/jhoblitt/rooket/internal/run"
 	"github.com/spf13/cobra"
 )
 
@@ -45,7 +46,7 @@ pruned); a row that is not live is teardown debris — 'rooket prune' removes it
 			}
 		}
 		if len(hasState) == 0 {
-			fmt.Println("no clusters")
+			run.Printf("no clusters\n")
 			return nil
 		}
 

@@ -8,6 +8,7 @@ import (
 
 	"github.com/jhoblitt/rooket/internal/cluster"
 	"github.com/jhoblitt/rooket/internal/registry"
+	"github.com/jhoblitt/rooket/internal/run"
 )
 
 var (
@@ -37,7 +38,7 @@ must be torn down separately if desired.
 		regName := registry.ContainerName(deleteName)
 
 		// --- Step 1: kind cluster (releases the OSD disks) ---
-		fmt.Println("==> deleting kind cluster")
+		run.Printf("==> deleting kind cluster\n")
 		if err := cluster.Delete(deleteName); err != nil {
 			// kind delete is a no-op success on an absent cluster, so an error
 			// means something went wrong. The zap below truncates the OSD disk
@@ -50,7 +51,7 @@ must be torn down separately if desired.
 			if exists {
 				return fmt.Errorf("delete cluster %q: %w; cluster still present, not zapping its disks", deleteName, err)
 			}
-			fmt.Printf("warning: delete cluster returned an error but the cluster is gone: %v\n", err)
+			run.Printf("warning: delete cluster returned an error but the cluster is gone: %v\n", err)
 		}
 		// kind delete strips the cluster's entries but leaves the (now empty)
 		// kubeconfig file behind; remove it so 'rooket k' reports "is it up?"
@@ -65,17 +66,17 @@ must be torn down separately if desired.
 			if dir, err := stateDirPath(deleteName); err == nil {
 				cluster.ZapISCSIDisks(containerEngine, deleteName, dir)
 			} else {
-				fmt.Printf("warning: zap OSD disks: %v\n", err)
+				run.Printf("warning: zap OSD disks: %v\n", err)
 			}
 		}
 
 		// --- Step 3: registry container ---
-		fmt.Println("==> deleting local OCI registry")
+		run.Printf("==> deleting local OCI registry\n")
 		if err := registry.Delete(os.Stdout, containerEngine, regName); err != nil {
-			fmt.Printf("warning: delete registry: %v\n", err)
+			run.Printf("warning: delete registry: %v\n", err)
 		}
 
-		fmt.Printf("cluster %q deleted\n", deleteName)
+		run.Printf("cluster %q deleted\n", deleteName)
 		return nil
 	},
 }

@@ -94,15 +94,15 @@ func blockSetupRun(_ *cobra.Command, _ []string) error {
 	}
 
 	// Step 1: Create sparse image files (no privilege needed).
-	fmt.Println("==> creating disk images")
+	run.Printf("==> creating disk images\n")
 	for _, d := range disks {
 		if _, err := os.Stat(d.imgPath); os.IsNotExist(err) {
 			if err := run.Cmd("truncate", "-s", fmt.Sprintf("%dG", blockSetupDiskSizeGB), d.imgPath); err != nil {
 				return fmt.Errorf("create image %s: %w", d.imgPath, err)
 			}
-			fmt.Printf("created %s (%dGiB)\n", d.imgPath, blockSetupDiskSizeGB)
+			run.Printf("created %s (%dGiB)\n", d.imgPath, blockSetupDiskSizeGB)
 		} else {
-			fmt.Printf("image %s already exists, reusing\n", d.imgPath)
+			run.Printf("image %s already exists, reusing\n", d.imgPath)
 		}
 	}
 
@@ -111,9 +111,9 @@ func blockSetupRun(_ *cobra.Command, _ []string) error {
 	// first means a re-run with nothing to do skips the privileged step and its
 	// sudo/pkexec prompt.
 	if allISCSIDevicesPresent(disks) {
-		fmt.Println("==> iSCSI targets already present, skipping privileged setup")
+		run.Printf("==> iSCSI targets already present, skipping privileged setup\n")
 	} else {
-		fmt.Println("==> configuring iSCSI targets")
+		run.Printf("==> configuring iSCSI targets\n")
 		script := buildISCSIScript(initIQN, disks, blockSetupDiskSizeGB)
 		if err := runPrivilegedScript(script); err != nil {
 			return fmt.Errorf("iSCSI setup failed.\n\nRun the following script manually with root privileges:\n\n%s\nError: %w", script, err)
@@ -121,16 +121,16 @@ func blockSetupRun(_ *cobra.Command, _ []string) error {
 	}
 
 	// Step 3: Wait for block devices to appear and print their paths.
-	fmt.Println("==> waiting for block devices")
+	run.Printf("==> waiting for block devices\n")
 	var missing []string
 	for _, d := range disks {
 		dev, err := waitForISCSIDevice(d.targetIQN)
 		if err != nil {
-			fmt.Printf("warning: %v\n", err)
+			run.Printf("warning: %v\n", err)
 			missing = append(missing, d.targetIQN)
 			continue
 		}
-		fmt.Printf("worker%d disk%d: %s\n", d.workerIdx, d.diskIdx, dev)
+		run.Printf("worker%d disk%d: %s\n", d.workerIdx, d.diskIdx, dev)
 	}
 	if len(missing) > 0 {
 		return fmt.Errorf("block devices not found for targets: %s", strings.Join(missing, ", "))
@@ -181,23 +181,23 @@ func blockTeardownRun(_ *cobra.Command, _ []string) error {
 		}
 	}
 
-	fmt.Println("==> tearing down iSCSI targets")
+	run.Printf("==> tearing down iSCSI targets\n")
 	script := buildISCSITeardownScript(disks)
 	if err := runPrivilegedScript(script); err != nil {
 		return fmt.Errorf("iSCSI teardown failed.\n\nRun the following script manually with root privileges:\n\n%s\nError: %w", script, err)
 	}
 
 	if blockTeardownDeleteDisks {
-		fmt.Println("==> deleting disk images")
+		run.Printf("==> deleting disk images\n")
 		for _, d := range disks {
 			if err := os.Remove(d.imgPath); err == nil {
-				fmt.Printf("removed %s\n", d.imgPath)
+				run.Printf("removed %s\n", d.imgPath)
 			} else if !os.IsNotExist(err) {
-				fmt.Printf("warning: remove %s: %v\n", d.imgPath, err)
+				run.Printf("warning: remove %s: %v\n", d.imgPath, err)
 			}
 		}
 	} else {
-		fmt.Println("disk images preserved (pass --delete-disks to remove them)")
+		run.Printf("disk images preserved (pass --delete-disks to remove them)\n")
 	}
 	return nil
 }
@@ -327,7 +327,7 @@ func runPrivilegedScript(script string) error {
 		if err := os.Chmod(f.Name(), 0o700); err != nil {
 			return err
 		}
-		fmt.Println("==> requesting root via pkexec (you may be prompted to authenticate)")
+		run.Printf("==> requesting root via pkexec (you may be prompted to authenticate)\n")
 		if err := run.Cmd("pkexec", "sh", f.Name()); err == nil {
 			return nil
 		}
