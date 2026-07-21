@@ -389,10 +389,32 @@ func forEachNode(w io.Writer, nodes []string, fn func(node string, out *bytes.Bu
 // them from their first prep, so the probe skips apt — and its
 // deb.debian.org network dependency — when both are present. apt retries
 // ride out transient network failures.
+//
+// The DefaultTasksMax drop-in lifts the per-pod PID/task ceiling. The node's
+// systemd derives DefaultTasksMax as 15% of the tightest PID limit it sees —
+// podman caps the node container at 2048 pids by default, so that is 307 —
+// and stamps it onto every pod's cgroup scope. rgw (rgw_thread_pool_size
+// defaults to 512, plus RADOS/messenger threads) then dies at startup with
+// "Resource temporarily unavailable" when pthread_create hits 307. Writing
+// the drop-in during node prep — before the Rook cluster is deployed — lets
+// every pod scope inherit the raised default; the node container's own 2048
+// pids cap remains the real ceiling. The 90- prefix keeps a stock kind-image
+// drop-in from lexicographically overriding it, and the post-reload check
+// fails loudly if something did. Guarded so warm reruns skip the reload.
 func nodePrepScript(foreignDevs []string) string {
 	var b strings.Builder
 	b.WriteString(`rc=0
 mount -o remount,rw /sys || { echo "ROOKET_FAIL:remount /sys read-write"; rc=1; }
+if [ "$(systemctl show -p DefaultTasksMax --value)" = infinity ]; then
+  echo "systemd DefaultTasksMax already unlimited"
+elif mkdir -p /etc/systemd/system.conf.d &&
+     printf '[Manager]\nDefaultTasksMax=infinity\n' > /etc/systemd/system.conf.d/90-rooket-tasksmax.conf &&
+     systemctl daemon-reload &&
+     [ "$(systemctl show -p DefaultTasksMax --value)" = infinity ]; then
+  echo "systemd DefaultTasksMax set to unlimited"
+else
+  echo "ROOKET_FAIL:raise systemd DefaultTasksMax"; rc=1
+fi
 if command -v vgs >/dev/null && command -v cryptsetup >/dev/null; then
   echo "lvm2 and cryptsetup already present"
 else
