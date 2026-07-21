@@ -228,13 +228,29 @@ which it must implement for its assertions regardless.
 
 | Profile | Values overlay | Templates |
 |---|---|---|
-| `rbd` | `cephBlockPools[]` → pool + `rook-ceph-block` StorageClass | PVC, pod writing to the mount |
-| `rgw` | `cephObjectStores[]` → store + `ceph-bucket` StorageClass | CephObjectStoreUser, OBC, s3 client pod |
-| `nfs` | `ceph-csi-drivers`: `drivers.nfs.enabled: true`; `cephFileSystems[]` for the export backing | CephNFS, NFS StorageClass, PVC, pod |
+| `rbd` | none | PVC on the chart's default `ceph-block` StorageClass, pod writing to the mount |
+| `rgw` | none | CephObjectStoreUser, OBC on the chart's default `ceph-bucket` StorageClass, s3 client pod |
+| `nfs` | `ceph-csi-drivers`: `drivers.nfs.enabled: true` | CephNFS, NFS StorageClass, PVC, pod |
 
-`nfs` spans two charts and flips a value rooket currently hardcodes to `false` in
-a Go constant, making it the profile that proves the layering reaches every
-chart.
+`rbd` and `rgw` need no values overlay because `rook-ceph-cluster`'s default
+`values.yaml` already enables `cephBlockPools[ceph-blockpool]`,
+`cephFileSystems[]`, and `cephObjectStores[ceph-objectstore]` with their
+StorageClasses — rooket has always deployed a pool, a filesystem, and an RGW.
+The default filesystem also backs the NFS exports, so `nfs` needs no
+`cephFileSystems` overlay either; it only flips a driver rooket hardcodes to
+`false` in a Go constant, which still makes it the profile proving the layering
+reaches every chart.
+
+Templates are adapted from rook's own checked-in examples
+(`deploy/examples/csi/rbd/{pvc,pod}.yaml`, `deploy/examples/object-user.yaml`,
+`deploy/examples/object-bucket-claim-a.yaml`, `deploy/examples/nfs.yaml`,
+`deploy/examples/csi/nfs/{storageclass,pvc,pod}.yaml`) so they stay idiomatic.
+
+Note for profile authors: rooket's name-keyed list merge applies only among
+rooket's own layers. At the Helm boundary the chart's `values.yaml` still uses
+replace semantics, so a list entry that overrides a chart default must be
+**complete** — a partial `cephBlockPools` entry would drop the default's CSI
+secret parameters and yield a StorageClass that fails to provision.
 
 ## CLI
 
