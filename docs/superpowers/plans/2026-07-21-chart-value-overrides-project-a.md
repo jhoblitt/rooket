@@ -2188,10 +2188,16 @@ and in `init()`, after the existing persistent flags:
 	pf.StringArrayVarP(&deployValueFiles, "values", "f", nil, "additional values file, applied above profiles (repeatable)")
 ```
 
-Set `deployWithOnlySet` in `deploySetup`, which already receives the command:
+Set `deployWithOnlySet` in `deploySetup`, which already receives the command.
+It may only ever be set true here: `up` forwards its own `--with-only` through
+`applyUpValueFlags` before calling `deployCmd.RunE`, and `deployCmd`'s own flag
+is unset on that path, so an unconditional assignment would erase what `up`
+just forwarded.
 
 ```go
-	deployWithOnlySet = cmd.Flags().Changed("with-only")
+	if cmd.Flags().Changed("with-only") {
+		deployWithOnlySet = true
+	}
 ```
 
 Add `"github.com/jhoblitt/rooket/internal/clone"` and
@@ -2684,7 +2690,21 @@ func init() {
 	rootCmd.AddCommand(valuesCmd)
 	valuesCmd.AddCommand(valuesShowCmd)
 
-	valuesCmd.PersistentFlags().StringVar(&valuesDir, "dir", "", "path to the rook source directory (default: current directory)")
+	// cmd.Flags() on a subcommand includes inherited persistent flags, so this
+	// sees --with-only wherever it was given under `values`.
+	valuesCmd.PersistentPreRunE = func(cmd *cobra.Command, args []string) error {
+		deployWithOnlySet = cmd.Flags().Changed("with-only")
+		return nil
+	}
+
+	pf := valuesCmd.PersistentFlags()
+	pf.StringVar(&valuesDir, "dir", "", "path to the rook source directory (default: current directory)")
+	// Bound to deploy's variables so the profile selection a user previews here
+	// is the same one composeChart resolves during a deploy.
+	pf.StringArrayVar(&deployWith, "with", nil, "profile to enable, in addition to the clone's sticky list (repeatable)")
+	pf.StringArrayVar(&deployWithOnly, "with-only", nil, "profile to enable, replacing the clone's sticky list (repeatable)")
+	pf.StringArrayVarP(&deployValueFiles, "values", "f", nil, "additional values file, applied above profiles (repeatable)")
+
 	valuesShowCmd.Flags().BoolVar(&valuesShowLayers, "layers", false, "annotate each key with the layer that set it")
 }
 ```
