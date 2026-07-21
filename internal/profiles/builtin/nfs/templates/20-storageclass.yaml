@@ -1,0 +1,18 @@
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: rooket-nfs
+provisioner: rook-ceph.nfs.csi.ceph.com
+parameters:
+  nfsCluster: rooket-nfs
+  server: rook-ceph-nfs-rooket-nfs-a
+  clusterID: {{ .Values.rooket.namespace }}
+  fsName: ceph-filesystem
+  pool: ceph-filesystem-data0
+  csi.storage.k8s.io/provisioner-secret-name: rook-csi-cephfs-provisioner
+  csi.storage.k8s.io/provisioner-secret-namespace: {{ .Values.rooket.namespace }}
+  csi.storage.k8s.io/controller-expand-secret-name: rook-csi-cephfs-provisioner
+  csi.storage.k8s.io/controller-expand-secret-namespace: {{ .Values.rooket.namespace }}
+  csi.storage.k8s.io/node-stage-secret-name: rook-csi-cephfs-node
+  csi.storage.k8s.io/node-stage-secret-namespace: {{ .Values.rooket.namespace }}
+reclaimPolicy: Delete
