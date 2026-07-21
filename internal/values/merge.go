@@ -41,6 +41,7 @@ func mergeMap(dst, src map[string]any, path, layer string, prov map[string]strin
 		case map[string]any:
 			sub, ok := dst[k].(map[string]any)
 			if !ok {
+				deleteProvSubtree(prov, p)
 				sub = map[string]any{}
 				dst[k] = sub
 			}
@@ -48,6 +49,9 @@ func mergeMap(dst, src map[string]any, path, layer string, prov map[string]strin
 		case []any:
 			cur, curOK := dst[k].([]any)
 			if namedList(tv) && (!curOK || namedList(cur)) {
+				if !curOK {
+					deleteProvSubtree(prov, p)
+				}
 				dst[k] = mergeNamed(cur, tv, p, layer, prov)
 				continue
 			}

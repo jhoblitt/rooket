@@ -198,6 +198,92 @@ func TestMergeProvenanceStaleDescendantsAfterListReplace(t *testing.T) {
 	}
 }
 
+func TestMergeProvenanceStaleAfterMapToNamedList(t *testing.T) {
+	_, prov := Merge([]Layer{
+		{Name: "layer1", Values: map[string]any{"x": map[string]any{"a": 1, "b": 2}}},
+		{Name: "layer2", Values: map[string]any{"x": []any{
+			map[string]any{"name": "z"},
+		}}},
+	})
+
+	if _, ok := prov["x.a"]; ok {
+		t.Errorf("provenance still has stale entry x.a = %q after x became a named list", prov["x.a"])
+	}
+	if _, ok := prov["x.b"]; ok {
+		t.Errorf("provenance still has stale entry x.b = %q after x became a named list", prov["x.b"])
+	}
+	if got, want := prov["x[z].name"], "layer2"; got != want {
+		t.Errorf("provenance[%q] = %q, want %q", "x[z].name", got, want)
+	}
+}
+
+func TestMergeProvenanceStaleAfterScalarToNamedList(t *testing.T) {
+	_, prov := Merge([]Layer{
+		{Name: "layer1", Values: map[string]any{"x": "s"}},
+		{Name: "layer2", Values: map[string]any{"x": []any{
+			map[string]any{"name": "a"},
+		}}},
+	})
+
+	if _, ok := prov["x"]; ok {
+		t.Errorf("provenance still has stale entry x = %q after x became a named list", prov["x"])
+	}
+	if got, want := prov["x[a].name"], "layer2"; got != want {
+		t.Errorf("provenance[%q] = %q, want %q", "x[a].name", got, want)
+	}
+}
+
+func TestMergeProvenanceStaleAfterNamedListToMap(t *testing.T) {
+	_, prov := Merge([]Layer{
+		{Name: "layer1", Values: map[string]any{"x": []any{
+			map[string]any{"name": "one", "size": 3},
+		}}},
+		{Name: "layer2", Values: map[string]any{"x": map[string]any{"a": 1}}},
+	})
+
+	if _, ok := prov["x[one].name"]; ok {
+		t.Errorf("provenance still has stale entry x[one].name = %q after x became a map", prov["x[one].name"])
+	}
+	if _, ok := prov["x[one].size"]; ok {
+		t.Errorf("provenance still has stale entry x[one].size = %q after x became a map", prov["x[one].size"])
+	}
+	if got, want := prov["x.a"], "layer2"; got != want {
+		t.Errorf("provenance[%q] = %q, want %q", "x.a", got, want)
+	}
+}
+
+func TestMergeProvenanceStaleAfterScalarToMap(t *testing.T) {
+	_, prov := Merge([]Layer{
+		{Name: "layer1", Values: map[string]any{"x": "s"}},
+		{Name: "layer2", Values: map[string]any{"x": map[string]any{"a": 1}}},
+	})
+
+	if _, ok := prov["x"]; ok {
+		t.Errorf("provenance still has stale entry x = %q after x became a map", prov["x"])
+	}
+	if got, want := prov["x.a"], "layer2"; got != want {
+		t.Errorf("provenance[%q] = %q, want %q", "x.a", got, want)
+	}
+}
+
+func TestMergeProvenanceAddingElementPreservesSurvivorAttribution(t *testing.T) {
+	_, prov := Merge([]Layer{
+		{Name: "base", Values: map[string]any{"pools": []any{
+			map[string]any{"name": "one", "size": 3},
+		}}},
+		{Name: "top", Values: map[string]any{"pools": []any{
+			map[string]any{"name": "two"},
+		}}},
+	})
+
+	if got, want := prov["pools[one].size"], "base"; got != want {
+		t.Errorf("provenance[%q] = %q, want %q", "pools[one].size", got, want)
+	}
+	if got, want := prov["pools[two].name"], "top"; got != want {
+		t.Errorf("provenance[%q] = %q, want %q", "pools[two].name", got, want)
+	}
+}
+
 func TestMergeDoesNotAliasInput(t *testing.T) {
 	src := map[string]any{"l": []any{1, 2}}
 	got, _ := Merge([]Layer{{Name: "only", Values: src}})
