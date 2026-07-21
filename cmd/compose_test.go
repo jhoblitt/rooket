@@ -68,6 +68,28 @@ func TestActiveProfileNames(t *testing.T) {
 			t.Errorf("got %#v", got)
 		}
 	})
+
+	// pflag's StringArray can't express an empty list: `--with-only ""`
+	// arrives here as []string{""}, not nil.
+	t.Run("--with-only \"\" clears, as the flag actually delivers it", func(t *testing.T) {
+		got, err := activeProfileNames(d, nil, []string{""}, true)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(got) != 0 {
+			t.Errorf("got %#v", got)
+		}
+	})
+
+	t.Run("with also drops empty entries", func(t *testing.T) {
+		got, err := activeProfileNames(d, []string{"", "extra"}, nil, false)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(got) != 2 || got[0] != "sticky" || got[1] != "extra" {
+			t.Errorf("got %#v", got)
+		}
+	})
 }
 
 func TestComposeChartLayerOrder(t *testing.T) {

@@ -45,15 +45,30 @@ func userProfileDir() (string, error) {
 // activeProfileNames resolves the clone's sticky list against the flags:
 // --with appends to it, --with-only replaces it. withOnlySet distinguishes an
 // unset flag from --with-only "", which clears the selection.
+//
+// pflag's StringArray has no syntax for an empty list, so `--with-only ""`
+// arrives here as []string{""} rather than nil; empty entries are dropped so
+// that still clears the selection instead of becoming an unknown profile
+// named "".
 func activeProfileNames(cloneDir clone.Dir, with, withOnly []string, withOnlySet bool) ([]string, error) {
 	if withOnlySet {
-		return withOnly, nil
+		return dropEmpty(withOnly), nil
 	}
 	sticky, err := cloneDir.Profiles()
 	if err != nil {
 		return nil, err
 	}
-	return append(sticky, with...), nil
+	return append(sticky, dropEmpty(with)...), nil
+}
+
+func dropEmpty(names []string) []string {
+	out := make([]string, 0, len(names))
+	for _, n := range names {
+		if n != "" {
+			out = append(out, n)
+		}
+	}
+	return out
 }
 
 func loadProfiles(names []string) ([]profiles.Profile, error) {
