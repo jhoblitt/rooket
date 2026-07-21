@@ -7,7 +7,7 @@ import (
 
 func TestBuiltInProfilesLoad(t *testing.T) {
 	dir := t.TempDir()
-	for _, name := range []string{"rbd"} {
+	for _, name := range []string{"rbd", "rgw"} {
 		t.Run(name, func(t *testing.T) {
 			p, err := Load(dir, name)
 			if err != nil {

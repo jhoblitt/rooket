@@ -1,0 +1,7 @@
+apiVersion: ceph.rook.io/v1
+kind: CephObjectStoreUser
+metadata:
+  name: rooket-rgw-user
+spec:
+  store: ceph-objectstore
+  displayName: rooket smoke user
