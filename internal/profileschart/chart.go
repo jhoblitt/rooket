@@ -36,6 +36,9 @@ appVersion: "0.0.0"
 // any were written. Helm owns their lifecycle, so a resource whose source is
 // gone is pruned on the next upgrade rather than leaking as kubectl apply would.
 func Render(dir string, ctx Context, sources []Source) (bool, error) {
+	if dir == "" {
+		return false, fmt.Errorf("dir must not be empty")
+	}
 	if err := os.RemoveAll(dir); err != nil {
 		return false, fmt.Errorf("clear %s: %w", dir, err)
 	}
@@ -56,6 +59,7 @@ func Render(dir string, ctx Context, sources []Source) (bool, error) {
 	}
 
 	count := 0
+	written := make(map[string]string)
 	for _, s := range sources {
 		names := make([]string, 0, len(s.Files))
 		for n := range s.Files {
@@ -64,9 +68,13 @@ func Render(dir string, ctx Context, sources []Source) (bool, error) {
 		sort.Strings(names)
 		for _, n := range names {
 			out := filepath.Join(tmplDir, s.Prefix+"-"+n)
+			if prev, ok := written[out]; ok {
+				return false, fmt.Errorf("template path collision: %q produced by both %q and %q", out, prev, s.Prefix)
+			}
 			if err := os.WriteFile(out, s.Files[n], 0o644); err != nil {
 				return false, fmt.Errorf("write %s: %w", out, err)
 			}
+			written[out] = s.Prefix
 			count++
 		}
 	}
