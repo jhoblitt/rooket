@@ -15,11 +15,35 @@ source checkout.
 - `kind`, `kubectl`, `helm` on `PATH`.
 - iSCSI tooling for the OSD disks: `targetcli`, `iscsiadm` (package
   `open-iscsi`/`iscsi-initiator-utils`), and `lvm2`. Only configuring and
-  removing targets needs root (`sudo -n`, then `pkexec`): the first
-  `rooket block setup` and a `rooket down --delete-disks`. Day-to-day
-  `up`/`down` cycles reuse the existing targets and never prompt.
+  removing targets needs root: the first `rooket block setup` and a
+  `rooket down --delete-disks`. See "Passwordless iSCSI setup" below for how
+  that privilege is obtained. Day-to-day `up`/`down` cycles reuse the existing
+  targets and never prompt.
 - A Go toolchain (to build rooket) and a [rook](https://github.com/rook/rook)
   source checkout.
+
+### Passwordless iSCSI setup
+
+Creating and removing iSCSI targets needs root. By default rooket asks for it
+once per privileged run via `pkexec`. To remove the prompt, install a sudoers
+rule scoped to the commands rooket runs:
+
+```console
+$ rooket sudoers print      # inspect the rule first
+$ rooket sudoers install    # authenticate once
+$ rooket sudoers status     # "up to date"; exits non-zero if absent or stale
+$ rooket sudoers uninstall
+```
+
+The grant is **root-equivalent**: `targetcli` can expose any file as a fileio
+backstore and the disk images are user-writable, so anyone holding it can
+obtain root. It is a convenience for a single-user development workstation, not
+a privilege boundary. rooket works without it.
+
+Independently, `sudo systemctl enable target.service` makes LIO restore its
+configuration at boot, so targets survive a reboot and setup needs root far
+less often. The trade-off is that targets belonging to deleted clusters also
+survive until `rooket down --all --delete-disks` clears them.
 
 ## Quick start
 
@@ -40,8 +64,9 @@ clusters rooket owns — after showing the plan and prompting (`--force` skips,
 has a state dir or a rooket registry container, so a foreign `kind create
 cluster` is left alone unless you pass `--include-unmanaged`. Add
 `--delete-disks` to also remove every cluster's iSCSI targets, disk images, and
-state dir; all target teardowns are batched into one privileged script, so the
-sweep costs at most a single sudo/pkexec prompt.
+state dir; all target teardowns are batched into one privileged run, so the
+sweep costs at most a single prompt (or none, with rooket's sudoers rule
+installed).
 
 `rooket up` finds the rook source via `--dir`, `$ROOK_DIR`, or by walking up
 from the current directory to the enclosing rook clone.

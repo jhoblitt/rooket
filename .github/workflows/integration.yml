@@ -62,6 +62,140 @@ jobs:
       - name: Unit tests
         run: go test -race ./...
 
+  # The runner itself has blanket passwordless sudo, so a policy assertion there
+  # would pass even with the rule deleted. This job runs in a container where the
+  # test user's ONLY grant is rooket's, which is what makes the deny half mean
+  # something.
+  sudoers-policy:
+    name: sudoers policy
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    container:
+      image: fedora:42
+    steps:
+      - name: Install test dependencies
+        run: dnf -y install --setopt=install_weak_deps=False diffutils git sudo targetcli iscsi-initiator-utils systemd
+
+      - name: Checkout rooket
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+
+      - name: Build rooket
+        # actions/checkout leaves the workspace owned by the runner's uid while
+        # this job's container runs as root, so git rejects the repository as
+        # dubiously owned and go build's VCS stamping fails with exit 128.
+        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          go build -o /usr/local/bin/rooket .
+
+      - name: Install the rule for an otherwise unprivileged user
+        run: |
+          set -eux
+          useradd -m tester
+          rooket sudoers install --user tester
+          visudo -cf /etc/sudoers.d/rooket
+          test "$(stat -c '%a %U:%G' /etc/sudoers.d/rooket)" = "440 root:root"
+          diff <(rooket sudoers print --user tester) /etc/sudoers.d/rooket
+
+      - name: Resolve the paths the rule actually grants
+        # rooket resolves every command through filepath.EvalSymlinks before
+        # writing the rule, so a command a distro installs as a symlink (e.g.
+        # Fedora's /usr/sbin/iscsiadm -> ../bin/iscsiadm) lands in the rule
+        # under its resolved name, which `command -v` does not necessarily
+        # report. Parse the installed rule itself for the paths it grants,
+        # rather than assume either form, so the assertions below exercise
+        # exactly what sudo will match.
+        run: |
+          set -eu
+          rule="$(cat /etc/sudoers.d/rooket)"
+          path_for() {
+            printf '%s' "$rule" | grep -v '^#' | tr -d "\\\\" | tr ',' ' ' | tr -s '[:space:]' '\n' | grep -E "/$1\$" | grep -v '^!' | head -n1
+          }
+          targetcli_bin="$(path_for targetcli)"
+          iscsiadm_bin="$(path_for iscsiadm)"
+          systemctl_bin="$(path_for systemctl)"
+          tee_bin="$(path_for tee)"
+          cat_bin="$(path_for cat)"
+          test -n "$targetcli_bin" || { echo "could not resolve targetcli's path from the installed rule" >&2; exit 1; }
+          test -n "$iscsiadm_bin" || { echo "could not resolve iscsiadm's path from the installed rule" >&2; exit 1; }
+          test -n "$systemctl_bin" || { echo "could not resolve systemctl's path from the installed rule" >&2; exit 1; }
+          test -n "$tee_bin" || { echo "could not resolve tee's path from the installed rule" >&2; exit 1; }
+          test -n "$cat_bin" || { echo "could not resolve cat's path from the installed rule" >&2; exit 1; }
+          {
+            echo "TARGETCLI_BIN=$targetcli_bin"
+            echo "ISCSIADM_BIN=$iscsiadm_bin"
+            echo "SYSTEMCTL_BIN=$systemctl_bin"
+            echo "TEE_BIN=$tee_bin"
+            echo "CAT_BIN=$cat_bin"
+          } >>"$GITHUB_ENV"
+
+      - name: Assert the permitted commands
+        run: |
+          set -eu
+          permit() {
+            if out="$(sudo -l -U tester "$@" 2>&1)"; then
+              return
+            fi
+            echo "FAIL: should be permitted: $*" >&2
+            echo "$out" >&2
+            exit 1
+          }
+          permit "$TARGETCLI_BIN" /iscsi create iqn.2003-01.local.rooket:x
+          permit "$ISCSIADM_BIN" -m node --login
+          permit "$SYSTEMCTL_BIN" restart iscsid
+          permit "$SYSTEMCTL_BIN" start iscsid
+          permit "$TEE_BIN" /etc/iscsi/initiatorname.iscsi
+          permit "$CAT_BIN" /etc/sudoers.d/rooket
+
+          # rooket itself never invokes the resolved path: its argv is the
+          # bare command name (e.g. "iscsiadm"), which sudo resolves through
+          # its own secure_path rather than the caller's $PATH. The rule must
+          # permit both forms, since sudo matches by resolved device+inode
+          # regardless of which spelling named it — the assertions above alone
+          # would miss a rule that only happened to match the resolved path.
+          permit targetcli /iscsi create iqn.2003-01.local.rooket:x
+          permit iscsiadm -m node --login
+          permit systemctl restart iscsid
+          permit systemctl start iscsid
+          permit tee /etc/iscsi/initiatorname.iscsi
+          permit cat /etc/sudoers.d/rooket
+
+      - name: Assert the denied commands
+        run: |
+          set -eu
+          deny() {
+            if out="$(sudo -l -U tester "$@" 2>&1)"; then
+              echo "FAIL: should be denied: $*" >&2
+              echo "$out" >&2
+              exit 1
+            fi
+          }
+          deny "$(command -v sh)" -c id
+          deny "$TARGETCLI_BIN"
+          deny "$SYSTEMCTL_BIN" restart sshd
+          deny "$SYSTEMCTL_BIN" link /tmp/evil.service
+          deny "$TEE_BIN" /etc/passwd
+          deny "$CAT_BIN" /etc/shadow
+          deny "$CAT_BIN" /etc/sudoers
+          # tee is pinned to exact args: one extra flag must still be denied,
+          # not just a wholly different path.
+          deny "$TEE_BIN" -a /etc/iscsi/initiatorname.iscsi
+
+      - name: Assert status reporting and uninstall
+        run: |
+          set -eux
+          runuser -u tester -- rooket sudoers status --user tester
+          rooket sudoers uninstall
+          test ! -e /etc/sudoers.d/rooket
+          if runuser -u tester -- rooket sudoers status --user tester; then
+            echo "FAIL: status reported success after uninstall" >&2
+            exit 1
+          fi
+
   e2e:
     name: rooket up/down e2e (docker, ${{ matrix.rook-ref }})
     runs-on: ubuntu-latest
