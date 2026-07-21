@@ -54,8 +54,8 @@ var (
 // any installed engine (rooket-created or not) plus every state directory,
 // including orphans left by deleted clones. Without --delete-disks it preserves
 // disk images and iSCSI targets like a plain down; with it, every cluster's
-// target teardown is batched into one privileged script so the whole sweep
-// costs at most a single sudo/pkexec prompt.
+// target teardown is batched into one privileged run so the whole sweep costs
+// at most a single prompt (or none, with rooket's sudoers rule installed).
 func downAllRun(cmd *cobra.Command) error {
 	for _, f := range []string{"name", "workers", "disk-count", "skip-cluster"} {
 		if cmd.Flags().Changed(f) {
@@ -189,9 +189,9 @@ func downAllRun(cmd *cobra.Command) error {
 		}
 		if len(disks) > 0 {
 			run.Printf("==> tearing down iSCSI targets (all clusters in one privileged run)\n")
-			script := buildISCSITeardownScript(disks)
-			if err := runPrivilegedScript(script); err != nil {
-				return fmt.Errorf("iSCSI teardown failed.\n\nRun the following script manually with root privileges:\n\n%s\nError: %w", script, err)
+			steps := buildISCSITeardownSteps(disks)
+			if err := runPrivileged(steps); err != nil {
+				return fmt.Errorf("iSCSI teardown failed.\n\nRun the following script manually with root privileges:\n\n%s\nError: %w", renderScript(steps), err)
 			}
 		}
 		for _, n := range names {

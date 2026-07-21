@@ -3,6 +3,7 @@ package cmd
 import (
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -26,7 +27,7 @@ func TestShQuote(t *testing.T) {
 // literal, so it cannot start a new command in the root-run script. None of
 // these payloads contains a single quote, so each must appear verbatim wrapped
 // in single quotes.
-func TestBuildISCSIScriptsQuoteOperands(t *testing.T) {
+func TestBuildISCSIStepsQuoteOperands(t *testing.T) {
 	evil := iscsiDisk{
 		imgPath:       "/tmp/x; touch /tmp/pwned",
 		backstoreName: "clus-$(id)",
@@ -41,10 +42,31 @@ func TestBuildISCSIScriptsQuoteOperands(t *testing.T) {
 			}
 		}
 	}
-	mustQuote(t, "setup", buildISCSIScript(initIQN, []iscsiDisk{evil}, 10),
+	mustQuote(t, "setup", renderScript(buildISCSISteps(initIQN, []iscsiDisk{evil}, 10, true)),
 		evil.imgPath, evil.backstoreName, evil.targetIQN)
-	mustQuote(t, "teardown", buildISCSITeardownScript([]iscsiDisk{evil}),
+	mustQuote(t, "teardown", renderScript(buildISCSITeardownSteps([]iscsiDisk{evil})),
 		evil.backstoreName, evil.targetIQN)
+}
+
+// Every step the builders emit must be covered by the sudoers vocabulary; an
+// uncovered one would silently fall back to a pkexec prompt on a host that
+// installed the rule.
+func TestBuiltStepsAreGranted(t *testing.T) {
+	disks := []iscsiDisk{{
+		imgPath:       "/home/u/.local/share/rooket/c/worker0-disk0.img",
+		backstoreName: "c-worker0-disk0",
+		targetIQN:     "iqn.2003-01.local.rooket:c-worker0-disk0",
+	}}
+	initIQN := "iqn.2003-01.local.rooket:initiator"
+
+	for _, write := range []bool{true, false} {
+		if err := validateSteps(buildISCSISteps(initIQN, disks, 10, write)); err != nil {
+			t.Errorf("setup steps (writeInitiator=%v): %v", write, err)
+		}
+	}
+	if err := validateSteps(buildISCSITeardownSteps(disks)); err != nil {
+		t.Errorf("teardown steps: %v", err)
+	}
 }
 
 func TestValidateIQNDate(t *testing.T) {
@@ -89,4 +111,84 @@ func TestResolveDeviceLink(t *testing.T) {
 			t.Errorf("resolveDeviceLink on a missing link = %q, want empty", got)
 		}
 	})
+}
+
+func TestInitiatorNameCurrent(t *testing.T) {
+	const want = "iqn.2003-01.local.rooket:initiator"
+	cases := []struct {
+		name    string
+		content string
+		write   bool // false => do not create the file at all
+		current bool
+	}{
+		{name: "exact match", content: "InitiatorName=" + want + "\n", write: true, current: true},
+		{name: "trailing whitespace", content: "InitiatorName=" + want + "  \n", write: true, current: true},
+		{name: "with comments", content: "# comment\n\nInitiatorName=" + want + "\n", write: true, current: true},
+		{name: "different iqn", content: "InitiatorName=iqn.2003-01.local.other:initiator\n", write: true},
+		{name: "second assignment mismatched", content: "InitiatorName=" + want + "\nInitiatorName=iqn.x\n", write: true},
+		// The rule is "declare the wanted name and nothing else": a second
+		// assignment must be rejected even when it repeats the same IQN, not
+		// only when it disagrees.
+		{name: "second assignment repeats the wanted iqn", content: "InitiatorName=" + want + "\nInitiatorName=" + want + "\n", write: true},
+		{name: "no assignment", content: "# nothing here\n", write: true},
+		{name: "empty file", content: "", write: true},
+		{name: "absent file", write: false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "initiatorname.iscsi")
+			if tc.write {
+				if err := os.WriteFile(path, []byte(tc.content), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if got := initiatorNameCurrent(path, want); got != tc.current {
+				t.Errorf("initiatorNameCurrent = %v, want %v", got, tc.current)
+			}
+		})
+	}
+}
+
+// The restart exists only to make iscsid pick up a changed initiator name, and
+// iscsid is shared by every other cluster's live sessions — so it must be
+// emitted if and only if the write is.
+func TestBuildISCSIScriptInitiatorWriteGatesRestart(t *testing.T) {
+	disks := []iscsiDisk{{
+		imgPath:       "/tmp/worker0-disk0.img",
+		backstoreName: "c-worker0-disk0",
+		targetIQN:     "iqn.2003-01.local.rooket:c-worker0-disk0",
+	}}
+	initIQN := "iqn.2003-01.local.rooket:initiator"
+
+	has := func(steps []privStep, argv ...string) bool {
+		for _, s := range steps {
+			if slices.Equal(s.argv, argv) {
+				return true
+			}
+		}
+		return false
+	}
+
+	with := buildISCSISteps(initIQN, disks, 10, true)
+	if !has(with, "tee", "/etc/iscsi/initiatorname.iscsi") {
+		t.Error("writeInitiator=true omitted the tee step")
+	}
+	if !has(with, "systemctl", "restart", "iscsid") {
+		t.Error("writeInitiator=true omitted the iscsid restart")
+	}
+
+	without := buildISCSISteps(initIQN, disks, 10, false)
+	if has(without, "tee", "/etc/iscsi/initiatorname.iscsi") {
+		t.Error("writeInitiator=false emitted the tee step")
+	}
+	if has(without, "systemctl", "restart", "iscsid") {
+		t.Error("writeInitiator=false emitted the iscsid restart")
+	}
+	if !has(without, "systemctl", "start", "iscsid") {
+		t.Error("writeInitiator=false dropped the unconditional iscsid start")
+	}
+
+	if err := validateSteps(without); err != nil {
+		t.Errorf("steps without the initiator write are not granted: %v", err)
+	}
 }
