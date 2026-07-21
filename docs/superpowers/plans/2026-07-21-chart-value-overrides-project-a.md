@@ -2045,8 +2045,13 @@ In `cmd/deploy.go`, delete `writeClusterValues` (lines 318-376) and the
 // clusterStorageNodes resolves each worker's iSCSI disks to the device paths
 // rook should claim. resolve is injectable so the mapping can be tested without
 // an iSCSI session.
+//
+// An unresolved device aborts the deploy rather than being skipped: rooket
+// exists to give each worker a real OSD on its own disk, so a cluster that
+// silently comes up with fewer OSDs than requested hides the very failure an
+// operator needs to see.
 func clusterStorageNodes(cluster string, workers, disks int,
-	resolve func(iqn string) (string, error)) []values.StorageNode {
+	resolve func(iqn string) (string, error)) ([]values.StorageNode, error) {
 
 	out := make([]values.StorageNode, 0, workers)
 	for i := 0; i < workers; i++ {
@@ -2055,14 +2060,13 @@ func clusterStorageNodes(cluster string, workers, disks int,
 			iqn := fmt.Sprintf("iqn.%s.local.rooket:%s-worker%d-disk%d", deployIQNDate, cluster, i, d)
 			dev, err := resolve(iqn)
 			if err != nil {
-				run.Printf("    warning: worker %d disk %d unresolved: %v\n", i, d, err)
-				continue
+				return nil, fmt.Errorf("resolve iSCSI device for worker %d disk %d: %w", i, d, err)
 			}
 			node.Devices = append(node.Devices, dev)
 		}
 		out = append(out, node)
 	}
-	return out
+	return out, nil
 }
 ```
 
@@ -2213,7 +2217,14 @@ and in `init()`, after the existing persistent flags:
 	pf.StringArrayVar(&deployWith, "with", nil, "profile to enable, in addition to the clone's sticky list (repeatable)")
 	pf.StringArrayVar(&deployWithOnly, "with-only", nil, "profile to enable, replacing the clone's sticky list (repeatable)")
 	pf.StringArrayVarP(&deployValueFiles, "values", "f", nil, "additional values file, applied above profiles (repeatable)")
+	pf.StringArrayVar(&deploySets, "set", nil, "value passed straight through to helm, applied above every layer (repeatable)")
 ```
+
+Each `--set` entry is appended to every chart's helm invocation as its own
+`--set <entry>` pair. It is deliberately not merged into rooket's composed file:
+Helm already ranks `--set` above every `-f`, so passing it through preserves the
+precedence the design specifies without rooket reimplementing Helm's `strvals`
+parser.
 
 Set `deployWithOnlySet` in `deploySetup`, which already receives the command.
 It may only ever be set true here: `up` forwards its own `--with-only` through
