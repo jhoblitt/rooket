@@ -192,26 +192,26 @@ func DeleteWith(eng engine.Engine, name, kubeconfig string) error {
 func ZapISCSIDisks(eng engine.Engine, clusterName, dataDir string) {
 	imgs, _ := filepath.Glob(filepath.Join(dataDir, "*.img"))
 	if len(imgs) == 0 {
-		fmt.Printf("no OSD disk images for cluster %q; skipping zap\n", clusterName)
+		run.Printf("no OSD disk images for cluster %q; skipping zap\n", clusterName)
 		return
 	}
 
-	fmt.Println("==> zapping OSD disks (re-sparsifying backing images)")
+	run.Printf("==> zapping OSD disks (re-sparsifying backing images)\n")
 	for _, img := range imgs {
 		fi, err := os.Stat(img)
 		if err != nil {
-			fmt.Printf("warning: stat %s: %v\n", img, err)
+			run.Printf("warning: stat %s: %v\n", img, err)
 			continue
 		}
 		if err := os.Truncate(img, 0); err != nil {
-			fmt.Printf("warning: truncate %s to 0: %v\n", img, err)
+			run.Printf("warning: truncate %s to 0: %v\n", img, err)
 			continue
 		}
 		if err := os.Truncate(img, fi.Size()); err != nil {
-			fmt.Printf("warning: truncate %s to %d: %v\n", img, fi.Size(), err)
+			run.Printf("warning: truncate %s to %d: %v\n", img, fi.Size(), err)
 			continue
 		}
-		fmt.Printf("zapped %s\n", img)
+		run.Printf("zapped %s\n", img)
 	}
 
 	// Refresh udev so lsblk/ceph-volume don't see the stale "ceph_bluestore"

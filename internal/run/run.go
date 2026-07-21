@@ -12,21 +12,31 @@ import (
 	"time"
 )
 
+// ANSI styles that distinguish rooket's own output from the commands it runs:
+// status lines are cyan, the "+ cmd" command echoes are dim, and the commands'
+// actual output is left in the terminal's default color.
+const (
+	colorStatus = "\x1b[36m" // cyan
+	colorTrace  = "\x1b[2m"  // dim
+	colorReset  = "\x1b[0m"
+)
+
 var (
 	timestamps bool
+	colorized  bool
 	startTime  = time.Now()
 )
 
-// SetTimestamps enables the elapsed-time prefix on Printf output. It must be
+// SetTimestamps enables the elapsed-time prefix on rooket output. It must be
 // called before commands run (the root command's PersistentPreRunE) and never
 // concurrently with them.
 func SetTimestamps(on bool) { timestamps = on }
 
-// Printf prints rooket-emitted output, applying the --timestamps elapsed-time
-// prefix to each non-empty line when enabled. The message is assembled and
-// written in one call so concurrent printers cannot interleave a prefix with
-// another caller's text. Child-process output is never routed through here
-// and streams unprefixed.
+// SetColor enables ANSI coloring of rooket's own output. Same lifecycle rules
+// as SetTimestamps.
+func SetColor(on bool) { colorized = on }
+
+// Printf prints a rooket status line to stdout.
 func Printf(format string, a ...any) {
 	Fprintf(os.Stdout, format, a...)
 }
@@ -34,18 +44,52 @@ func Printf(format string, a ...any) {
 // Fprintf is Printf writing to an explicit writer — used by callers that
 // buffer a concurrent task's output for later, ordered flushing.
 func Fprintf(w io.Writer, format string, a ...any) {
-	msg := fmt.Sprintf(format, a...)
-	if timestamps {
-		prefix := fmt.Sprintf("[%6.1fs] ", time.Since(startTime).Seconds())
-		lines := strings.Split(msg, "\n")
-		for i, l := range lines {
-			if l != "" {
-				lines[i] = prefix + l
-			}
-		}
-		msg = strings.Join(lines, "\n")
+	emit(w, colorStatus, fmt.Sprintf(format, a...))
+}
+
+// Tracef emits a dim "+ name args" command echo to w, for callers that run a
+// command outside the Cmd* helpers (e.g. the streamed make) but still want the
+// echo styled like every other command trace.
+func Tracef(w io.Writer, name string, args ...string) {
+	tracef(w, name, args)
+}
+
+// tracef emits a "+ cmd args" command echo, styled dim to set it apart from
+// both status lines and the command's own output.
+func tracef(w io.Writer, name string, args []string) {
+	line := "+ " + name
+	if len(args) > 0 {
+		line += " " + strings.Join(args, " ")
 	}
-	fmt.Fprint(w, msg)
+	emit(w, colorTrace, line+"\n")
+}
+
+// emit writes msg, applying the --timestamps prefix and the given color to
+// each non-empty line. Both wrap the whole line (prefix included), and the
+// message is written in one call so concurrent printers cannot interleave a
+// prefix or color escape with another caller's text. Child-process output is
+// never routed through here and streams unstyled.
+func emit(w io.Writer, color, msg string) {
+	var prefix string
+	if timestamps {
+		prefix = fmt.Sprintf("[%6.1fs] ", time.Since(startTime).Seconds())
+	}
+	if prefix == "" && !colorized {
+		fmt.Fprint(w, msg)
+		return
+	}
+	lines := strings.Split(msg, "\n")
+	for i, l := range lines {
+		if l == "" {
+			continue
+		}
+		l = prefix + l
+		if colorized {
+			l = color + l + colorReset
+		}
+		lines[i] = l
+	}
+	fmt.Fprint(w, strings.Join(lines, "\n"))
 }
 
 // Cmd runs a command, streaming stdout/stderr to the terminal.
@@ -85,7 +129,7 @@ func CmdWithEnvTo(w io.Writer, extraEnv []string, name string, args ...string) e
 	if len(extraEnv) > 0 {
 		cmd.Env = append(os.Environ(), extraEnv...)
 	}
-	Fprintf(w, "+ %s %s\n", name, strings.Join(args, " "))
+	tracef(w, name, args)
 	return cmd.Run()
 }
 
@@ -111,7 +155,7 @@ func OutputWithEnv(extraEnv []string, name string, args ...string) (string, erro
 
 // OutputWithEnvTo is OutputWithEnv with the trace line routed to w.
 func OutputWithEnvTo(w io.Writer, extraEnv []string, name string, args ...string) (string, error) {
-	Fprintf(w, "+ %s %s\n", name, strings.Join(args, " "))
+	tracef(w, name, args)
 	cmd := exec.Command(name, args...)
 	if len(extraEnv) > 0 {
 		cmd.Env = append(os.Environ(), extraEnv...)
@@ -137,7 +181,7 @@ func OutputInteractive(name string, args ...string) (string, error) {
 	}
 	cmd.Stdout = &buf
 	cmd.Stderr = os.Stderr
-	Printf("+ %s %s\n", name, strings.Join(args, " "))
+	tracef(os.Stdout, name, args)
 	if err := cmd.Run(); err != nil {
 		return "", err
 	}
@@ -159,7 +203,7 @@ func CmdWithStdinEnv(stdin io.Reader, extraEnv []string, name string, args ...st
 	if len(extraEnv) > 0 {
 		cmd.Env = append(os.Environ(), extraEnv...)
 	}
-	Printf("+ %s %s\n", name, strings.Join(args, " "))
+	tracef(os.Stdout, name, args)
 	return cmd.Run()
 }
 
@@ -171,6 +215,6 @@ func CmdWithStdinTo(w io.Writer, stdin io.Reader, name string, args ...string) e
 	cmd.Stdin = stdin
 	cmd.Stdout = w
 	cmd.Stderr = w
-	Fprintf(w, "+ %s %s\n", name, strings.Join(args, " "))
+	tracef(w, name, args)
 	return cmd.Run()
 }

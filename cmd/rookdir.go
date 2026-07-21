@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/jhoblitt/rooket/internal/run"
 	"golang.org/x/mod/modfile"
 )
 
@@ -26,7 +27,7 @@ func resolveRookDir(flagDir string) (string, error) {
 		return "", fmt.Errorf("determine working directory: %w", err)
 	}
 	if root := findRookRoot(wd); root != "" {
-		fmt.Printf("==> detected rook source at %s\n", root)
+		run.Printf("==> detected rook source at %s\n", root)
 		return root, nil
 	}
 	return "", fmt.Errorf("could not locate a rook source tree: pass --dir, set ROOK_DIR, "+
