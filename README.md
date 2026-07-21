@@ -138,8 +138,13 @@ rooket composes the Helm values for each chart from layers, lowest first:
 4. active profiles, in selection order
 5. `-f` files, then `--set`
 
-Nothing is locked: a values file can retarget the operator image or replace the
-storage topology outright.
+Nothing is locked: a values file can retarget the operator image or add to the
+storage topology. Named lists such as `cephClusterSpec.storage.nodes` merge by
+each entry's `name` rather than replacing the list, so naming an existing node
+adds to its devices rather than swapping them, and naming a new one adds a
+node alongside rooket's iSCSI-pinned ones. To actually replace such a list, set
+it to `null` in a lower-priority layer and re-add it in a higher one — that
+needs two layers, so it can't be done within a single sticky file.
 
 ```console
 $ rooket values show cluster          # what would be deployed
