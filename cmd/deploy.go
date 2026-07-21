@@ -59,6 +59,9 @@ Example:
 		if err := installRookCephCluster(dir); err != nil {
 			return err
 		}
+		if err := installProfilesChart(dir); err != nil {
+			return err
+		}
 		switchKubectlNamespace("rook-ceph")
 		return nil
 	},
@@ -103,6 +106,9 @@ Example:
 			return err
 		}
 		if err := installRookCephCluster(dir); err != nil {
+			return err
+		}
+		if err := installProfilesChart(dir); err != nil {
 			return err
 		}
 		switchKubectlNamespace("rook-ceph")
