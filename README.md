@@ -128,6 +128,49 @@ $ rooket k <kubectl args>                            # kubectl wrapper ('k' = 'k
 $ export KUBECONFIG="$(rooket kubeconfig --path)"    # or point your own tools at it
 ```
 
+## Chart values and profiles
+
+rooket composes the Helm values for each chart from layers, lowest first:
+
+1. the chart's own `values.yaml`
+2. rooket's generated base (image refs, OSD device pinning, dev-host cpu trims)
+3. `<rook clone>/.rooket/values/<chart>.yaml` — sticky, this clone
+4. active profiles, in selection order
+5. `-f` files, then `--set`
+
+Nothing is locked: a values file can retarget the operator image or replace the
+storage topology outright.
+
+```console
+$ rooket values show cluster          # what would be deployed
+$ rooket values show cluster --layers # ...and which layer set each key
+$ rooket values edit cluster          # $EDITOR, seeded with the generated base
+$ rooket values profiles              # available profiles, active ones marked *
+$ rooket values profiles fork rgw     # copy a built-in to hack on
+```
+
+Profiles bundle values overrides with Kubernetes resources the rook charts do
+not template. Built-ins: `rbd` (PVC + pod on the default `ceph-block` class),
+`rgw` (object store user, OBC, s3 client pod), and `nfs` (enables the NFS CSI
+driver, a CephNFS server, and a pod mounting an export).
+
+```console
+$ rooket up --with rgw                # sticky list plus rgw
+$ rooket up --with-only rbd           # rbd alone, this run
+```
+
+Enable profiles for a clone by listing them in `.rooket/config.yaml`; later
+entries win when two profiles set the same key.
+
+```yaml
+profiles: [rbd, rgw]
+```
+
+Drop any manifest into `.rooket/templates/` and it is installed alongside the
+active profiles' resources — and pruned when you delete the file. Both live in
+a generated `rooket-profiles` Helm release, so removing a source removes its
+resources.
+
 ## Commands
 
 | Command | Purpose |
