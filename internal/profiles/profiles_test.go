@@ -101,6 +101,67 @@ func TestListIncludesBuiltInsAndUsers(t *testing.T) {
 	}
 }
 
+func TestListShadowsBuiltInWithUserProfile(t *testing.T) {
+	dir := t.TempDir()
+	writeProfile(t, dir, "rbd", "shadowed", "", "")
+
+	got, err := List(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var matches []Profile
+	for _, p := range got {
+		if p.Name == "rbd" {
+			matches = append(matches, p)
+		}
+	}
+	if len(matches) != 1 {
+		t.Fatalf(`List returned %d entries named "rbd", want exactly 1: %#v`, len(matches), matches)
+	}
+	if matches[0].BuiltIn || matches[0].Description != "shadowed" {
+		t.Errorf("List did not shadow the built-in: %+v", matches[0])
+	}
+}
+
+func TestListWithoutUserDir(t *testing.T) {
+	got, err := List(filepath.Join(t.TempDir(), "does-not-exist"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	seen := map[string]bool{}
+	for _, p := range got {
+		seen[p.Name] = true
+	}
+	if !seen["rbd"] {
+		t.Errorf("List missing built-in %q with no user dir present: %#v", "rbd", seen)
+	}
+}
+
+// withBuiltinFS swaps the package's built-in filesystem for the duration of
+// a test, restoring it on cleanup. Tests are not run in parallel in this
+// package, so the swap is safe.
+func withBuiltinFS(t *testing.T, root string) {
+	t.Helper()
+	orig := builtinFS
+	builtinFS = os.DirFS(root)
+	t.Cleanup(func() { builtinFS = orig })
+}
+
+func TestLoadAndListDoNotRecurseOnUnloadableBuiltIn(t *testing.T) {
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, "builtin", "broken"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	withBuiltinFS(t, root)
+
+	if _, err := List(t.TempDir()); err == nil {
+		t.Error("List should error on an unloadable built-in profile, not recurse")
+	}
+	if _, err := Load(t.TempDir(), "does-not-exist"); err == nil {
+		t.Error("Load should error on an unknown name, not recurse")
+	}
+}
+
 func TestFork(t *testing.T) {
 	dir := t.TempDir()
 	out, err := Fork(dir, "rbd")

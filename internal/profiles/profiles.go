@@ -15,7 +15,11 @@ import (
 )
 
 //go:embed all:builtin
-var builtinFS embed.FS
+var embeddedBuiltinFS embed.FS
+
+// builtinFS is an fs.FS (rather than the concrete embed.FS above) so tests in
+// this package can substitute a broken filesystem to exercise error paths.
+var builtinFS fs.FS = embeddedBuiltinFS
 
 // Reserved is the prefix rooket gives the clone's own templates in the
 // generated chart, so no profile may claim it.
@@ -46,30 +50,45 @@ func Load(userDir, name string) (Profile, error) {
 	if err == nil && fsHasFile(sub, "profile.yaml") {
 		return fromFS(sub, name, true)
 	}
-	avail, _ := List(userDir)
-	names := make([]string, 0, len(avail))
-	for _, p := range avail {
-		names = append(names, p.Name)
+	names, err := availableNames(userDir)
+	if err != nil {
+		return Profile{}, fmt.Errorf("unknown profile %q: %w", name, err)
 	}
 	return Profile{}, fmt.Errorf("unknown profile %q (available: %s)", name, strings.Join(names, ", "))
 }
 
 func List(userDir string) ([]Profile, error) {
-	byName := map[string]Profile{}
+	names, err := availableNames(userDir)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]Profile, 0, len(names))
+	for _, name := range names {
+		p, err := Load(userDir, name)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, p)
+	}
+	return out, nil
+}
+
+// availableNames returns the sorted, deduplicated set of profile names
+// discoverable across the built-in and user directories, without parsing any
+// profile.yaml. It is the single source of truth for "what profiles exist"
+// used by both List and Load's unknown-name error, so neither has to load a
+// profile just to find out its name is valid.
+func availableNames(userDir string) ([]string, error) {
+	byName := map[string]struct{}{}
 
 	builtins, err := fs.ReadDir(builtinFS, "builtin")
 	if err != nil {
 		return nil, fmt.Errorf("read embedded profiles: %w", err)
 	}
 	for _, e := range builtins {
-		if !e.IsDir() {
-			continue
+		if e.IsDir() {
+			byName[e.Name()] = struct{}{}
 		}
-		p, err := Load(userDir, e.Name())
-		if err != nil {
-			return nil, err
-		}
-		byName[e.Name()] = p
 	}
 
 	entries, err := os.ReadDir(userDir)
@@ -77,22 +96,17 @@ func List(userDir string) ([]Profile, error) {
 		return nil, fmt.Errorf("read %s: %w", userDir, err)
 	}
 	for _, e := range entries {
-		if !e.IsDir() || e.Name() == Reserved {
-			continue
+		if e.IsDir() && e.Name() != Reserved {
+			byName[e.Name()] = struct{}{}
 		}
-		p, err := Load(userDir, e.Name())
-		if err != nil {
-			return nil, err
-		}
-		byName[e.Name()] = p
 	}
 
-	out := make([]Profile, 0, len(byName))
-	for _, p := range byName {
-		out = append(out, p)
+	names := make([]string, 0, len(byName))
+	for n := range byName {
+		names = append(names, n)
 	}
-	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
-	return out, nil
+	sort.Strings(names)
+	return names, nil
 }
 
 // Fork copies a built-in profile into the user directory so it can be edited.
