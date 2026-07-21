@@ -35,6 +35,10 @@ appVersion: "0.0.0"
 // Render writes a chart holding every source's templates and reports whether
 // any were written. Helm owns their lifecycle, so a resource whose source is
 // gone is pruned on the next upgrade rather than leaking as kubectl apply would.
+//
+// On error, dir may already contain Chart.yaml, values.yaml, and any
+// templates written before the failure: Render does not clean up after
+// itself, so a caller must not assume a failed Render left dir untouched.
 func Render(dir string, ctx Context, sources []Source) (bool, error) {
 	if dir == "" {
 		return false, fmt.Errorf("dir must not be empty")
@@ -65,6 +69,8 @@ func Render(dir string, ctx Context, sources []Source) (bool, error) {
 		for n := range s.Files {
 			names = append(names, n)
 		}
+		// Sorted so a collision error deterministically names the same
+		// already-written source across runs, not whichever ran first.
 		sort.Strings(names)
 		for _, n := range names {
 			out := filepath.Join(tmplDir, s.Prefix+"-"+n)

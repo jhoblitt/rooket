@@ -110,7 +110,7 @@ func TestRenderEmptyDirError(t *testing.T) {
 	}
 }
 
-func TestRenderDetectesPathCollision(t *testing.T) {
+func TestRenderDetectsPathCollision(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "chart")
 	_, err := Render(dir, Context{}, []Source{
 		{Prefix: "a", Files: map[string][]byte{"b-c.yaml": []byte("kind: ConfigMap\n")}},
@@ -124,7 +124,7 @@ func TestRenderDetectesPathCollision(t *testing.T) {
 	}
 }
 
-func TestRenderDeterministicFileOrdering(t *testing.T) {
+func TestRenderWritesAllFilesInMultiFileSource(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "chart")
 	ok, err := Render(dir, Context{}, []Source{
 		{Prefix: "p", Files: map[string][]byte{
