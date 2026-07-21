@@ -128,9 +128,7 @@ func deploySetup(cmd *cobra.Command) (string, error) {
 	if deployKubeContext == "" {
 		deployKubeContext = "kind-" + name
 	}
-	if cmd.Flags().Changed("with-only") {
-		deployWithOnlySet = true
-	}
+	applyWithOnlyGuard(cmd.Flags().Changed("with-only"))
 	if deployHelmEnv, err = helmEnv(name, "rooket"); err != nil {
 		return "", err
 	}
@@ -148,6 +146,18 @@ func deploySetup(cmd *cobra.Command) (string, error) {
 		return "", fmt.Errorf("get working directory: %w", err)
 	}
 	return cwd, nil
+}
+
+// applyWithOnlyGuard sets deployWithOnlySet when deployCmd's own --with-only
+// flag was changed. When it was not changed, an already-true deployWithOnlySet
+// is left alone: 'rooket up' sets it directly before calling deployCmd.RunE,
+// and deployCmd's own flag is unset on that path, so an unconditional
+// assignment here would erase what 'up' forwarded and silently deploy the
+// wrong profiles.
+func applyWithOnlyGuard(changed bool) {
+	if changed {
+		deployWithOnlySet = true
+	}
 }
 
 func installRookCephOperator(dir string) error {

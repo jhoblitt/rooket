@@ -24,13 +24,17 @@ func TestOperatorBase(t *testing.T) {
 		got := OperatorBase(OperatorInput{
 			ImageRepo: "localhost:5001/rook/ceph", ImageTag: "master", Digest: "sha256:abc",
 		})
-		img := got["image"].(map[string]any)
-		if img["pullPolicy"] != "Always" {
-			t.Errorf("pullPolicy = %v, want Always", img["pullPolicy"])
+		want := map[string]any{
+			"image": map[string]any{
+				"repository": "localhost:5001/rook/ceph",
+				"tag":        "master",
+				"pullPolicy": "Always",
+			},
+			"csi":         map[string]any{"provisionerReplicas": 1},
+			"annotations": map[string]any{"rooket-image-digest": "sha256:abc"},
 		}
-		ann := got["annotations"].(map[string]any)
-		if ann["rooket-image-digest"] != "sha256:abc" {
-			t.Errorf("annotation = %v", ann["rooket-image-digest"])
+		if !reflect.DeepEqual(got, want) {
+			t.Errorf("got  %#v\nwant %#v", got, want)
 		}
 	})
 }

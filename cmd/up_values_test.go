@@ -4,14 +4,15 @@ import "testing"
 
 func TestUpForwardsValueFlags(t *testing.T) {
 	t.Cleanup(func() {
-		upWith, upWithOnly, upValueFiles = nil, nil, nil
-		deployWith, deployWithOnly, deployValueFiles = nil, nil, nil
+		upWith, upWithOnly, upValueFiles, upSets = nil, nil, nil, nil
+		deployWith, deployWithOnly, deployValueFiles, deploySets = nil, nil, nil, nil
 		deployWithOnlySet = false
 	})
 
 	upWith = []string{"rgw"}
 	upWithOnly = []string{"rbd"}
 	upValueFiles = []string{"/tmp/x.yaml"}
+	upSets = []string{"a=b"}
 
 	applyUpValueFlags(true)
 
@@ -26,5 +27,8 @@ func TestUpForwardsValueFlags(t *testing.T) {
 	}
 	if len(deployValueFiles) != 1 {
 		t.Errorf("deployValueFiles = %#v", deployValueFiles)
+	}
+	if len(deploySets) != 1 || deploySets[0] != "a=b" {
+		t.Errorf("deploySets = %#v", deploySets)
 	}
 }

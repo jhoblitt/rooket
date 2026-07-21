@@ -120,6 +120,18 @@ func TestClusterStorageNodesUnresolvedDeviceErrors(t *testing.T) {
 	}
 }
 
+func TestApplyWithOnlyGuardPreservesUpForwardedValue(t *testing.T) {
+	t.Cleanup(func() { deployWithOnlySet = false })
+
+	// Simulate 'rooket up' having already forwarded --with-only before
+	// calling deployCmd.RunE, on a path where deployCmd's own flag is unset.
+	deployWithOnlySet = true
+	applyWithOnlyGuard(false)
+	if !deployWithOnlySet {
+		t.Error("deployWithOnlySet was cleared though deploy's own --with-only flag was not changed")
+	}
+}
+
 func TestHelmValueArgs(t *testing.T) {
 	t.Run("no sets", func(t *testing.T) {
 		got := helmValueArgs("/values/operator.yaml", nil)

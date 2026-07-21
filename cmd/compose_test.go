@@ -3,6 +3,7 @@ package cmd
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/jhoblitt/rooket/internal/clone"
@@ -110,6 +111,57 @@ func TestComposeChartLayerOrder(t *testing.T) {
 	}
 	if got.Provenance["b"] != "profile:p" {
 		t.Errorf("provenance[b] = %q", got.Provenance["b"])
+	}
+}
+
+func TestComposeChartMissingValuesFileErrors(t *testing.T) {
+	root := t.TempDir()
+	d := clone.Open(root)
+	if err := d.Ensure(); err != nil {
+		t.Fatal(err)
+	}
+	missing := filepath.Join(root, "does-not-exist.yaml")
+
+	_, err := composeChart(chartCluster, map[string]any{}, d, nil, []string{missing})
+	if err == nil {
+		t.Fatal("want an error for a missing -f file")
+	}
+	if !strings.Contains(err.Error(), missing) {
+		t.Errorf("error %q does not name the missing path %q", err.Error(), missing)
+	}
+}
+
+func TestComposeChartProfileOrder(t *testing.T) {
+	root := t.TempDir()
+	d := clone.Open(root)
+	if err := d.Ensure(); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := composeChart(chartCluster,
+		map[string]any{"c": "from-base"},
+		d,
+		[]profiles.Profile{
+			{
+				Name:   "first",
+				Values: map[string]map[string]any{chartCluster: {"c": "from-first"}},
+			},
+			{
+				Name:   "second",
+				Values: map[string]map[string]any{chartCluster: {"c": "from-second"}},
+			},
+		},
+		nil,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if got.Merged["c"] != "from-second" {
+		t.Errorf("c = %v, want from-second (later profile should win)", got.Merged["c"])
+	}
+	if got.Provenance["c"] != "profile:second" {
+		t.Errorf("provenance[c] = %q, want profile:second", got.Provenance["c"])
 	}
 }
 
