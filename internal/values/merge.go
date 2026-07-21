@@ -1,6 +1,9 @@
 package values
 
-import "fmt"
+import (
+	"fmt"
+	"strings"
+)
 
 // Layer is one contributor to a chart's values, named for provenance reporting.
 type Layer struct {
@@ -34,7 +37,7 @@ func mergeMap(dst, src map[string]any, path, layer string, prov map[string]strin
 		switch tv := v.(type) {
 		case nil:
 			delete(dst, k)
-			delete(prov, p)
+			deleteProvSubtree(prov, p)
 		case map[string]any:
 			sub, ok := dst[k].(map[string]any)
 			if !ok {
@@ -43,13 +46,16 @@ func mergeMap(dst, src map[string]any, path, layer string, prov map[string]strin
 			}
 			mergeMap(sub, tv, p, layer, prov)
 		case []any:
-			if cur, ok := dst[k].([]any); ok && namedList(cur) && namedList(tv) {
+			cur, curOK := dst[k].([]any)
+			if namedList(tv) && (!curOK || namedList(cur)) {
 				dst[k] = mergeNamed(cur, tv, p, layer, prov)
 				continue
 			}
+			deleteProvSubtree(prov, p)
 			dst[k] = deepCopy(tv)
 			prov[p] = layer
 		default:
+			deleteProvSubtree(prov, p)
 			dst[k] = v
 			prov[p] = layer
 		}
@@ -97,6 +103,20 @@ func mergeNamed(dst, src []any, path, layer string, prov map[string]string) []an
 		out = append(out, nm)
 	}
 	return out
+}
+
+// deleteProvSubtree removes the provenance entry at p along with every
+// descendant entry (keys prefixed with p+"." or p+"["), so a deleted or
+// wholesale-replaced subtree doesn't leave attributions for values that no
+// longer exist in the merged output.
+func deleteProvSubtree(prov map[string]string, p string) {
+	delete(prov, p)
+	dot, bracket := p+".", p+"["
+	for k := range prov {
+		if strings.HasPrefix(k, dot) || strings.HasPrefix(k, bracket) {
+			delete(prov, k)
+		}
+	}
 }
 
 func deepCopy(v any) any {

@@ -122,15 +122,79 @@ func TestMergeProvenance(t *testing.T) {
 	})
 
 	want := map[string]string{
-		"m.a":               "base",
-		"m.b":               "profile:rgw",
-		"pools[one].name":   "profile:rgw",
-		"pools[one].size":   "profile:rgw",
+		"m.a":             "base",
+		"m.b":             "profile:rgw",
+		"pools[one].name": "profile:rgw",
+		"pools[one].size": "profile:rgw",
 	}
 	for path, layer := range want {
 		if prov[path] != layer {
 			t.Errorf("provenance[%q] = %q, want %q", path, prov[path], layer)
 		}
+	}
+}
+
+func TestMergeProvenanceFirstTouchNamedList(t *testing.T) {
+	_, prov := Merge([]Layer{
+		{Name: "base", Values: map[string]any{
+			"cephBlockPools": []any{
+				map[string]any{"name": "replicapool", "spec": map[string]any{
+					"replicated": map[string]any{"size": 3},
+				}},
+			},
+		}},
+	})
+
+	want := map[string]string{
+		"cephBlockPools[replicapool].name":                 "base",
+		"cephBlockPools[replicapool].spec.replicated.size": "base",
+	}
+	for path, layer := range want {
+		if prov[path] != layer {
+			t.Errorf("provenance[%q] = %q, want %q", path, prov[path], layer)
+		}
+	}
+	if _, ok := prov["cephBlockPools"]; ok {
+		t.Errorf("provenance has coarse entry %q = %q, want only per-element leaf paths", "cephBlockPools", prov["cephBlockPools"])
+	}
+}
+
+func TestMergeProvenanceStaleDescendantsRemoved(t *testing.T) {
+	_, prov := Merge([]Layer{
+		{Name: "layer1", Values: map[string]any{"m": map[string]any{"a": 1, "b": 2}}},
+		{Name: "layer2", Values: map[string]any{"m": nil}},
+		{Name: "layer3", Values: map[string]any{"m": map[string]any{"c": 3}}},
+	})
+
+	if _, ok := prov["m.a"]; ok {
+		t.Errorf("provenance still has stale entry m.a = %q after m was deleted and replaced", prov["m.a"])
+	}
+	if _, ok := prov["m.b"]; ok {
+		t.Errorf("provenance still has stale entry m.b = %q after m was deleted and replaced", prov["m.b"])
+	}
+	if got, want := prov["m.c"], "layer3"; got != want {
+		t.Errorf("provenance[%q] = %q, want %q", "m.c", got, want)
+	}
+}
+
+func TestMergeProvenanceStaleDescendantsAfterListReplace(t *testing.T) {
+	// layer1 and layer2 both touch "one" so mergeNamed runs regardless of the
+	// first-touch fix, keeping this test independent of finding 1.
+	_, prov := Merge([]Layer{
+		{Name: "layer1", Values: map[string]any{"l": []any{
+			map[string]any{"name": "one", "size": 1},
+		}}},
+		{Name: "layer2", Values: map[string]any{"l": []any{
+			map[string]any{"name": "one", "size": 2},
+		}}},
+		{Name: "layer3", Values: map[string]any{"l": []any{9}}},
+	})
+
+	if _, ok := prov["l[one].size"]; ok {
+		t.Errorf("provenance still has stale entry l[one].size = %q after l was replaced by an unnamed list", prov["l[one].size"])
+	}
+	if got, want := prov["l"], "layer3"; got != want {
+		t.Errorf("provenance[%q] = %q, want %q", "l", got, want)
 	}
 }
 
