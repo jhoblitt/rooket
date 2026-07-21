@@ -12,6 +12,10 @@ func TestNodePrepScript(t *testing.T) {
 
 	for _, want := range []string{
 		"mount -o remount,rw /sys",
+		`systemctl show -p DefaultTasksMax --value`,
+		`DefaultTasksMax=infinity\n' > /etc/systemd/system.conf.d/90-rooket-tasksmax.conf`,
+		"systemctl daemon-reload",
+		`ROOKET_FAIL:raise systemd DefaultTasksMax`,
 		"command -v vgs",
 		"command -v cryptsetup",
 		"apt-get install -y lvm2 cryptsetup",
