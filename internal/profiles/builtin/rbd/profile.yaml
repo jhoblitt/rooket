@@ -1,0 +1,1 @@
+description: RBD — a PVC on the default ceph-block StorageClass and a pod writing to it
