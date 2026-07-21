@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -42,7 +43,7 @@ var valuesEditCmd = &cobra.Command{
 				return err
 			}
 			if err := editValues(cloneDir.ValuesPath(chart), seed, launchEditor); err != nil {
-				return err
+				return fmt.Errorf("editing %s (earlier charts in this run, if any, were already saved): %w", chart, err)
 			}
 		}
 		return nil
@@ -111,14 +112,49 @@ func editValues(path string, seed []byte, edit func(string) error) error {
 			if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 				return err
 			}
-			if err := os.WriteFile(path, data, 0o644); err != nil {
-				return fmt.Errorf("write %s: %w", path, err)
+			if err := writeFileAtomic(path, data); err != nil {
+				return err
 			}
 			run.Printf("==> wrote %s\n", path)
 			return nil
 		}
-		run.Printf("==> %v\n==> reopening the editor\n", err)
+		detail := error(err)
+		if u := errors.Unwrap(err); u != nil {
+			detail = u
+		}
+		run.Printf("==> %s: %v\n==> reopening the editor\n", path, detail)
 	}
+}
+
+// writeFileAtomic replaces path with data via write-then-rename rather than an
+// in-place truncate, so a write failure (e.g. ENOSPC, a kill mid-write) can't
+// leave path holding a truncated blend of the old and new content; the
+// rename target is always either the old file or the complete new one. The
+// sibling must live in path's own directory, since rename fails across
+// filesystems.
+func writeFileAtomic(path string, data []byte) error {
+	dir := filepath.Dir(path)
+	tmp, err := os.CreateTemp(dir, filepath.Base(path)+".tmp-*")
+	if err != nil {
+		return fmt.Errorf("create temp file for %s: %w", path, err)
+	}
+	defer os.Remove(tmp.Name())
+
+	if err := tmp.Chmod(0o644); err != nil {
+		tmp.Close()
+		return fmt.Errorf("write %s: %w", path, err)
+	}
+	if _, err := tmp.Write(data); err != nil {
+		tmp.Close()
+		return fmt.Errorf("write %s: %w", path, err)
+	}
+	if err := tmp.Close(); err != nil {
+		return fmt.Errorf("write %s: %w", path, err)
+	}
+	if err := os.Rename(tmp.Name(), path); err != nil {
+		return fmt.Errorf("write %s: %w", path, err)
+	}
+	return nil
 }
 
 func launchEditor(path string) error {
