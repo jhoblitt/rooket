@@ -19,9 +19,12 @@ func TestNodePrepScript(t *testing.T) {
 		"command -v vgs",
 		"command -v cryptsetup",
 		"apt-get install -y lvm2 cryptsetup",
-		"dmsetup mknodes",
-		"rm -f '/dev/sdb' || { echo 'ROOKET_FAIL:mask foreign OSD device /dev/sdb'; rc=1; }",
-		"rm -f '/dev/sde' || { echo 'ROOKET_FAIL:mask foreign OSD device /dev/sde'; rc=1; }",
+		// Device mask: enumerate every block AND char node on the /dev tmpfs
+		// (find -xdev spares the devpts/shm submounts) and remove all but the
+		// allowlist plus this node's own OSD disks.
+		`for dev in $(find /dev -xdev \( -type b -o -type c \) 2>/dev/null); do`,
+		`case " ` + allowedDevs + ` /dev/sdb /dev/sde " in *" $dev "*) continue ;; esac`,
+		`rm -f "$dev" || { echo "ROOKET_FAIL:mask host device $dev"; rc=1; }`,
 		"echo ROOKET_DONE",
 		"exit $rc",
 	} {
@@ -30,8 +33,35 @@ func TestNodePrepScript(t *testing.T) {
 		}
 	}
 
-	if noMask := nodePrepScript(nil); strings.Contains(noMask, "rm -f") {
-		t.Errorf("script with no foreign devices should not mask anything:\n%s", noMask)
+	// The allowlist must keep the essentials and never a host-access device.
+	for _, keep := range []string{"/dev/null", "/dev/kmsg", "/dev/net/tun", "/dev/mapper/control"} {
+		if !strings.Contains(allowedDevs, keep) {
+			t.Errorf("allowedDevs missing essential %q: %s", keep, allowedDevs)
+		}
+	}
+	for _, banned := range []string{"/dev/mem", "/dev/kvm", "/dev/sd", "/dev/nvme", "/dev/sg", "/dev/dm-", "/dev/snapshot"} {
+		if strings.Contains(allowedDevs, banned) {
+			t.Errorf("allowedDevs must not allow host device %q: %s", banned, allowedDevs)
+		}
+	}
+
+	// The obsolete dmsetup mknodes workaround must be gone: materialising the
+	// host's dm nodes is exactly what exposed the host root LVM to the node.
+	if strings.Contains(script, "dmsetup mknodes") {
+		t.Errorf("script must not run dmsetup mknodes:\n%s", script)
+	}
+
+	// A node with no OSD disks (the control-plane) still runs the mask loop and
+	// keeps the allowlist, but names no disk to keep.
+	noKeep := nodePrepScript(nil)
+	if !strings.Contains(noKeep, `for dev in $(find /dev -xdev \( -type b -o -type c \) 2>/dev/null); do`) {
+		t.Errorf("no-keep script should still mask devices:\n%s", noKeep)
+	}
+	if !strings.Contains(noKeep, "/dev/null /dev/zero") {
+		t.Errorf("no-keep script should keep the allowlist:\n%s", noKeep)
+	}
+	if strings.Contains(noKeep, "/dev/sd") {
+		t.Errorf("no-keep script should name no disk to keep:\n%s", noKeep)
 	}
 }
 
@@ -84,15 +114,15 @@ func TestEvalWrapperSurvivesStdinReaders(t *testing.T) {
 
 func TestNodeScriptErrors(t *testing.T) {
 	t.Run("markers become per-operation errors", func(t *testing.T) {
-		out := "junk\nROOKET_FAIL:dmsetup mknodes\nmore\nROOKET_FAIL:mask foreign OSD device /dev/sdb\nROOKET_DONE\n"
+		out := "junk\nROOKET_FAIL:remount /sys read-write\nmore\nROOKET_FAIL:mask host device /dev/nvme0n1\nROOKET_DONE\n"
 		errs := nodeScriptErrors("worker2", out, errors.New("exit status 1"))
 		if len(errs) != 2 {
 			t.Fatalf("got %d errors, want 2: %v", len(errs), errs)
 		}
-		if got := errs[0].Error(); got != "dmsetup mknodes on node worker2" {
+		if got := errs[0].Error(); got != "remount /sys read-write on node worker2" {
 			t.Errorf("errs[0] = %q", got)
 		}
-		if got := errs[1].Error(); got != "mask foreign OSD device /dev/sdb on node worker2" {
+		if got := errs[1].Error(); got != "mask host device /dev/nvme0n1 on node worker2" {
 			t.Errorf("errs[1] = %q", got)
 		}
 	})

@@ -269,23 +269,31 @@ func Nodes(w io.Writer, clusterName string) ([]string, error) {
 // PrepareNodes readies every node for Rook OSD provisioning:
 //   - remounts /sys read-write (kind mounts it read-only, but ceph-volume and
 //     kernel RBD mapping must write it),
+//   - raises systemd DefaultTasksMax so a pod's thread pool (notably rgw's) is
+//     not capped at the node's derived default,
 //   - installs lvm2 and cryptsetup when missing (absent from kindest/node
 //     images, but required for LVM-backed and encrypted OSDs),
-//   - runs 'dmsetup mknodes' to create /dev/mapper entries for the host's
-//     device-mapper devices: the node shares the host's /sys (which advertises
-//     those dm devices) but not its /dev/mapper, so ceph-volume's full-device
-//     scan would otherwise crash on the missing nodes and provision no OSDs.
-//   - removes every other worker's OSD device node from this node's /dev so each
-//     node sees only its own disk. The nodes share the host's /dev, so otherwise
-//     each node's global ceph-volume scan adopts all OSDs and Rook mis-attributes
-//     them onto one node. /dev is a per-container tmpfs (so the removal is
-//     node-local) and Rook's OSD pods bind-mount the node's /dev, so the mask
-//     reaches ceph-volume. ownDevsByNode maps node name -> the OSD device(s) it keeps.
+//   - prunes this node's /dev to an allowlist plus the node's own OSD disk(s),
+//     removing every other block or char device node. kind runs the node
+//     privileged and podman (or docker) then fills its /dev with a node for
+//     EVERY host device — the host's root LVM and system nvme, other clusters'
+//     iSCSI disks, the char passthrough paths to them (/dev/sg*, the nvme
+//     controller), and unrelated host hardware (/dev/mem, /dev/kvm, ...) — all
+//     openable from the node and from the pods that bind-mount its /dev. Keeping
+//     only allowedDevs (see nodePrepScript) plus the node's own disk holds the
+//     host's real devices out of reach AND stops Rook mis-attributing OSDs: its
+//     non-PVC inventory is a global ceph-volume scan that would otherwise adopt
+//     every visible disk and pin all OSDs onto one node. /dev is a per-node
+//     tmpfs and no udevd runs, so the prune is node-local and stays put; rooket
+//     OSDs are raw bluestore on the whole disk (no LVM child), so keeping the
+//     node's own /dev/sdX suffices. ownDevsByNode maps node name -> the OSD
+//     device(s) it keeps; a node absent from the map (the control-plane) keeps
+//     only the allowlist.
 //
 // Failures across all nodes are collected and returned together (not just
 // logged), so creation aborts before deploying onto a mis-prepared node — for
-// example one whose foreign-device mask failed and can still see another
-// worker's OSD disk. The /run/udev and /dev/disk bind-mounts live in the kind
+// example one whose device mask failed and can still see another worker's OSD
+// disk or a host disk. The /run/udev and /dev/disk bind-mounts live in the kind
 // config, not here.
 //
 // Each node runs ONE shell script (piped over stdin, so the trace stays
@@ -297,26 +305,10 @@ func PrepareNodes(w io.Writer, eng engine.Engine, clusterName string, ownDevsByN
 		return err
 	}
 
-	allOSDDevs := map[string]bool{}
-	for _, devs := range ownDevsByNode {
-		for _, d := range devs {
-			allOSDDevs[d] = true
-		}
-	}
-
 	return forEachNode(w, nodes, func(node string, out *bytes.Buffer) []error {
-		keep := map[string]bool{}
-		for _, d := range ownDevsByNode[node] {
-			keep[d] = true
-		}
-		var foreign []string
-		for dev := range allOSDDevs {
-			if !keep[dev] {
-				foreign = append(foreign, dev)
-			}
-		}
-		sort.Strings(foreign)
-		return runNodeScript(eng, out, node, nodePrepScript(foreign))
+		keep := append([]string(nil), ownDevsByNode[node]...)
+		sort.Strings(keep)
+		return runNodeScript(eng, out, node, nodePrepScript(keep))
 	})
 }
 
@@ -379,10 +371,36 @@ func forEachNode(w io.Writer, nodes []string, fn func(node string, out *bytes.Bu
 	return errors.Join(errs...)
 }
 
+// allowedDevs is the allowlist of device-node paths kept in every node's /dev;
+// nodePrepScript removes every other block or char node, plus per node the
+// node's own OSD disk. It is the minimal set a kind node needs: the OCI standard
+// devices (null/zero/full/random/urandom/tty/console/ptmx) plus the kernel-log
+// (kmsg), FUSE, CNI tun, device-mapper-control and loop-control nodes. None of
+// these is a host-storage, -memory, or -hardware access path — unlike the host
+// disks, /dev/mem, /dev/kvm, /dev/sg*, etc. that the prune strips. Runtime nodes
+// like CSI's /dev/rbdN are created after prep and so are never pruned.
+const allowedDevs = "/dev/null /dev/zero /dev/full /dev/random /dev/urandom " +
+	"/dev/tty /dev/console /dev/ptmx /dev/kmsg /dev/fuse /dev/net/tun " +
+	"/dev/mapper/control /dev/loop-control"
+
 // nodePrepScript renders the per-node preparation script. Operations do NOT
 // stop at the first failure — a failed remount must not skip the
 // safety-critical device masking — so each failure emits a ROOKET_FAIL
 // marker that nodeScriptErrors converts back into a per-operation error.
+//
+// The tail of the script is the device mask. kind runs the node privileged and
+// podman — and docker — then populate its /dev with a node for EVERY host
+// device: not just the block disks but the char passthrough paths to them
+// (/dev/sg*, the NVMe controller) and unrelated host hardware (/dev/mem,
+// /dev/kvm, /dev/snapshot, ...). Rather than deny-list those, the prune keeps an
+// allowlist — allowedDevs, the minimal set kubelet, containerd, the CNI and
+// ceph-volume need — plus the node's own OSD disk(s), and removes every other
+// block or char device node. 'find -xdev' stays on the /dev tmpfs, so the
+// devpts/shm/mqueue submounts (and the ptys of live exec sessions) are left
+// alone; a shell 'case' membership test against the space-padded allow+keep set
+// spares the kept nodes. An empty keep-set (the control-plane) keeps only the
+// allowlist. rooket OSDs are whole raw disks, so an exact /dev/sdX match
+// suffices — no realpath needed.
 //
 // lvm2 and cryptsetup are absent from kindest/node images but required for
 // LVM-backed and encrypted OSDs; nodes of a reused cluster already carry
@@ -401,7 +419,7 @@ func forEachNode(w io.Writer, nodes []string, fn func(node string, out *bytes.Bu
 // pids cap remains the real ceiling. The 90- prefix keeps a stock kind-image
 // drop-in from lexicographically overriding it, and the post-reload check
 // fails loudly if something did. Guarded so warm reruns skip the reload.
-func nodePrepScript(foreignDevs []string) string {
+func nodePrepScript(keepDevs []string) string {
 	var b strings.Builder
 	b.WriteString(`rc=0
 mount -o remount,rw /sys || { echo "ROOKET_FAIL:remount /sys read-write"; rc=1; }
@@ -425,12 +443,13 @@ else
   done
   [ -n "$ok" ] || { echo "ROOKET_FAIL:install lvm2/cryptsetup"; rc=1; }
 fi
-dmsetup mknodes || { echo "ROOKET_FAIL:dmsetup mknodes"; rc=1; }
 `)
-	for _, dev := range foreignDevs {
-		marker := "ROOKET_FAIL:mask foreign OSD device " + dev
-		fmt.Fprintf(&b, "rm -f %s || { echo %s; rc=1; }\n", shellQuote(dev), shellQuote(marker))
-	}
+	keep := allowedDevs + " " + strings.Join(keepDevs, " ")
+	b.WriteString("for dev in $(find /dev -xdev \\( -type b -o -type c \\) 2>/dev/null); do\n")
+	fmt.Fprintf(&b, "  case \" %s \" in *\" $dev \"*) continue ;; esac\n", keep)
+	b.WriteString(`  rm -f "$dev" || { echo "ROOKET_FAIL:mask host device $dev"; rc=1; }
+done
+`)
 	b.WriteString("echo ROOKET_DONE\nexit $rc\n")
 	return b.String()
 }

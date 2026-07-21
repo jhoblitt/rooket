@@ -37,6 +37,12 @@ var _ = Describe("rooket up/down", Ordered, func() {
 		By("using no loop devices")
 		Expect(loopCount()).To(Equal(0))
 
+		By("masking the host's real devices from every node (allowlist prune)")
+		for _, node := range kindNodeNames() {
+			Expect(hostSensitiveDevsOnNode(node)).To(BeEmpty(),
+				"sensitive host devices still reachable from %s", node)
+		}
+
 		By("settling: mons quorate, mgr active, mds up, all OSDs up, PGs active+clean, not unhealthy")
 		Eventually(func(g Gomega) {
 			s := cephTool(g, "-s")
@@ -391,6 +397,32 @@ func osdNodes() []string {
 func loopCount() int {
 	n, _ := strconv.Atoi(strings.TrimSpace(enginePrivileged("losetup -a 2>/dev/null | wc -l")))
 	return n
+}
+
+// kindNodeNames returns the node container names of the rooket cluster.
+func kindNodeNames() []string {
+	cmd := exec.Command("kind", "get", "nodes", "--name", clusterName)
+	cmd.Env = append(os.Environ(), "KIND_EXPERIMENTAL_PROVIDER="+eng)
+	out, _ := cmd.Output()
+	return strings.Fields(string(out))
+}
+
+// hostSensitiveDevsOnNode returns any sensitive host device still reachable
+// from a kind node's /dev after the allowlist prune: block storage and its
+// ioctl passthrough paths (nvme block/char/generic, device-mapper, SCSI-generic
+// SG_IO and bsg, nbd, zram, and /dev/mapper entries other than the char
+// 'control'), plus host memory and hardware nodes (/dev/mem, /dev/kvm,
+// /dev/snapshot, tpm, hidraw, video, watchdog). A kind node needs none of these,
+// so any that survive would be openable from the node and from the pods that
+// bind-mount its /dev. /dev/bsg is matched by its contents, not the (harmless)
+// empty directory the prune leaves behind. The allowlist prune must leave none.
+func hostSensitiveDevsOnNode(node string) string {
+	o, _ := runOut(30*time.Second, eng, "exec", node, "sh", "-c",
+		`ls -d /dev/nvme* /dev/ng* /dev/dm-* /dev/sg[0-9]* /dev/bsg/* /dev/nbd* /dev/zram* `+
+			`/dev/mem /dev/kmem /dev/port /dev/kvm /dev/snapshot /dev/nvram `+
+			`/dev/tpm* /dev/hidraw* /dev/video* /dev/watchdog* 2>/dev/null; `+
+			`ls /dev/mapper 2>/dev/null | grep -v '^control$'`)
+	return strings.TrimSpace(o)
 }
 
 func pgsSettled(g Gomega) {
