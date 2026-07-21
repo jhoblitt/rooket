@@ -24,7 +24,8 @@ func OperatorBase(in OperatorInput) map[string]any {
 	// IfNotPresent, so a rebuild pushing the same tag would neither roll the
 	// Deployment nor beat a node-cached image. Pinning the registry's current
 	// digest as a pod-template annotation rolls the operator exactly when image
-	// content changed; always-pull is required for the roll to matter.
+	// content changed; always-pull is required for the roll to matter. The
+	// registry is on localhost, so the pull check is cheap.
 	if in.Digest != "" {
 		image["pullPolicy"] = "Always"
 		out["annotations"] = map[string]any{"rooket-image-digest": in.Digest}

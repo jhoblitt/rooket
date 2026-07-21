@@ -38,19 +38,20 @@ func TestOperatorBase(t *testing.T) {
 func TestClusterBase(t *testing.T) {
 	t.Run("resource trims always present", func(t *testing.T) {
 		got := ClusterBase(ClusterInput{OperatorNamespace: "rook-ceph"})
-		spec := got["cephClusterSpec"].(map[string]any)
-		res := spec["resources"].(map[string]any)
-		if res["mon"].(map[string]any)["requests"].(map[string]any)["cpu"] != "500m" {
-			t.Errorf("mon cpu = %#v", res["mon"])
+		want := map[string]any{
+			"operatorNamespace": "rook-ceph",
+			"toolbox":           map[string]any{"enabled": true},
+			"cephClusterSpec": map[string]any{
+				"mgr": map[string]any{"count": 1},
+				"resources": map[string]any{
+					"mon": map[string]any{"requests": map[string]any{"cpu": "500m"}},
+					"osd": map[string]any{"requests": map[string]any{"cpu": "500m"}},
+					"mgr": map[string]any{"requests": map[string]any{"cpu": "300m"}},
+				},
+			},
 		}
-		if spec["mgr"].(map[string]any)["count"] != 1 {
-			t.Errorf("mgr count = %#v", spec["mgr"])
-		}
-		if got["toolbox"].(map[string]any)["enabled"] != true {
-			t.Errorf("toolbox = %#v", got["toolbox"])
-		}
-		if _, ok := spec["storage"]; ok {
-			t.Error("storage must be absent when no nodes are given")
+		if !reflect.DeepEqual(got, want) {
+			t.Errorf("got  %#v\nwant %#v", got, want)
 		}
 	})
 
@@ -62,35 +63,60 @@ func TestClusterBase(t *testing.T) {
 				{Name: "c-worker2", Devices: []string{"/dev/sdc"}},
 			},
 		})
-		storage := got["cephClusterSpec"].(map[string]any)["storage"].(map[string]any)
-		if storage["useAllNodes"] != false || storage["useAllDevices"] != false {
-			t.Errorf("storage = %#v", storage)
+		want := map[string]any{
+			"operatorNamespace": "rook-ceph",
+			"toolbox":           map[string]any{"enabled": true},
+			"cephClusterSpec": map[string]any{
+				"mgr": map[string]any{"count": 1},
+				"resources": map[string]any{
+					"mon": map[string]any{"requests": map[string]any{"cpu": "500m"}},
+					"osd": map[string]any{"requests": map[string]any{"cpu": "500m"}},
+					"mgr": map[string]any{"requests": map[string]any{"cpu": "300m"}},
+				},
+				"storage": map[string]any{
+					"useAllNodes":   false,
+					"useAllDevices": false,
+					"nodes": []any{
+						map[string]any{
+							"name": "c-worker",
+							"devices": []any{
+								map[string]any{"name": "/dev/sdb"},
+							},
+						},
+						map[string]any{
+							"name": "c-worker2",
+							"devices": []any{
+								map[string]any{"name": "/dev/sdc"},
+							},
+						},
+					},
+				},
+			},
 		}
-		nodes := storage["nodes"].([]any)
-		if len(nodes) != 2 {
-			t.Fatalf("nodes = %#v", nodes)
-		}
-		first := nodes[0].(map[string]any)
-		if first["name"] != "c-worker" {
-			t.Errorf("node name = %v", first["name"])
-		}
-		devs := first["devices"].([]any)
-		if devs[0].(map[string]any)["name"] != "/dev/sdb" {
-			t.Errorf("devices = %#v", devs)
+		if !reflect.DeepEqual(got, want) {
+			t.Errorf("got  %#v\nwant %#v", got, want)
 		}
 	})
 }
 
 func TestCSIBase(t *testing.T) {
 	got := CSIBase()
-	drivers := got["drivers"].(map[string]any)
-	if drivers["rbd"].(map[string]any)["name"] != "rook-ceph.rbd.csi.ceph.com" {
-		t.Errorf("rbd = %#v", drivers["rbd"])
+	want := map[string]any{
+		"operatorConfig": map[string]any{"namespace": "rook-ceph"},
+		"drivers": map[string]any{
+			"rbd": map[string]any{
+				"name":           "rook-ceph.rbd.csi.ceph.com",
+				"snapshotPolicy": "none",
+			},
+			"cephfs": map[string]any{
+				"name":           "rook-ceph.cephfs.csi.ceph.com",
+				"snapshotPolicy": "none",
+			},
+			"nfs":    map[string]any{"enabled": false},
+			"nvmeof": map[string]any{"enabled": false},
+		},
 	}
-	if drivers["nfs"].(map[string]any)["enabled"] != false {
-		t.Errorf("nfs = %#v", drivers["nfs"])
-	}
-	if got["operatorConfig"].(map[string]any)["namespace"] != "rook-ceph" {
-		t.Errorf("operatorConfig = %#v", got["operatorConfig"])
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("got  %#v\nwant %#v", got, want)
 	}
 }
