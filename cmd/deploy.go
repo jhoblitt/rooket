@@ -31,6 +31,7 @@ var (
 	deployWithOnly     []string
 	deployWithOnlySet  bool
 	deployValueFiles   []string
+	deploySets         []string
 )
 
 var deployCmd = &cobra.Command{
@@ -174,13 +175,13 @@ func installRookCephOperator(dir string) error {
 		return err
 	}
 
-	if err := run.CmdWithEnv(deployHelmEnv, "helm",
+	args := append([]string{
 		"--kube-context", deployKubeContext,
 		"-n", "rook-ceph",
 		"upgrade", "--install", "--create-namespace",
 		deployOperatorName, chartPath,
-		"-f", valuesPath,
-	); err != nil {
+	}, helmValueArgs(valuesPath, deploySets)...)
+	if err := run.CmdWithEnv(deployHelmEnv, "helm", args...); err != nil {
 		return err
 	}
 
@@ -217,6 +218,20 @@ func writeComposed(chart string, base map[string]any, rookDir string) (string, e
 	}
 	path := filepath.Join(dir, chart+".yaml")
 	return path, c.write(path)
+}
+
+// helmValueArgs returns the "-f valuesPath" pair followed by a "--set entry"
+// pair for each set entry, in that order. --set is deliberately not merged
+// into rooket's own layering (see composeChart) — it is passed through to
+// helm verbatim so it keeps helm's own highest-precedence behavior, and
+// ordering it after -f here reflects that.
+func helmValueArgs(valuesPath string, sets []string) []string {
+	args := make([]string, 0, 2+2*len(sets))
+	args = append(args, "-f", valuesPath)
+	for _, s := range sets {
+		args = append(args, "--set", s)
+	}
+	return args
 }
 
 func deployValuesDir(cluster string) (string, error) {
@@ -260,17 +275,18 @@ func installCephCsiDrivers(dir string) error {
 		return err
 	}
 
+	csiArgs := append([]string{
+		"--kube-context", deployKubeContext,
+		"-n", "rook-ceph",
+		"upgrade", "--install",
+		"ceph-csi-drivers", "ceph-csi-drivers",
+		"--repo", "https://ceph.github.io/ceph-csi-operator",
+		"--version", version,
+	}, helmValueArgs(valuesPath, deploySets)...)
+
 	var installErr error
 	for attempt := 1; attempt <= 5; attempt++ {
-		if installErr = run.CmdWithEnv(deployHelmEnv, "helm",
-			"--kube-context", deployKubeContext,
-			"-n", "rook-ceph",
-			"upgrade", "--install",
-			"ceph-csi-drivers", "ceph-csi-drivers",
-			"--repo", "https://ceph.github.io/ceph-csi-operator",
-			"--version", version,
-			"-f", valuesPath,
-		); installErr == nil {
+		if installErr = run.CmdWithEnv(deployHelmEnv, "helm", csiArgs...); installErr == nil {
 			return nil
 		}
 		// The csi.ceph.io CRDs arrive with the rook-ceph chart applied moments
@@ -310,7 +326,11 @@ func installRookCephCluster(dir string) error {
 	var nodes []values.StorageNode
 	if deployWorkers > 0 && deployDiskCount > 0 {
 		run.Printf("    storage:    %d node-device OSD(s) (one per worker)\n", deployWorkers*deployDiskCount)
-		nodes = clusterStorageNodes(deployName, deployWorkers, deployDiskCount, waitForISCSIDevice)
+		var err error
+		nodes, err = clusterStorageNodes(deployName, deployWorkers, deployDiskCount, waitForISCSIDevice)
+		if err != nil {
+			return err
+		}
 	}
 	base := values.ClusterBase(values.ClusterInput{OperatorNamespace: "rook-ceph", Nodes: nodes})
 	valuesPath, err := writeComposed(chartCluster, base, dir)
@@ -318,20 +338,23 @@ func installRookCephCluster(dir string) error {
 		return err
 	}
 
-	return run.CmdWithEnv(deployHelmEnv, "helm",
+	clusterArgs := append([]string{
 		"--kube-context", deployKubeContext,
 		"-n", "rook-ceph",
 		"upgrade", "--install", "--create-namespace",
 		deployClusterName, chartPath,
-		"-f", valuesPath,
-	)
+	}, helmValueArgs(valuesPath, deploySets)...)
+	return run.CmdWithEnv(deployHelmEnv, "helm", clusterArgs...)
 }
 
 // clusterStorageNodes resolves each worker's iSCSI disks to the device paths
 // rook should claim. resolve is injectable so the mapping can be tested without
-// an iSCSI session.
+// an iSCSI session. An unresolved device aborts the deploy: rooket exists to
+// give each worker a real OSD on its own disk, and silently deploying with
+// fewer OSDs than requested would hide exactly the failure an operator needs
+// to see immediately.
 func clusterStorageNodes(cluster string, workers, disks int,
-	resolve func(iqn string) (string, error)) []values.StorageNode {
+	resolve func(iqn string) (string, error)) ([]values.StorageNode, error) {
 
 	out := make([]values.StorageNode, 0, workers)
 	for i := 0; i < workers; i++ {
@@ -340,14 +363,13 @@ func clusterStorageNodes(cluster string, workers, disks int,
 			iqn := fmt.Sprintf("iqn.%s.local.rooket:%s-worker%d-disk%d", deployIQNDate, cluster, i, d)
 			dev, err := resolve(iqn)
 			if err != nil {
-				run.Printf("    warning: worker %d disk %d unresolved: %v\n", i, d, err)
-				continue
+				return nil, fmt.Errorf("resolve iSCSI device for worker %d disk %d: %w", i, d, err)
 			}
 			node.Devices = append(node.Devices, dev)
 		}
 		out = append(out, node)
 	}
-	return out
+	return out, nil
 }
 
 // workerNodeName returns the kind/k8s node name for worker index i. kind names
@@ -389,4 +411,5 @@ func init() {
 	pf.StringArrayVar(&deployWith, "with", nil, "profile to enable, in addition to the clone's sticky list (repeatable)")
 	pf.StringArrayVar(&deployWithOnly, "with-only", nil, "profile to enable, replacing the clone's sticky list (repeatable)")
 	pf.StringArrayVarP(&deployValueFiles, "values", "f", nil, "additional values file, applied above profiles (repeatable)")
+	pf.StringArrayVar(&deploySets, "set", nil, "value passed straight through to helm, applied above every layer (repeatable)")
 }

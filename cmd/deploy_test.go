@@ -1,8 +1,10 @@
 package cmd
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
 )
 
@@ -85,9 +87,12 @@ dependencies:
 }
 
 func TestClusterStorageNodesFromDisks(t *testing.T) {
-	got := clusterStorageNodes("c", 2, 1, func(iqn string) (string, error) {
+	got, err := clusterStorageNodes("c", 2, 1, func(iqn string) (string, error) {
 		return "/dev/disk/by-path/" + iqn, nil
 	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
 	if len(got) != 2 {
 		t.Fatalf("got %#v", got)
 	}
@@ -97,4 +102,38 @@ func TestClusterStorageNodesFromDisks(t *testing.T) {
 	if len(got[0].Devices) != 1 {
 		t.Errorf("devices = %#v", got[0].Devices)
 	}
+}
+
+func TestClusterStorageNodesUnresolvedDeviceErrors(t *testing.T) {
+	resolveErr := errors.New("boom")
+	got, err := clusterStorageNodes("c", 2, 1, func(iqn string) (string, error) {
+		return "", resolveErr
+	})
+	if err == nil {
+		t.Fatal("got nil error, want an error from the unresolved device")
+	}
+	if !errors.Is(err, resolveErr) {
+		t.Errorf("error %v does not wrap %v", err, resolveErr)
+	}
+	if got != nil {
+		t.Errorf("got %#v nodes, want nil", got)
+	}
+}
+
+func TestHelmValueArgs(t *testing.T) {
+	t.Run("no sets", func(t *testing.T) {
+		got := helmValueArgs("/values/operator.yaml", nil)
+		want := []string{"-f", "/values/operator.yaml"}
+		if !reflect.DeepEqual(got, want) {
+			t.Fatalf("got %#v, want %#v", got, want)
+		}
+	})
+
+	t.Run("sets follow -f as separate pairs", func(t *testing.T) {
+		got := helmValueArgs("/values/operator.yaml", []string{"a.b=1", "c=2"})
+		want := []string{"-f", "/values/operator.yaml", "--set", "a.b=1", "--set", "c=2"}
+		if !reflect.DeepEqual(got, want) {
+			t.Fatalf("got %#v, want %#v", got, want)
+		}
+	})
 }
