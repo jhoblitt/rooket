@@ -10,28 +10,40 @@ import (
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	"go.yaml.in/yaml/v3"
 )
 
 func kubectl(args ...string) (string, error) {
 	return rooketRun(2*time.Minute, append([]string{"k"}, args...)...)
 }
 
-func podPhase(name string) string {
-	out, err := kubectl("-n", "rook-ceph", "get", "pod", name, "-o", "jsonpath={.status.phase}")
+// podPhase and pvcPhase return ("", nil) only when the resource is genuinely
+// absent (--ignore-not-found exits 0 with empty output), and a non-nil error
+// on any other kubectl failure (bad context, unreachable API server, ...).
+// Collapsing both cases to "" would let a lookup failure masquerade as
+// "pruned" in a BeEmpty() assertion.
+func podPhase(name string) (string, error) {
+	out, err := kubectl("-n", "rook-ceph", "get", "pod", name, "--ignore-not-found",
+		"-o", "jsonpath={.status.phase}")
 	if err != nil {
-		return ""
+		return "", err
 	}
-	return strings.TrimSpace(out)
+	return strings.TrimSpace(out), nil
 }
 
-func pvcPhase(name string) string {
-	out, err := kubectl("-n", "rook-ceph", "get", "pvc", name, "-o", "jsonpath={.status.phase}")
+func pvcPhase(name string) (string, error) {
+	out, err := kubectl("-n", "rook-ceph", "get", "pvc", name, "--ignore-not-found",
+		"-o", "jsonpath={.status.phase}")
 	if err != nil {
-		return ""
+		return "", err
 	}
-	return strings.TrimSpace(out)
+	return strings.TrimSpace(out), nil
 }
 
+// This suite and updown_test.go's "rooket up/down" are independent top-level
+// Describe blocks sharing one cluster name (clusterName); Ginkgo randomizes
+// top-level order by default, so neither suite may assume it runs before or
+// after the other, or rely on cluster state the other leaves behind.
 var _ = Describe("rooket profiles", Ordered, func() {
 	scratch := filepath.Join(rookDir, ".rooket", "templates", "scratch-cm.yaml")
 
@@ -56,9 +68,13 @@ data:
 		Expect(err).NotTo(HaveOccurred(), "rooket up failed:\n%s", tail(out, 40))
 
 		By("binding the rbd PVC and running its pod")
-		Eventually(func() string { return pvcPhase("rooket-rbd-pvc") }, 5*time.Minute, 10*time.Second).
+		Eventually(func() (string, error) { return pvcPhase("rooket-rbd-pvc") }, 5*time.Minute, 10*time.Second).
 			Should(Equal("Bound"))
-		Eventually(func() string { return podPhase("rooket-rbd-smoke") }, 5*time.Minute, 10*time.Second).
+		// If this hangs pending, suspect the RBD mount path: kind nodes have a
+		// tmpfs /dev and rooket masks device nodes per node, so it is an open
+		// question whether krbd can map here at all — see updown_test.go's CSI
+		// note on why its own rbd spec never mounts.
+		Eventually(func() (string, error) { return podPhase("rooket-rbd-smoke") }, 5*time.Minute, 10*time.Second).
 			Should(Equal("Running"))
 
 		By("binding the OBC and running the s3 pod")
@@ -67,13 +83,13 @@ data:
 				"-o", "jsonpath={.status.phase}")
 			return strings.TrimSpace(out)
 		}, 5*time.Minute, 10*time.Second).Should(Equal("Bound"))
-		Eventually(func() string { return podPhase("rooket-rgw-smoke") }, 5*time.Minute, 10*time.Second).
+		Eventually(func() (string, error) { return podPhase("rooket-rgw-smoke") }, 5*time.Minute, 10*time.Second).
 			Should(Equal("Running"))
 
 		By("binding the nfs PVC and running its pod")
-		Eventually(func() string { return pvcPhase("rooket-nfs-pvc") }, 10*time.Minute, 15*time.Second).
+		Eventually(func() (string, error) { return pvcPhase("rooket-nfs-pvc") }, 10*time.Minute, 15*time.Second).
 			Should(Equal("Bound"))
-		Eventually(func() string { return podPhase("rooket-nfs-smoke") }, 10*time.Minute, 15*time.Second).
+		Eventually(func() (string, error) { return podPhase("rooket-nfs-smoke") }, 10*time.Minute, 15*time.Second).
 			Should(Equal("Running"))
 
 		By("installing the clone's own template")
@@ -89,12 +105,14 @@ data:
 			"--dir", rookDir, "--name", clusterName, "--with-only", "rbd")
 		Expect(err).NotTo(HaveOccurred(), "deploy failed:\n%s", tail(out, 40))
 
-		Eventually(func() string { return podPhase("rooket-rgw-smoke") }, 3*time.Minute, 5*time.Second).
+		Eventually(func() (string, error) { return podPhase("rooket-rgw-smoke") }, 3*time.Minute, 5*time.Second).
 			Should(BeEmpty(), "rgw pod was not pruned")
-		Eventually(func() string { return podPhase("rooket-nfs-smoke") }, 3*time.Minute, 5*time.Second).
+		Eventually(func() (string, error) { return podPhase("rooket-nfs-smoke") }, 3*time.Minute, 5*time.Second).
 			Should(BeEmpty(), "nfs pod was not pruned")
 
-		Expect(podPhase("rooket-rbd-smoke")).To(Equal("Running"), "rbd pod should survive")
+		rbdPhase, err := podPhase("rooket-rbd-smoke")
+		Expect(err).NotTo(HaveOccurred())
+		Expect(rbdPhase).To(Equal("Running"), "rbd pod should survive")
 
 		cm, err := kubectl("-n", "rook-ceph", "get", "cm", "rooket-scratch", "-o", "jsonpath={.data.from}")
 		Expect(err).NotTo(HaveOccurred())
@@ -102,28 +120,78 @@ data:
 	})
 
 	It("shows exactly the values helm received", func() {
-		for _, c := range []struct{ chart, release string }{
-			{"cluster", "rook-ceph-cluster"},
-			{"operator", "rook-ceph"},
+		// 'values show' fakes the parts of the base layer that need a live
+		// cluster to resolve for real (see showBase in cmd/values.go): the
+		// operator's image repo/tag/digest, and the cluster's per-node OSD
+		// device list. Those paths are excluded below so the comparison covers
+		// everything rooket actually composes identically in both places —
+		// not just top-level key names, which would pass even if the bodies
+		// diverged completely.
+		for _, c := range []struct {
+			chart, release string
+			ignore         [][]string
+		}{
+			{"cluster", "rook-ceph-cluster", [][]string{{"cephClusterSpec", "storage"}}},
+			{"operator", "rook-ceph", [][]string{{"image"}, {"annotations"}}},
 		} {
-			shown, err := rooketRun(2*time.Minute, "values", "show", c.chart,
+			shownRaw, err := rooketRun(2*time.Minute, "values", "show", c.chart,
 				"--dir", rookDir, "--with-only", "rbd")
 			Expect(err).NotTo(HaveOccurred())
 
-			supplied, err := rooketRun(2*time.Minute, "helm", "-n", "rook-ceph",
+			suppliedRaw, err := rooketRun(2*time.Minute, "helm", "-n", "rook-ceph",
 				"get", "values", c.release, "-o", "yaml")
 			Expect(err).NotTo(HaveOccurred())
 
-			for _, key := range []string{"toolbox", "cephClusterSpec", "image"} {
-				if strings.Contains(supplied, key+":") {
-					Expect(shown).To(ContainSubstring(key+":"),
-						"%s: preview is missing %q that helm received", c.chart, key)
-				}
+			shown, err := decodeValues(shownRaw)
+			Expect(err).NotTo(HaveOccurred(), "%s: parse preview:\n%s", c.chart, shownRaw)
+			supplied, err := decodeValues(suppliedRaw)
+			Expect(err).NotTo(HaveOccurred(), "%s: parse helm values:\n%s", c.chart, suppliedRaw)
+
+			for _, path := range c.ignore {
+				deletePath(shown, path)
+				deletePath(supplied, path)
 			}
+			Expect(shown).To(Equal(supplied), "%s: preview does not match what helm received", c.chart)
 		}
 	})
 
 	AfterAll(func() {
 		Expect(os.Remove(scratch)).To(Succeed())
+		// The clone-templates ConfigMap outlives its source template once that
+		// file is gone; delete it too so this suite leaves no cluster-side
+		// residue for the next run (or the sibling up/down suite) to trip over.
+		_, err := kubectl("-n", "rook-ceph", "delete", "cm", "rooket-scratch", "--ignore-not-found")
+		Expect(err).NotTo(HaveOccurred(), "failed to delete rooket-scratch ConfigMap")
 	})
 })
+
+// decodeValues parses a Helm values YAML document, tolerating the
+// "USER-SUPPLIED VALUES:" header some Helm versions prepend to 'get values'
+// output (rendered rooket previews never carry it, but stripping it
+// unconditionally when present keeps both sides going through one path).
+func decodeValues(raw string) (map[string]any, error) {
+	if i := strings.IndexByte(raw, '\n'); i >= 0 && strings.Contains(strings.ToUpper(raw[:i]), "USER-SUPPLIED VALUES") {
+		raw = raw[i+1:]
+	}
+	var v map[string]any
+	if err := yaml.Unmarshal([]byte(raw), &v); err != nil {
+		return nil, err
+	}
+	return v, nil
+}
+
+// deletePath removes the nested key at path from m, doing nothing if any
+// segment is absent or not itself a map.
+func deletePath(m map[string]any, path []string) {
+	for i, k := range path {
+		if i == len(path)-1 {
+			delete(m, k)
+			return
+		}
+		next, ok := m[k].(map[string]any)
+		if !ok {
+			return
+		}
+		m = next
+	}
+}
