@@ -106,6 +106,37 @@ func CmdTo(w io.Writer, name string, args ...string) error {
 	return CmdWithEnvTo(w, nil, name, args...)
 }
 
+// CmdSplitTo is CmdTo with stdout and stderr routed to separate writers, for
+// callers that need to silence a command's own output independently of its
+// error diagnostics (e.g. hiding a re-run's expected "already exists" stderr
+// noise without also losing an unexpected failure's cause).
+func CmdSplitTo(outW, errW io.Writer, name string, args ...string) error {
+	cmd := exec.Command(name, args...)
+	// Use /dev/tty so interactive programs (e.g. sudo) can prompt even when
+	// os.Stdin is /dev/null inside a systemd scope.
+	if tty, err := os.OpenFile("/dev/tty", os.O_RDWR, 0); err == nil {
+		cmd.Stdin = tty
+		defer tty.Close()
+	} else {
+		cmd.Stdin = os.Stdin
+	}
+	cmd.Stdout = outW
+	cmd.Stderr = errW
+	tracef(outW, name, args)
+	return cmd.Run()
+}
+
+// CmdWithStdinSplitTo is CmdWithStdinTo with stdout and stderr routed to
+// separate writers.
+func CmdWithStdinSplitTo(outW, errW io.Writer, stdin io.Reader, name string, args ...string) error {
+	cmd := exec.Command(name, args...)
+	cmd.Stdin = stdin
+	cmd.Stdout = outW
+	cmd.Stderr = errW
+	tracef(outW, name, args)
+	return cmd.Run()
+}
+
 // CmdWithEnv runs a command with additional environment variables appended to
 // the current environment.
 func CmdWithEnv(extraEnv []string, name string, args ...string) error {

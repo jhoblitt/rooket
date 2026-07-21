@@ -29,8 +29,9 @@ var downCmd = &cobra.Command{
 
 By default the disk images AND their iSCSI targets are preserved, so a plain
 down needs no root and the next up reuses the devices without prompting either.
-Pass --delete-disks for the full teardown (this is the step that needs
-sudo/pkexec). Use --skip-cluster to omit the cluster step.
+Pass --delete-disks for the full teardown (this is the step that needs root —
+see 'rooket sudoers install' to remove the prompt). Use --skip-cluster to omit
+the cluster step.
 
 --all tears down every rooket cluster at once instead of one: every state
 directory under ~/.local/share/rooket (orphans included) plus the kind clusters
@@ -39,8 +40,8 @@ rooket's only if it has a state dir or a rooket registry container, so a
 foreign 'kind create cluster' is left alone (add --include-unmanaged to sweep
 those too). It prompts with the full plan first; --force skips the prompt and
 --dry-run stops at it. With --delete-disks all iSCSI target teardowns are
-batched into a single privileged script, so freeing the whole machine costs at
-most one sudo/pkexec prompt.
+batched into a single privileged run, so freeing the whole machine costs at
+most one prompt (or none, with rooket's sudoers rule installed).
 
 Example:
   rooket down                      # cluster gone, disks kept: no root needed

@@ -3,7 +3,6 @@ package cmd
 import (
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -53,7 +52,9 @@ target via targetcli and iscsiadm. The resulting /dev/sdX block devices are
 bind-mounted into kind worker nodes as Rook OSD devices.
 
 Privilege requirements: targetcli, iscsiadm, and systemctl require root.
-rooket tries sudo -n first, then pkexec.
+rooket runs itemized through sudo -n when a passwordless grant is available
+(rooket's own rule, installed via 'rooket sudoers install', or any other
+passwordless sudo), otherwise falls back to a single pkexec prompt.
 `,
 	RunE: blockSetupRun,
 }
@@ -106,17 +107,16 @@ func blockSetupRun(_ *cobra.Command, _ []string) error {
 		}
 	}
 
-	// Step 2: Privileged iSCSI setup via a single shell script, unless every
-	// target is already present. Checking the (world-readable) by-path symlinks
-	// first means a re-run with nothing to do skips the privileged step and its
-	// sudo/pkexec prompt.
+	// Step 2: Privileged iSCSI setup, unless every target is already present.
+	// Checking the (world-readable) by-path symlinks first means a re-run with
+	// nothing to do skips the privileged step and its sudo/pkexec prompt.
 	if allISCSIDevicesPresent(disks) {
 		run.Printf("==> iSCSI targets already present, skipping privileged setup\n")
 	} else {
 		run.Printf("==> configuring iSCSI targets\n")
-		script := buildISCSIScript(initIQN, disks, blockSetupDiskSizeGB)
-		if err := runPrivilegedScript(script); err != nil {
-			return fmt.Errorf("iSCSI setup failed.\n\nRun the following script manually with root privileges:\n\n%s\nError: %w", script, err)
+		steps := buildISCSISteps(initIQN, disks, blockSetupDiskSizeGB, !initiatorNameCurrent(initiatorNamePath, initIQN))
+		if err := runPrivileged(steps); err != nil {
+			return fmt.Errorf("iSCSI setup failed.\n\nRun the following script manually with root privileges:\n\n%s\nError: %w", renderScript(steps), err)
 		}
 	}
 
@@ -146,8 +146,10 @@ var blockTeardownCmd = &cobra.Command{
 and backstores via targetcli, and (with --delete-disks) deletes the underlying
 disk image files.
 
-Privilege requirements: iscsiadm and targetcli require root. rooket tries
-sudo -n first, then pkexec.
+Privilege requirements: iscsiadm and targetcli require root. rooket runs
+itemized through sudo -n when a passwordless grant is available (rooket's own
+rule, installed via 'rooket sudoers install', or any other passwordless sudo),
+otherwise falls back to a single pkexec prompt.
 `,
 	RunE: blockTeardownRun,
 }
@@ -182,9 +184,9 @@ func blockTeardownRun(_ *cobra.Command, _ []string) error {
 	}
 
 	run.Printf("==> tearing down iSCSI targets\n")
-	script := buildISCSITeardownScript(disks)
-	if err := runPrivilegedScript(script); err != nil {
-		return fmt.Errorf("iSCSI teardown failed.\n\nRun the following script manually with root privileges:\n\n%s\nError: %w", script, err)
+	steps := buildISCSITeardownSteps(disks)
+	if err := runPrivileged(steps); err != nil {
+		return fmt.Errorf("iSCSI teardown failed.\n\nRun the following script manually with root privileges:\n\n%s\nError: %w", renderScript(steps), err)
 	}
 
 	if blockTeardownDeleteDisks {
@@ -220,29 +222,32 @@ func stateDirDisks(clusterName, dir, iqnDate string) []iscsiDisk {
 	return disks
 }
 
-// buildISCSITeardownScript generates the privileged shell script that logs
-// out of iSCSI sessions, deletes node records, and removes targets and
-// backstores via targetcli. Every step is best-effort so a partial setup
-// can still be cleaned up.
-func buildISCSITeardownScript(disks []iscsiDisk) string {
-	var sb strings.Builder
-	sb.WriteString("set -e\n")
+// buildISCSITeardownSteps generates the privileged steps that log out of
+// iSCSI sessions, delete node records, and remove targets and backstores via
+// targetcli. Every step is best-effort so a partial setup can still be
+// cleaned up.
+func buildISCSITeardownSteps(disks []iscsiDisk) []privStep {
+	var steps []privStep
 	for _, d := range disks {
-		sb.WriteString(fmt.Sprintf("iscsiadm -m node -T %s -u 2>/dev/null || true\n", shQuote(d.targetIQN)))
-		sb.WriteString(fmt.Sprintf("iscsiadm -m node -T %s -o delete 2>/dev/null || true\n", shQuote(d.targetIQN)))
+		steps = append(steps,
+			privStep{argv: []string{"iscsiadm", "-m", "node", "-T", d.targetIQN, "-u"}, quietStderr: true, ignoreErr: true},
+			privStep{argv: []string{"iscsiadm", "-m", "node", "-T", d.targetIQN, "-o", "delete"}, quietStderr: true, ignoreErr: true},
+		)
 	}
 	for _, d := range disks {
-		sb.WriteString(fmt.Sprintf("targetcli /iscsi delete %s 2>/dev/null || true\n", shQuote(d.targetIQN)))
-		sb.WriteString(fmt.Sprintf("targetcli /backstores/fileio delete %s 2>/dev/null || true\n", shQuote(d.backstoreName)))
+		steps = append(steps,
+			privStep{argv: []string{"targetcli", "/iscsi", "delete", d.targetIQN}, quietStderr: true, ignoreErr: true},
+			privStep{argv: []string{"targetcli", "/backstores/fileio", "delete", d.backstoreName}, quietStderr: true, ignoreErr: true},
+		)
 	}
-	sb.WriteString("targetcli saveconfig\n")
-	return sb.String()
+	return append(steps, privStep{argv: []string{"targetcli", "saveconfig"}})
 }
 
 // shQuote single-quotes s for safe interpolation into a /bin/sh script,
-// escaping any embedded single quote. The iSCSI scripts run through
-// sudo/pkexec, so every dynamic operand — cluster-derived names, IQNs, and
-// image paths — must be quoted rather than pasted in raw.
+// escaping any embedded single quote. renderScript uses this for every
+// dynamic operand — cluster-derived names, IQNs, and image paths — in the
+// script rendered for the pkexec fallback; the itemized sudo executor passes
+// argv directly to exec, so no shell is involved there.
 func shQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
@@ -261,78 +266,71 @@ func validateIQNDate(date string) error {
 	return nil
 }
 
-// buildISCSIScript generates the privileged shell script that:
-//  1. Starts iscsid
-//  2. Sets the initiator name
-//  3. Creates fileio backstores, iSCSI targets, LUNs, and ACLs via targetcli
-//  4. Saves the targetcli config
-//  5. Discovers targets and logs in with iscsiadm
-func buildISCSIScript(initIQN string, disks []iscsiDisk, sizeGB int) string {
-	var sb strings.Builder
-	sb.WriteString("set -e\n")
-	sb.WriteString("systemctl start iscsid\n")
-	sb.WriteString(fmt.Sprintf("printf 'InitiatorName=%%s\\n' %s | tee /etc/iscsi/initiatorname.iscsi > /dev/null\n", shQuote(initIQN)))
+const initiatorNamePath = "/etc/iscsi/initiatorname.iscsi"
 
-	for _, d := range disks {
-		lunsPath := fmt.Sprintf("/iscsi/%s/tpg1/luns", d.targetIQN)
-		aclsPath := fmt.Sprintf("/iscsi/%s/tpg1/acls", d.targetIQN)
-		aclPath := fmt.Sprintf("/iscsi/%s/tpg1/acls/%s", d.targetIQN, initIQN)
-		backstoreRef := fmt.Sprintf("/backstores/fileio/%s", d.backstoreName)
-		sb.WriteString(fmt.Sprintf(
-			"targetcli /backstores/fileio create %s %s %dG 2>/dev/null || true\n",
-			shQuote(d.backstoreName), shQuote(d.imgPath), sizeGB))
-		sb.WriteString(fmt.Sprintf(
-			"targetcli /iscsi create %s 2>/dev/null || true\n",
-			shQuote(d.targetIQN)))
-		sb.WriteString(fmt.Sprintf(
-			"targetcli %s create %s 2>/dev/null || true\n",
-			shQuote(lunsPath), shQuote(backstoreRef)))
-		sb.WriteString(fmt.Sprintf(
-			"targetcli %s create %s 2>/dev/null || true\n",
-			shQuote(aclsPath), shQuote(initIQN)))
-		sb.WriteString(fmt.Sprintf(
-			"targetcli %s create tpg_lun_or_backstore=lun0 mapped_lun=0 2>/dev/null || true\n",
-			shQuote(aclPath)))
+// initiatorNameCurrent reports whether the file already declares exactly
+// wantIQN. The file is world-readable, so this needs no privileges — and when
+// it is current, both the write and the iscsid restart that follows it can be
+// skipped. iscsid is host-global and shared by every other cluster's live
+// sessions, so restarting it to apply a change that did not happen disrupts
+// clusters this run has nothing to do with.
+func initiatorNameCurrent(path, wantIQN string) bool {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return false
 	}
-
-	sb.WriteString("targetcli saveconfig\n")
-	sb.WriteString("systemctl restart iscsid && sleep 1\n")
-	sb.WriteString("iscsiadm -m discovery -t sendtargets -p 127.0.0.1\n")
-	sb.WriteString("iscsiadm -m node --login || true\n")
-	return sb.String()
+	found := false
+	for _, line := range strings.Split(string(b), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		name, ok := strings.CutPrefix(line, "InitiatorName=")
+		if !ok {
+			continue
+		}
+		if found || strings.TrimSpace(name) != wantIQN {
+			return false
+		}
+		found = true
+	}
+	return found
 }
 
-// runPrivilegedScript runs a shell script with root privileges: directly when
-// already root, otherwise via sudo -n (which never prompts) and finally pkexec
-// (through a temp file so pkexec can find it). pkexec is the only step that can
-// prompt, so callers should skip this entirely when there is no work to do.
-func runPrivilegedScript(script string) error {
-	if os.Geteuid() == 0 {
-		return run.CmdWithStdin(strings.NewReader(script), "sh")
+// buildISCSISteps generates the privileged steps that:
+//  1. Start iscsid
+//  2. Set the initiator name, if writeInitiator
+//  3. Create fileio backstores, iSCSI targets, LUNs, and ACLs via targetcli
+//  4. Save the targetcli config
+//  5. Restart iscsid, if writeInitiator, to pick up the new name
+//  6. Discover targets and log in with iscsiadm
+func buildISCSISteps(initIQN string, disks []iscsiDisk, sizeGB int, writeInitiator bool) []privStep {
+	steps := []privStep{{argv: []string{"systemctl", "start", "iscsid"}}}
+	if writeInitiator {
+		steps = append(steps, privStep{
+			argv:        []string{"tee", initiatorNamePath},
+			stdinLine:   "InitiatorName=" + initIQN,
+			quietStdout: true,
+		})
 	}
-	if err := run.CmdWithStdin(strings.NewReader(script), "sudo", "-n", "sh"); err == nil {
-		return nil
+	for _, d := range disks {
+		tpg := "/iscsi/" + d.targetIQN + "/tpg1"
+		steps = append(steps,
+			privStep{argv: []string{"targetcli", "/backstores/fileio", "create", d.backstoreName, d.imgPath, fmt.Sprintf("%dG", sizeGB)}, quietStderr: true, ignoreErr: true},
+			privStep{argv: []string{"targetcli", "/iscsi", "create", d.targetIQN}, quietStderr: true, ignoreErr: true},
+			privStep{argv: []string{"targetcli", tpg + "/luns", "create", "/backstores/fileio/" + d.backstoreName}, quietStderr: true, ignoreErr: true},
+			privStep{argv: []string{"targetcli", tpg + "/acls", "create", initIQN}, quietStderr: true, ignoreErr: true},
+			privStep{argv: []string{"targetcli", tpg + "/acls/" + initIQN, "create", "tpg_lun_or_backstore=lun0", "mapped_lun=0"}, quietStderr: true, ignoreErr: true},
+		)
 	}
-	if _, err := exec.LookPath("pkexec"); err == nil {
-		f, err := os.CreateTemp("", "rooket-iscsi-*.sh")
-		if err != nil {
-			return fmt.Errorf("create temp script: %w", err)
-		}
-		defer os.Remove(f.Name())
-		if _, err := f.WriteString(script); err != nil {
-			f.Close()
-			return err
-		}
-		f.Close()
-		if err := os.Chmod(f.Name(), 0o700); err != nil {
-			return err
-		}
-		run.Printf("==> requesting root via pkexec (you may be prompted to authenticate)\n")
-		if err := run.Cmd("pkexec", "sh", f.Name()); err == nil {
-			return nil
-		}
+	steps = append(steps, privStep{argv: []string{"targetcli", "saveconfig"}})
+	if writeInitiator {
+		steps = append(steps, privStep{argv: []string{"systemctl", "restart", "iscsid"}, settle: time.Second})
 	}
-	return fmt.Errorf("all privilege-escalation strategies failed")
+	return append(steps,
+		privStep{argv: []string{"iscsiadm", "-m", "discovery", "-t", "sendtargets", "-p", "127.0.0.1"}},
+		privStep{argv: []string{"iscsiadm", "-m", "node", "--login"}, ignoreErr: true},
+	)
 }
 
 // iscsiByPathLink returns the /dev/disk/by-path symlink for a target's LUN 0.
