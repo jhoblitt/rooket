@@ -4,12 +4,13 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
 
+	"github.com/jhoblitt/rooket/internal/clone"
 	"github.com/jhoblitt/rooket/internal/run"
+	"github.com/jhoblitt/rooket/internal/values"
 )
 
 var (
@@ -26,6 +27,10 @@ var (
 	deployDiskCount    int
 	deployDiskSizeGB   int
 	deployIQNDate      string
+	deployWith         []string
+	deployWithOnly     []string
+	deployWithOnlySet  bool
+	deployValueFiles   []string
 )
 
 var deployCmd = &cobra.Command{
@@ -116,6 +121,9 @@ func deploySetup(cmd *cobra.Command) (string, error) {
 	if deployKubeContext == "" {
 		deployKubeContext = "kind-" + name
 	}
+	if cmd.Flags().Changed("with-only") {
+		deployWithOnlySet = true
+	}
 	if deployHelmEnv, err = helmEnv(name, "rooket"); err != nil {
 		return "", err
 	}
@@ -156,61 +164,68 @@ func installRookCephOperator(dir string) error {
 	run.Printf("    release:    %s\n", deployOperatorName)
 	run.Printf("    namespace:  rook-ceph\n")
 
-	args := []string{
+	base := values.OperatorBase(values.OperatorInput{
+		ImageRepo: imageRepo,
+		ImageTag:  imageTag,
+		Digest:    digestOrEmpty(deployRegistryPort, deployNamespace+"/"+deployImageName, imageTag),
+	})
+	valuesPath, err := writeComposed(chartOperator, base, dir)
+	if err != nil {
+		return err
+	}
+
+	if err := run.CmdWithEnv(deployHelmEnv, "helm",
 		"--kube-context", deployKubeContext,
 		"-n", "rook-ceph",
 		"upgrade", "--install", "--create-namespace",
-		deployOperatorName,
-		chartPath,
-		"--set", fmt.Sprintf("image.repository=%s", imageRepo),
-		"--set", fmt.Sprintf("image.tag=%s", imageTag),
-		// One provisioner per driver is plenty for a dev cluster, and the HA
-		// pair starves small hosts. Consumed only by refs where rook manages
-		// the CSI drivers itself (<= v1.19); newer refs take the drivers
-		// chart's default of one replica.
-		"--set", "csi.provisionerReplicas=1",
-	}
-	// The deploy tag is a mutable branch name and the chart defaults to
-	// IfNotPresent, so a rebuild that pushes the same tag would neither roll
-	// the Deployment nor beat a node-cached image. Pinning the registry's
-	// current digest as a pod-template annotation makes the operator roll
-	// exactly when image content changed.
-	if digest, ok := manifestDigest(deployRegistryPort, deployNamespace+"/"+deployImageName, imageTag); ok {
-		// Always-pull is required for the roll to matter: with IfNotPresent a
-		// replacement pod happily reuses the node-cached image behind the
-		// same mutable tag. The registry is on localhost, so the pull check
-		// is cheap.
-		args = append(args,
-			"--set-string", "annotations.rooket-image-digest="+digest,
-			"--set", "image.pullPolicy=Always")
-	}
-	if err := run.CmdWithEnv(deployHelmEnv, "helm", args...); err != nil {
+		deployOperatorName, chartPath,
+		"-f", valuesPath,
+	); err != nil {
 		return err
 	}
 
 	return installCephCsiDrivers(dir)
 }
 
-// csiDriversValues configures the ceph-csi-drivers chart: the RBD and CephFS
-// driver names must carry the operator-namespace prefix that the
-// rook-ceph-cluster chart's StorageClasses use as their provisioner; snapshot
-// support stays off (kind clusters have no VolumeSnapshot CRDs, and the
-// chart's cephfs driver defaults it on); and the nfs and nvmeof drivers,
-// enabled by chart default, are not deployed by rooket.
-const csiDriversValues = `operatorConfig:
-  namespace: rook-ceph
-drivers:
-  rbd:
-    name: rook-ceph.rbd.csi.ceph.com
-    snapshotPolicy: none
-  cephfs:
-    name: rook-ceph.cephfs.csi.ceph.com
-    snapshotPolicy: none
-  nfs:
-    enabled: false
-  nvmeof:
-    enabled: false
-`
+func digestOrEmpty(port int, repo, tag string) string {
+	digest, ok := manifestDigest(port, repo, tag)
+	if !ok {
+		return ""
+	}
+	return digest
+}
+
+// writeComposed stacks every layer for chart and writes the result into the
+// cluster's state dir, where it survives a failed deploy for inspection.
+func writeComposed(chart string, base map[string]any, rookDir string) (string, error) {
+	cloneDir := clone.Open(rookDir)
+	names, err := activeProfileNames(cloneDir, deployWith, deployWithOnly, deployWithOnlySet)
+	if err != nil {
+		return "", err
+	}
+	active, err := loadProfiles(names)
+	if err != nil {
+		return "", err
+	}
+	c, err := composeChart(chart, base, cloneDir, active, deployValueFiles)
+	if err != nil {
+		return "", err
+	}
+	dir, err := deployValuesDir(deployName)
+	if err != nil {
+		return "", err
+	}
+	path := filepath.Join(dir, chart+".yaml")
+	return path, c.write(path)
+}
+
+func deployValuesDir(cluster string) (string, error) {
+	state, err := stateDirPath(cluster)
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(state, "values"), nil
+}
 
 // installCephCsiDrivers installs the ceph-csi-drivers helm chart for rook
 // refs that need it. Since v1.20, rook's helm chart installs the
@@ -240,22 +255,26 @@ func installCephCsiDrivers(dir string) error {
 	}
 
 	run.Printf("==> deploying ceph-csi-drivers %s (Driver CRs and driver RBAC the rook-ceph chart does not ship)\n", version)
+	valuesPath, err := writeComposed(chartCSI, values.CSIBase(), dir)
+	if err != nil {
+		return err
+	}
+
 	var installErr error
 	for attempt := 1; attempt <= 5; attempt++ {
-		if installErr = run.CmdWithStdinEnv(strings.NewReader(csiDriversValues), deployHelmEnv,
-			"helm",
+		if installErr = run.CmdWithEnv(deployHelmEnv, "helm",
 			"--kube-context", deployKubeContext,
 			"-n", "rook-ceph",
 			"upgrade", "--install",
 			"ceph-csi-drivers", "ceph-csi-drivers",
 			"--repo", "https://ceph.github.io/ceph-csi-operator",
 			"--version", version,
-			"-f", "-",
+			"-f", valuesPath,
 		); installErr == nil {
 			return nil
 		}
-		// The csi.ceph.io CRDs arrive with the rook-ceph chart applied
-		// moments earlier and may not be established yet.
+		// The csi.ceph.io CRDs arrive with the rook-ceph chart applied moments
+		// earlier and may not be established yet.
 		time.Sleep(5 * time.Second)
 	}
 	return fmt.Errorf("install ceph-csi-drivers chart: %w", installErr)
@@ -283,96 +302,52 @@ func installRookCephCluster(dir string) error {
 		return err
 	}
 
-	args := []string{
-		"--kube-context", deployKubeContext,
-		"-n", "rook-ceph",
-		"upgrade", "--install", "--create-namespace",
-		deployClusterName,
-		chartPath,
-		"--set", "operatorNamespace=rook-ceph",
-		"--set", "toolbox.enabled=true",
-		// A standby mgr adds nothing to a disposable dev cluster and its
-		// requests eat a node's cpu budget — enough to leave the mds and the
-		// detect-version jobs unschedulable on a 4-vCPU host.
-		"--set", "cephClusterSpec.mgr.count=1",
-	}
-
 	run.Printf("==> deploying rook-ceph-cluster\n")
 	run.Printf("    chart:      %s\n", chartPath)
 	run.Printf("    release:    %s\n", deployClusterName)
 	run.Printf("    namespace:  rook-ceph\n")
 
+	var nodes []values.StorageNode
 	if deployWorkers > 0 && deployDiskCount > 0 {
 		run.Printf("    storage:    %d node-device OSD(s) (one per worker)\n", deployWorkers*deployDiskCount)
+		nodes = clusterStorageNodes(deployName, deployWorkers, deployDiskCount, waitForISCSIDevice)
 	}
-	valuesPath, err := writeClusterValues()
+	base := values.ClusterBase(values.ClusterInput{OperatorNamespace: "rook-ceph", Nodes: nodes})
+	valuesPath, err := writeComposed(chartCluster, base, dir)
 	if err != nil {
 		return err
 	}
-	defer os.Remove(valuesPath)
-	args = append(args, "-f", valuesPath)
 
-	return run.CmdWithEnv(deployHelmEnv, "helm", args...)
+	return run.CmdWithEnv(deployHelmEnv, "helm",
+		"--kube-context", deployKubeContext,
+		"-n", "rook-ceph",
+		"upgrade", "--install", "--create-namespace",
+		deployClusterName, chartPath,
+		"-f", valuesPath,
+	)
 }
 
-// writeClusterValues renders the rook-ceph-cluster Helm values file. It pins
-// one OSD to each worker's own iSCSI disk with an explicit per-node device
-// list — naming the device per node keeps Rook from mis-attributing OSDs
-// (every privileged kind node sees every host disk), so each worker gets
-// exactly one OSD on its own disk via Rook's direct device path, no local PV,
-// no kubelet loop. It also trims the chart's production-HA cpu requests
-// (1 cpu per mon and per OSD): on a small host those fill each node's request
-// budget until later components — the detect-version jobs, the mds — cannot
-// schedule at all, seen as a wedged cluster on 4-vCPU CI runners. Memory
-// requests are left alone (rook derives osd_memory_target from them). Returns
-// the file path; the caller removes it.
-func writeClusterValues() (string, error) {
-	var sb strings.Builder
-	sb.WriteString("cephClusterSpec:\n")
-	sb.WriteString("  resources:\n")
-	sb.WriteString("    mon:\n")
-	sb.WriteString("      requests:\n")
-	sb.WriteString("        cpu: 500m\n")
-	sb.WriteString("    osd:\n")
-	sb.WriteString("      requests:\n")
-	sb.WriteString("        cpu: 500m\n")
-	sb.WriteString("    mgr:\n")
-	sb.WriteString("      requests:\n")
-	sb.WriteString("        cpu: 300m\n")
-	if deployWorkers > 0 && deployDiskCount > 0 {
-		sb.WriteString("  storage:\n")
-		sb.WriteString("    useAllNodes: false\n")
-		sb.WriteString("    useAllDevices: false\n")
-		sb.WriteString("    nodes:\n")
-		for i := 0; i < deployWorkers; i++ {
-			node := workerNodeName(deployName, i)
-			sb.WriteString(fmt.Sprintf("      - name: %s\n", node))
-			sb.WriteString("        devices:\n")
-			for d := 0; d < deployDiskCount; d++ {
-				iqn := fmt.Sprintf("iqn.%s.local.rooket:%s-worker%d-disk%d",
-					deployIQNDate, deployName, i, d)
-				dev, err := waitForISCSIDevice(iqn)
-				if err != nil {
-					return "", fmt.Errorf("resolve iSCSI device for worker %d disk %d: %w", i, d, err)
-				}
-				sb.WriteString(fmt.Sprintf("          - name: %s\n", dev))
-			}
-		}
-	}
+// clusterStorageNodes resolves each worker's iSCSI disks to the device paths
+// rook should claim. resolve is injectable so the mapping can be tested without
+// an iSCSI session.
+func clusterStorageNodes(cluster string, workers, disks int,
+	resolve func(iqn string) (string, error)) []values.StorageNode {
 
-	f, err := os.CreateTemp("", "rooket-cluster-values-*.yaml")
-	if err != nil {
-		return "", fmt.Errorf("create cluster values file: %w", err)
+	out := make([]values.StorageNode, 0, workers)
+	for i := 0; i < workers; i++ {
+		node := values.StorageNode{Name: workerNodeName(cluster, i)}
+		for d := 0; d < disks; d++ {
+			iqn := fmt.Sprintf("iqn.%s.local.rooket:%s-worker%d-disk%d", deployIQNDate, cluster, i, d)
+			dev, err := resolve(iqn)
+			if err != nil {
+				run.Printf("    warning: worker %d disk %d unresolved: %v\n", i, d, err)
+				continue
+			}
+			node.Devices = append(node.Devices, dev)
+		}
+		out = append(out, node)
 	}
-	if _, err := f.WriteString(sb.String()); err != nil {
-		f.Close()
-		return "", fmt.Errorf("write cluster values file: %w", err)
-	}
-	if err := f.Close(); err != nil {
-		return "", err
-	}
-	fmt.Printf("%s", sb.String())
-	return f.Name(), nil
+	return out
 }
 
 // workerNodeName returns the kind/k8s node name for worker index i. kind names
@@ -411,4 +386,7 @@ func init() {
 	pf.IntVar(&deployDiskCount, "disk-count", 1, "iSCSI disks per worker (0 disables OSD device pinning)")
 	pf.IntVar(&deployDiskSizeGB, "disk-size", 10, "disk size in GiB (matches 'rooket block setup')")
 	pf.StringVar(&deployIQNDate, "iqn-date", "2003-01", "IQN date component matching 'rooket block setup'")
+	pf.StringArrayVar(&deployWith, "with", nil, "profile to enable, in addition to the clone's sticky list (repeatable)")
+	pf.StringArrayVar(&deployWithOnly, "with-only", nil, "profile to enable, replacing the clone's sticky list (repeatable)")
+	pf.StringArrayVarP(&deployValueFiles, "values", "f", nil, "additional values file, applied above profiles (repeatable)")
 }

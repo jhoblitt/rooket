@@ -83,3 +83,18 @@ dependencies:
 		}
 	})
 }
+
+func TestClusterStorageNodesFromDisks(t *testing.T) {
+	got := clusterStorageNodes("c", 2, 1, func(iqn string) (string, error) {
+		return "/dev/disk/by-path/" + iqn, nil
+	})
+	if len(got) != 2 {
+		t.Fatalf("got %#v", got)
+	}
+	if got[0].Name != "c-worker" || got[1].Name != "c-worker2" {
+		t.Errorf("node names = %q, %q", got[0].Name, got[1].Name)
+	}
+	if len(got[0].Devices) != 1 {
+		t.Errorf("devices = %#v", got[0].Devices)
+	}
+}
