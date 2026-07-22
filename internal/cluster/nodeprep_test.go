@@ -106,7 +106,7 @@ func TestNodePrepScriptRBD(t *testing.T) {
 }
 
 func TestRegistryScript(t *testing.T) {
-	script := registryScript("rook-registry", 5001)
+	script := containerdScript("rook-registry", 5001, "", nil)
 	for _, want := range []string{
 		"mkdir -p '/etc/containerd/certs.d/localhost:5001'",
 		`server = "http://rook-registry:5000"`,
@@ -117,6 +117,55 @@ func TestRegistryScript(t *testing.T) {
 		if !strings.Contains(script, want) {
 			t.Errorf("script missing %q:\n%s", want, script)
 		}
+	}
+}
+
+func TestCacheScript(t *testing.T) {
+	script := containerdScript("rook-registry", 5001, "rooket-cache:5000", []string{"quay.io", "registry.k8s.io"})
+
+	for _, want := range []string{
+		"mkdir -p '/etc/containerd/certs.d/quay.io'",
+		"mkdir -p '/etc/containerd/certs.d/registry.k8s.io'",
+		`[host."http://rooket-cache:5000/v2/quay.io"]`,
+		`[host."http://rooket-cache:5000/v2/registry.k8s.io"]`,
+		`capabilities = ["pull", "resolve"]`,
+		"echo ROOKET_DONE",
+		"exit $rc",
+	} {
+		if !strings.Contains(script, want) {
+			t.Errorf("script missing %q:\n%s", want, script)
+		}
+	}
+
+	// override_path is what stops containerd appending its own /v2 to a host
+	// URL that already carries the upstream's prefix inside the cache.
+	if strings.Count(script, "override_path = true") != 2 {
+		t.Errorf("every cache mirror needs override_path = true:\n%s", script)
+	}
+
+	// The cache blocks must not set 'server': omitting it leaves the upstream
+	// namespace as the fallback, which is what keeps the cache a soft
+	// dependency. Exactly one 'server' line may appear — the registry's, whose
+	// mirror is authoritative rather than an optimisation.
+	if got := strings.Count(script, "server ="); got != 1 {
+		t.Errorf("want exactly 1 'server' line (the registry's), got %d; a cache mirror with one loses upstream fallback:\n%s", got, script)
+	}
+
+	// Likewise push: the per-cluster registry is pushed to, the cache never is.
+	if got := strings.Count(script, `"push"`); got != 1 {
+		t.Errorf("want exactly 1 push capability (the registry's), got %d:\n%s", got, script)
+	}
+
+	// With the cache down, the registry must still be wired and no cache mirror
+	// written — nodes then pull upstream exactly as before the cache existed.
+	noCache := containerdScript("rook-registry", 5001, "rooket-cache:5000", nil)
+	for _, want := range []string{"/etc/containerd/certs.d/localhost:5001", "echo ROOKET_DONE"} {
+		if !strings.Contains(noCache, want) {
+			t.Errorf("registry wiring must survive a missing cache, want %q:\n%s", want, noCache)
+		}
+	}
+	if strings.Contains(noCache, "rooket-cache:5000") {
+		t.Errorf("no cache mirror may be written when no upstreams are proxied:\n%s", noCache)
 	}
 }
 

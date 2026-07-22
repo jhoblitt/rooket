@@ -588,41 +588,74 @@ func shellQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
-// ConfigureRegistry creates the containerd registry hosts.toml on every node,
-// one script per node, all nodes concurrently (see PrepareNodes).
-func ConfigureRegistry(w io.Writer, eng engine.Engine, clusterName, registryName string, hostPort int) error {
+// ConfigureContainerd writes every containerd mirror a node needs — the
+// per-cluster registry, plus one hosts.toml per proxied upstream when the
+// shared cache is up — in a single per-node pass, all nodes concurrently (see
+// PrepareNodes).
+//
+// Registry and cache wiring are composed into one script rather than run as two
+// passes: they mutate the same exclusive resource (an exec into each node), so
+// concurrency.md invariant 2 forbids overlapping them, and one script halves
+// the execs that sequencing them would cost. Pass a nil cacheUpstreams to wire
+// the registry alone.
+func ConfigureContainerd(w io.Writer, eng engine.Engine, clusterName, registryName string,
+	hostPort int, cacheAddr string, cacheUpstreams []string) error {
 	nodes, err := Nodes(w, clusterName)
 	if err != nil {
 		return err
 	}
-	script := registryScript(registryName, hostPort)
+	script := containerdScript(registryName, hostPort, cacheAddr, cacheUpstreams)
 	return forEachNode(w, nodes, func(node string, out *bytes.Buffer) []error {
 		errs := runNodeScript(eng, out, node, script)
 		if len(errs) == 0 {
-			run.Fprintf(out, "configured registry on node %s\n", node)
+			run.Fprintf(out, "configured containerd mirrors on node %s\n", node)
 		}
 		return errs
 	})
 }
 
-// registryScript renders the script that wires a node's containerd to the
-// local registry; the hosts.toml content is embedded via a quoted heredoc.
-func registryScript(registryName string, hostPort int) string {
-	hostsToml := fmt.Sprintf(`server = "http://%s:5000"
-
-[host."http://%s:5000"]
-  capabilities = ["pull", "resolve", "push"]
-`, registryName, registryName)
-
-	dir := fmt.Sprintf("/etc/containerd/certs.d/localhost:%d", hostPort)
-	return fmt.Sprintf(`rc=0
-mkdir -p %[1]s || { echo %[3]s; rc=1; }
+// hostsFileBlock renders the shell that writes one hosts.toml, embedding the
+// content via a quoted heredoc.
+func hostsFileBlock(dir, hostsToml string) string {
+	return fmt.Sprintf(`mkdir -p %[1]s || { echo %[3]s; rc=1; }
 [ "$rc" = 0 ] && { cat > %[1]s/hosts.toml <<'ROOKET_EOF' || { echo "ROOKET_FAIL:write hosts.toml"; rc=1; }
 %[2]sROOKET_EOF
 }
-echo ROOKET_DONE
-exit $rc
 `, shellQuote(dir), hostsToml, shellQuote("ROOKET_FAIL:mkdir "+dir))
+}
+
+// containerdScript renders a node's full mirror configuration.
+func containerdScript(registryName string, hostPort int, cacheAddr string, cacheUpstreams []string) string {
+	var b strings.Builder
+	b.WriteString("rc=0\n")
+
+	b.WriteString(hostsFileBlock(
+		fmt.Sprintf("/etc/containerd/certs.d/localhost:%d", hostPort),
+		fmt.Sprintf(`server = "http://%s:5000"
+
+[host."http://%s:5000"]
+  capabilities = ["pull", "resolve", "push"]
+`, registryName, registryName)))
+
+	// The cache blocks emit no 'server' line. Omitting it leaves the upstream
+	// namespace as the fallback server, which is what keeps the cache a soft
+	// dependency: a cache that is down or wedged costs pull speed, not a failed
+	// bring-up.
+	//
+	// override_path is required because each host URL carries a path — the
+	// upstream's repository prefix inside the cache. Without it containerd
+	// appends its own /v2 and the request misses.
+	for _, ns := range cacheUpstreams {
+		b.WriteString(hostsFileBlock(
+			"/etc/containerd/certs.d/"+ns,
+			fmt.Sprintf(`[host."http://%s/v2/%s"]
+  capabilities = ["pull", "resolve"]
+  override_path = true
+`, cacheAddr, ns)))
+	}
+
+	b.WriteString("echo ROOKET_DONE\nexit $rc\n")
+	return b.String()
 }
 
 // InstallPrometheusOperatorCRDs installs the prometheus-operator-crds helm

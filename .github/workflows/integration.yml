@@ -271,6 +271,16 @@ jobs:
           ROOKET_SKIP_BLOCK=true \
             ./e2e.test -test.v -test.timeout 100m
 
+      # The cache only ever warns on failure, so a green e2e says nothing about
+      # whether it worked. Assert it actually served the cluster, and that the
+      # suite's own 'down' left it standing — the property that makes it shared.
+      - name: Assert the image cache served the cluster and survived teardown
+        run: |
+          set -eux
+          docker ps --filter 'name=^rooket-cache$' --format '{{.Names}}' | grep -qx rooket-cache
+          curl -fsS http://127.0.0.1:5000/v2/_catalog | tee catalog.json
+          python3 -c 'import json;r=json.load(open("catalog.json"))["repositories"];print(r);assert r,"cache served nothing"'
+
       - name: Diagnostics (on failure)
         if: failure()
         run: |

@@ -14,6 +14,7 @@ var (
 	downDiskCount   int
 	downIQNDate     string
 	downDeleteDisks bool
+	downDeleteCache bool
 	downSkipBlock   bool
 	downSkipCluster bool
 )
@@ -33,6 +34,13 @@ Pass --delete-disks for the full teardown (this is the step that needs root —
 see 'rooket sudoers install' to remove the prompt). Use --skip-cluster to omit
 the cluster step.
 
+The shared OCI pull-through cache is host-wide, not per-cluster: it is what
+makes the next 'up' — in this clone or any other — skip re-downloading upstream
+images, so no teardown touches it unless you pass --delete-cache. That flag is
+separate from --delete-disks because the two remove different things:
+--delete-disks reclaims this cluster's iSCSI targets and disk images, while
+--delete-cache discards images shared by every cluster on the host.
+
 --all tears down every rooket cluster at once instead of one: every state
 directory under ~/.local/share/rooket (orphans included) plus the kind clusters
 rooket owns that are live under any installed engine — a live cluster counts as
@@ -47,6 +55,7 @@ Example:
   rooket down                      # cluster gone, disks kept: no root needed
   rooket down --delete-disks       # full teardown incl. iSCSI targets and images
   rooket down --all --delete-disks # destroy every cluster and all state
+  rooket down --delete-cache       # also discard the host-wide image cache
 `,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		if downAll {
@@ -104,6 +113,15 @@ Example:
 			}
 		}
 
+		if downDeleteCache {
+			run.Printf("==> removing the shared image cache\n")
+			if err := teardownCache(os.Stdout); err != nil {
+				return fmt.Errorf("remove image cache: %w", err)
+			}
+		} else {
+			noteCachePreserved(os.Stdout)
+		}
+
 		run.Printf("\nrooket down complete.\n")
 		return nil
 	},
@@ -117,6 +135,7 @@ func init() {
 	downCmd.Flags().IntVar(&downDiskCount, "disk-count", 1, "iSCSI disks per worker (0 skips block teardown)")
 	downCmd.Flags().StringVar(&downIQNDate, "iqn-date", "2003-01", "IQN date component (YYYY-MM)")
 	downCmd.Flags().BoolVar(&downDeleteDisks, "delete-disks", false, "full teardown: remove iSCSI targets and delete the disk images and state dir (needs root)")
+	downCmd.Flags().BoolVar(&downDeleteCache, "delete-cache", false, "also remove the host-wide OCI pull-through cache container and its volume (shared by every rooket cluster)")
 	downCmd.Flags().BoolVar(&downSkipBlock, "skip-block", false, "skip block teardown even with --delete-disks")
 	downCmd.Flags().BoolVar(&downSkipCluster, "skip-cluster", false, "skip cluster delete")
 }
