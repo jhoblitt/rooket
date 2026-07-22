@@ -136,6 +136,37 @@ Containerd-registry wiring runs *after* this group: it needs the registry to
 exist (data dependency) and it `exec`s into the same nodes as node preparation
 (exclusive resource — invariant 2), so it cannot join the group.
 
+## Concurrency in `down`
+
+Teardown's dependency graph is tighter than bring-up's, and the invariants
+(especially 1 and 2) do most of the shaping:
+
+- **Across clusters (`down --all`) — parallel.** Different clusters share no
+  kind cluster, registry, or disk, so every cluster's delete (kind delete →
+  registry delete → confirm-gone → zap preserved disks) runs concurrently.
+  With N clusters this collapses N sequential deletes to roughly one delete's
+  wallclock. The concurrent deletes are the group; the batched iSCSI target
+  teardown that follows is a **barrier** (invariant 1): it must see every
+  cluster confirmed gone before it removes any target, and it is deliberately a
+  single privileged run so the whole sweep costs at most one prompt.
+
+- **Within one cluster (`cluster delete` / plain `down`) — mostly sequential,
+  by invariant.** The disk zap truncates the OSD images, which corrupts a live
+  cluster, so it must wait for a **confirmed** kind delete (invariant 1). And
+  single-cluster delete aborts the whole teardown if the kind delete fails,
+  leaving the registry intact — so its registry removal cannot be hoisted to
+  run concurrently the way `--all`'s best-effort registry removal can. This is
+  a case where the invariants legitimately preclude overlap; the design goal is
+  satisfied by *not* manufacturing unsafe concurrency, and by documenting why.
+
+- **`down` → `block teardown` — sequential.** Tearing down the iSCSI targets
+  logs out sessions the kind nodes hold, so it waits for the cluster to be gone
+  (invariant 1).
+
+Concurrent teardown output follows invariant 3: each cluster's delete writes to
+its own `runConcurrent` buffer (including its zap lines, which is why
+`cluster.ZapISCSIDisks` takes an `io.Writer`), flushed in cluster-name order.
+
 ## Per-command status
 
 | Command | Concurrency exploited |
@@ -144,7 +175,8 @@ exist (data dependency) and it `exec`s into the same nodes as node preparation
 | `cluster create` | node prep ∥ registry ∥ ConfigMap ∥ prometheus CRDs, then containerd wiring |
 | `build` | `make` overlaps cluster create (via `up`); push follows |
 | node operations | every per-node script fans out across nodes via `forEachNode` |
-| `down --all` | iSCSI teardown for all clusters batched into one privileged run |
+| `down --all` | every cluster deleted concurrently, then one batched iSCSI target teardown as the barrier |
+| `cluster delete` / `down` | sequential by invariant (zap needs a confirmed delete; registry stays intact on a failed delete) |
 
 ## Adding concurrency to new work
 

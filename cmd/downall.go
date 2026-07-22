@@ -3,6 +3,7 @@ package cmd
 import (
 	"bufio"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -147,36 +148,57 @@ func downAllRun(cmd *cobra.Command) error {
 
 	// blocked marks clusters that survived a failed delete: their disks may still
 	// be in use, so nothing downstream may zap, teardown, or remove their state.
+	//
+	// The clusters share no kind cluster, registry, or disk, so they are deleted
+	// concurrently — N deletes cost roughly one delete's wallclock, not N — with
+	// each cluster's blocked-ness recorded into its own slot and merged after the
+	// join. The batched iSCSI teardown below is the barrier that needs every
+	// cluster gone first. (Per-cluster this preserves the sequential path's
+	// best-effort delete-then-remove-registry behavior; unlike single-cluster
+	// delete, --all already removed each registry regardless of delete success.)
+	blockedByIdx := make([]bool, len(names))
+	delFns := make([]func(io.Writer) error, len(names))
+	for i, n := range names {
+		delFns[i] = func(w io.Writer) error {
+			engs := live[n]
+			if len(engs) == 0 {
+				return nil
+			}
+			run.Fprintf(w, "==> deleting cluster %q\n", n)
+			kc, _ := kubeconfigPath(n)
+			for _, eng := range engs {
+				if err := cluster.DeleteWith(eng, n, kc); err != nil {
+					run.Fprintf(w, "warning: delete cluster %q under %s: %v\n", n, eng, err)
+				}
+				if err := registry.Delete(w, eng, registry.ContainerName(n)); err != nil {
+					run.Fprintf(w, "warning: delete registry for %q under %s: %v\n", n, eng, err)
+				}
+			}
+			// Confirm the cluster is actually gone before anything truncates or
+			// removes its disks; a survivor still holding them must be left intact.
+			if stillLive(engs, n) {
+				blockedByIdx[i] = true
+				run.Fprintf(w, "warning: cluster %q is still present after delete; leaving its disks and state alone\n", n)
+				return nil
+			}
+			if kc != "" {
+				_ = os.Remove(kc)
+			}
+			// Preserved images must still be zapped so the next up starts clean;
+			// images about to be deleted don't need it.
+			if !downDeleteDisks && hasState[n] {
+				cluster.ZapISCSIDisks(w, engs[0], n, filepath.Join(root, n))
+			}
+			return nil
+		}
+	}
+	if err := runConcurrent(os.Stdout, delFns...); err != nil {
+		return err
+	}
 	blocked := map[string]bool{}
-	for _, n := range names {
-		engs := live[n]
-		if len(engs) == 0 {
-			continue
-		}
-		run.Printf("==> deleting cluster %q\n", n)
-		kc, _ := kubeconfigPath(n)
-		for _, eng := range engs {
-			if err := cluster.DeleteWith(eng, n, kc); err != nil {
-				run.Printf("warning: delete cluster %q under %s: %v\n", n, eng, err)
-			}
-			if err := registry.Delete(os.Stdout, eng, registry.ContainerName(n)); err != nil {
-				run.Printf("warning: delete registry for %q under %s: %v\n", n, eng, err)
-			}
-		}
-		// Confirm the cluster is actually gone before anything truncates or
-		// removes its disks; a survivor still holding them must be left intact.
-		if stillLive(engs, n) {
+	for i, n := range names {
+		if blockedByIdx[i] {
 			blocked[n] = true
-			fmt.Fprintf(os.Stderr, "warning: cluster %q is still present after delete; leaving its disks and state alone\n", n)
-			continue
-		}
-		if kc != "" {
-			_ = os.Remove(kc)
-		}
-		// Preserved images must still be zapped so the next up starts clean;
-		// images about to be deleted don't need it.
-		if !downDeleteDisks && hasState[n] {
-			cluster.ZapISCSIDisks(engs[0], n, filepath.Join(root, n))
 		}
 	}
 
