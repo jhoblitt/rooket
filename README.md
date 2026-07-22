@@ -176,6 +176,10 @@ active profiles' resources — and pruned when you delete the file. Both live in
 a generated `rooket-profiles` Helm release, so removing a source removes its
 resources.
 
+Switching off the `nfs` profile removes its CephNFS server at the same time as
+its pod, so the pod can be left `Terminating` (and its PVC with it) until
+kubelet gives up on the now-unreachable unmount — this is expected, not a bug.
+
 ## Commands
 
 | Command | Purpose |

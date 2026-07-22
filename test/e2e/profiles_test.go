@@ -40,6 +40,27 @@ func pvcPhase(name string) (string, error) {
 	return strings.TrimSpace(out), nil
 }
 
+// podGoneOrTerminating reports whether a pod is either fully deleted or has
+// been marked for deletion (non-empty deletionTimestamp). It fetches the
+// pod's name alongside its deletionTimestamp in one call so "gone" (no
+// output; --ignore-not-found exits 0) can be told apart from "present but
+// not yet terminating" (name present, deletionTimestamp empty) — collapsing
+// the latter into "gone" would let the assertion pass on a pod that was
+// simply never touched by the prune.
+func podGoneOrTerminating(name string) (bool, error) {
+	out, err := kubectl("-n", "rook-ceph", "get", "pod", name, "--ignore-not-found",
+		"-o", `jsonpath={.metadata.name}{"\t"}{.metadata.deletionTimestamp}`)
+	if err != nil {
+		return false, err
+	}
+	out = strings.TrimSpace(out)
+	if out == "" {
+		return true, nil
+	}
+	parts := strings.SplitN(out, "\t", 2)
+	return len(parts) == 2 && strings.TrimSpace(parts[1]) != "", nil
+}
+
 // This suite and updown_test.go's "rooket up/down" are independent top-level
 // Describe blocks sharing one cluster name (clusterName); Ginkgo randomizes
 // top-level order by default, so neither suite may assume it runs before or
@@ -111,8 +132,30 @@ data:
 
 		Eventually(func() (string, error) { return podPhase("rooket-rgw-smoke") }, 3*time.Minute, 5*time.Second).
 			Should(BeEmpty(), "rgw pod was not pruned")
-		Eventually(func() (string, error) { return podPhase("rooket-nfs-smoke") }, 3*time.Minute, 5*time.Second).
-			Should(BeEmpty(), "nfs pod was not pruned")
+
+		Eventually(func() (string, error) {
+			out, err := kubectl("-n", "rook-ceph", "get", "cephnfs", "rooket-nfs", "--ignore-not-found")
+			return strings.TrimSpace(out), err
+		}, 3*time.Minute, 5*time.Second).Should(BeEmpty(), "CephNFS rooket-nfs was not pruned")
+		Eventually(func() (string, error) {
+			out, err := kubectl("get", "storageclass", "rooket-nfs", "--ignore-not-found")
+			return strings.TrimSpace(out), err
+		}, 3*time.Minute, 5*time.Second).Should(BeEmpty(), "StorageClass rooket-nfs was not pruned")
+		// The nfs pod itself is not held to full deletion: helm's prune
+		// deletes the CephNFS server and the pod mounting its export in the
+		// same operation, so kubelet can't finish the volume teardown before
+		// the server backing it is gone. The pod is then stuck in Error,
+		// holding its PVC in Terminating — sometimes well past this suite's
+		// timeout. That's inherent to pruning a profile whose pod mounts a
+		// volume served by another resource in the same profile (rgw's pod
+		// has no such dependency and prunes cleanly above), not a rooket bug.
+		// Accept either full deletion or a deletionTimestamp as proof helm's
+		// prune reached the pod; don't tighten this back to BeEmpty() without
+		// re-deriving that kubelet can actually finish the unmount in time,
+		// or CI will burn ~25 minutes rediscovering this.
+		Eventually(func() (bool, error) { return podGoneOrTerminating("rooket-nfs-smoke") },
+			3*time.Minute, 5*time.Second).
+			Should(BeTrue(), "nfs pod was neither pruned nor marked for deletion")
 
 		rbdPhase, err := pvcPhase("rooket-rbd-pvc")
 		Expect(err).NotTo(HaveOccurred())
