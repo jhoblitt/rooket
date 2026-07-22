@@ -3,6 +3,7 @@ package cmd
 import (
 	"bufio"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -33,7 +34,17 @@ prune also sweeps iSCSI targets left behind by an earlier deletion of their
 state directory, found via the world-readable /dev/disk/by-path symlinks
 iscsiadm creates for each logged-in session. A target with no active session
 has no such symlink and will not be found this way; see 'targetcli ls' to
-check by hand.
+check by hand. The same by-path scan also backstops an orphan whose state
+directory has lost its worker*-disk*.img files, or was built with a
+different --iqn-date than this run's: its targets are torn down from
+whichever source names them.
+
+This assumes rooket is the only user on this host driving iSCSI targets:
+/dev/disk/by-path is host-global, not per-user, so on a host where two users
+each run rooket against their own per-user container engine, one user's
+prune would see the other's targets too. rooket's usual rootful podman/docker
+setup makes every cluster visible to any querying user regardless, so this
+does not add a new restriction there.
 
   rooket prune --dry-run   # list what would be removed
   rooket prune             # prompt, then remove
@@ -68,23 +79,28 @@ check by hand.
 			return fmt.Errorf("refusing to prune with an unqueryable engine present")
 		}
 
-		var orphans []string
-		for _, n := range stateNames {
-			if _, ok := live[n]; !ok {
-				orphans = append(orphans, n)
-			}
-		}
-
 		strandedFound, err := discoverStrandedByPath(iscsiByPathDir)
 		if err != nil {
 			return fmt.Errorf("scan %s: %w", iscsiByPathDir, err)
 		}
+
+		orphans, byPathDisks := prunePlan(stateNames, live, hasState, strandedFound)
 		stranded := strandableClusters(strandedFound, live, hasState)
 
 		if len(orphans) == 0 && len(stranded) == 0 {
 			run.Printf("nothing to prune\n")
 			return nil
 		}
+
+		// Reconstructed up front, before the prompt, so it can report an
+		// accurate total — and while each orphan's worker*-disk*.img filenames
+		// still exist to name it; nothing can reconstruct them once the state
+		// dir is gone.
+		var disks []iscsiDisk
+		for _, o := range orphans {
+			disks = append(disks, stateDirDisks(o, filepath.Join(root, o), pruneIQNDate)...)
+		}
+		disks = append(disks, byPathDisks...)
 
 		engNames := make([]string, len(consulted))
 		for i, eng := range consulted {
@@ -98,28 +114,25 @@ check by hand.
 				run.Printf("  %s\n", filepath.Join(root, o))
 			}
 		}
-
-		var strandedDisks []iscsiDisk
 		if len(stranded) > 0 {
 			run.Printf("Stranded iSCSI targets with no state directory (no live kind cluster under %s):\n",
 				strings.Join(engNames, " or "))
 			for _, c := range stranded {
 				for _, d := range strandedFound[c] {
 					run.Printf("  %s\n", d.targetIQN)
-					strandedDisks = append(strandedDisks, d)
 				}
 			}
 		}
-		if len(orphans) > 0 {
-			run.Printf("Their iSCSI targets will be removed too, in one privileged run.\n")
+		if len(disks) > 0 {
+			run.Printf("The iSCSI targets listed above will be removed too, in one privileged run.\n")
 		}
 
 		if pruneDryRun {
 			return nil
 		}
 		if !pruneForce {
-			run.Printf("Remove %d state director(y/ies) and %d stranded iSCSI target(s)? [y/N] ",
-				len(orphans), len(strandedDisks))
+			run.Printf("Remove %d state director(y/ies) and %d iSCSI target(s)? [y/N] ",
+				len(orphans), len(disks))
 			line, _ := bufio.NewReader(os.Stdin).ReadString('\n')
 			if strings.TrimSpace(strings.ToLower(line)) != "y" {
 				run.Printf("aborted\n")
@@ -127,33 +140,79 @@ check by hand.
 			}
 		}
 
-		// Reconstructed from each orphan's state dir before it is deleted below —
-		// once the dir and its worker*-disk*.img filenames are gone, nothing can
-		// name that cluster's targets again.
-		var disks []iscsiDisk
-		for _, o := range orphans {
-			disks = append(disks, stateDirDisks(o, filepath.Join(root, o), pruneIQNDate)...)
-		}
-		disks = append(disks, strandedDisks...)
-
-		if len(disks) > 0 {
-			run.Printf("==> tearing down iSCSI targets (all clusters in one privileged run)\n")
-			steps := buildISCSITeardownSteps(disks)
-			if err := runPrivileged(steps); err != nil {
-				return fmt.Errorf("iSCSI teardown failed.\n\nRun the following script manually with root privileges:\n\n%s\nError: %w", renderScript(steps), err)
-			}
-		}
-
-		for _, o := range orphans {
-			p := filepath.Join(root, o)
-			if err := os.RemoveAll(p); err != nil {
-				run.Printf("warning: remove %s: %v\n", p, err)
-			} else {
-				run.Printf("removed %s\n", p)
-			}
-		}
-		return nil
+		return pruneExecute(root, orphans, disks, teardownISCSI, os.RemoveAll, os.Stdout)
 	},
+}
+
+// teardownISCSI runs disks' privileged teardown, wrapping a failure with the
+// manual-recovery script — the same shape prune, down --all, and block
+// teardown all render on a privileged-run failure.
+func teardownISCSI(disks []iscsiDisk) error {
+	steps := buildISCSITeardownSteps(disks)
+	if err := runPrivileged(steps); err != nil {
+		return fmt.Errorf("iSCSI teardown failed.\n\nRun the following script manually with root privileges:\n\n%s\nError: %w", renderScript(steps), err)
+	}
+	return nil
+}
+
+// pruneExecute performs the two side-effecting steps of a prune run: tear
+// down disks' iSCSI targets (if any), then, only once that succeeds, remove
+// each orphan's state directory. teardown and remove are injected so this can
+// be tested against fakes instead of real privilege escalation or disk I/O.
+//
+// Preserving order here — and returning before any remove call when teardown
+// fails — is the whole point: an orphan's state directory is prune's only
+// remaining record of its targets, so it must never be deleted ahead of, or
+// despite a failure of, the teardown that names them.
+func pruneExecute(root string, orphans []string, disks []iscsiDisk, teardown func([]iscsiDisk) error, remove func(string) error, out io.Writer) error {
+	if len(disks) > 0 {
+		fmt.Fprintf(out, "==> tearing down iSCSI targets (all clusters in one privileged run)\n")
+		if err := teardown(disks); err != nil {
+			return err
+		}
+	}
+	for _, o := range orphans {
+		p := filepath.Join(root, o)
+		if err := remove(p); err != nil {
+			fmt.Fprintf(out, "warning: remove %s: %v\n", p, err)
+		} else {
+			fmt.Fprintf(out, "removed %s\n", p)
+		}
+	}
+	return nil
+}
+
+// prunePlan decides which state-dir clusters are orphaned (no live kind
+// cluster) and which by-path-discovered disks the run's privileged teardown
+// batch must include for them, in addition to whatever the caller
+// reconstructs from each orphan's state dir via stateDirDisks.
+//
+// The by-path union matters because reconstruction alone can miss real
+// targets: a state dir whose worker*-disk*.img files were already removed
+// (by an earlier partial teardown, or by hand) globs to nothing, and a
+// cluster built with a --iqn-date other than this run's reconstructs IQNs
+// that match nothing either. In both cases the by-path symlink still carries
+// the correct IQN, so it is unioned in rather than discarded. Duplicates
+// across the two sources are harmless: buildISCSITeardownSteps is
+// idempotent and best-effort.
+//
+// A cluster with neither a state dir nor a live entry is handled separately,
+// by strandableClusters — this function only adds by-path disks for
+// clusters that already have a state dir (are in stateNames); it does not
+// itself decide the no-state-dir "stranded" bucket. A live cluster's by-path
+// entries are never included here or there.
+func prunePlan(stateNames []string, live map[string][]engine.Engine, hasState map[string]bool, strandedFound map[string][]iscsiDisk) (orphans []string, disks []iscsiDisk) {
+	for _, n := range stateNames {
+		if _, ok := live[n]; ok {
+			continue
+		}
+		orphans = append(orphans, n)
+		disks = append(disks, strandedFound[n]...)
+	}
+	for _, c := range strandableClusters(strandedFound, live, hasState) {
+		disks = append(disks, strandedFound[c]...)
+	}
+	return orphans, disks
 }
 
 // strandedByPathRE matches a rooket iSCSI by-path symlink for LUN 0 and
