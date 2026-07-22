@@ -196,7 +196,7 @@ Instead rooket generates a chart from every active template source — the clone
     ├── local-scratch-pvc.yaml        # from .rooket/templates/
     ├── rgw-10-objectstoreuser.yaml   # <profile>-<original filename>
     ├── rgw-20-obc.yaml
-    └── rbd-10-test-pod.yaml
+    └── rbd-10-pvc.yaml
 ```
 
 installed as a fourth release after `rook-ceph-cluster`:
@@ -228,7 +228,7 @@ which it must implement for its assertions regardless.
 
 | Profile | Values overlay | Templates |
 |---|---|---|
-| `rbd` | none | PVC on the chart's default `ceph-block` StorageClass, pod writing to the mount |
+| `rbd` | none | PVC on the chart's default `ceph-block` StorageClass (no pod: CI found krbd maps but can't mount on a kind node — the device node lands in the host's `/dev`, not the node's per-container tmpfs) |
 | `rgw` | none | CephObjectStoreUser, OBC on the chart's default `ceph-bucket` StorageClass, s3 client pod |
 | `nfs` | `ceph-csi-drivers`: `drivers.nfs.enabled: true` | CephNFS, NFS StorageClass, PVC, pod |
 
@@ -242,7 +242,7 @@ The default filesystem also backs the NFS exports, so `nfs` needs no
 reaches every chart.
 
 Templates are adapted from rook's own checked-in examples
-(`deploy/examples/csi/rbd/{pvc,pod}.yaml`, `deploy/examples/object-user.yaml`,
+(`deploy/examples/csi/rbd/pvc.yaml`, `deploy/examples/object-user.yaml`,
 `deploy/examples/object-bucket-claim-a.yaml`, `deploy/examples/nfs.yaml`,
 `deploy/examples/csi/nfs/{storageclass,pvc,pod}.yaml`) so they stay idiomatic.
 
@@ -314,8 +314,8 @@ Unit:
 
 E2E (ginkgo, `test/e2e`):
 
-- `rooket up --with rbd --with rgw --with nfs` → each profile's pod Ready, PVCs
-  Bound, OBC Bound;
+- `rooket up --with rbd --with rgw --with nfs` → rgw and nfs pods Ready, rbd
+  and nfs PVCs Bound, OBC Bound;
 - then `rooket up --with-only rbd` → rgw and nfs resources pruned by the
   profiles chart, while a resource from `.rooket/templates/` survives, since it
   is not tied to any profile;

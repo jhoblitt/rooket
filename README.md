@@ -155,7 +155,7 @@ $ rooket values profiles fork rgw     # copy a built-in to hack on
 ```
 
 Profiles bundle values overrides with Kubernetes resources the rook charts do
-not template. Built-ins: `rbd` (PVC + pod on the default `ceph-block` class),
+not template. Built-ins: `rbd` (PVC on the default `ceph-block` class),
 `rgw` (object store user, OBC, s3 client pod), and `nfs` (enables the NFS CSI
 driver, a CephNFS server, and a pod mounting an export).
 
@@ -210,8 +210,9 @@ Unit tests: `go test ./...`. The end-to-end suite
 (`go test -tags e2e ./test/e2e/ -timeout 60m`, needs `ROOK_DIR` and existing
 block devices) drives a real `rooket up`/`down` and asserts one OSD per
 worker, no loop devices, a settled healthy cluster, RADOS I/O, CSI block-PVC
-provisioning and CephFS-PVC I/O (krbd mounts need udev-created device nodes,
-which kind nodes lack), the `list`/`kubectl`/`kubeconfig`/`prune` surfaces,
+provisioning and CephFS-PVC I/O (krbd maps fine but can't mount on a kind
+node: the device node appears in the host's /dev, not the node's
+per-container tmpfs), the `list`/`kubectl`/`kubeconfig`/`prune` surfaces,
 registry-port reuse across re-ups, `down --all` ownership scoping against a
 foreign kind cluster, and clean teardown. CI runs the suite under docker on
 every PR against rook master, release-1.20, and release-1.19 — covering both
