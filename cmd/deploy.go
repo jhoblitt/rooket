@@ -216,6 +216,9 @@ func digestOrEmpty(port int, repo, tag string) string {
 // cluster's state dir, where it survives a failed deploy for inspection.
 func writeComposed(chart string, base map[string]any, rookDir string) (string, error) {
 	cloneDir := clone.Open(rookDir)
+	if err := cloneDir.Ensure(); err != nil {
+		return "", err
+	}
 	names, err := activeProfileNames(cloneDir, deployWith, deployWithOnly, deployWithOnlySet)
 	if err != nil {
 		return "", err

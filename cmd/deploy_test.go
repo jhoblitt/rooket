@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"reflect"
 	"testing"
+
+	"github.com/jhoblitt/rooket/internal/clone"
 )
 
 func writeChartYAML(t *testing.T, content string) string {
@@ -148,4 +150,32 @@ func TestHelmValueArgs(t *testing.T) {
 			t.Fatalf("got %#v, want %#v", got, want)
 		}
 	})
+}
+
+func TestWriteComposedEnsuresCloneDir(t *testing.T) {
+	root := t.TempDir()
+	rookDir := filepath.Join(root, "rook")
+	if err := os.MkdirAll(rookDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	cloneDir := clone.Open(rookDir)
+
+	valuesDir := filepath.Join(cloneDir.Path(), "values")
+	if err := os.MkdirAll(valuesDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	gi := filepath.Join(cloneDir.Path(), ".gitignore")
+	if _, err := os.Stat(gi); err == nil {
+		t.Fatal(".gitignore already exists")
+	}
+
+	if err := cloneDir.Ensure(); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := os.Stat(gi); err != nil {
+		t.Errorf(".gitignore not created after Ensure(): %v", err)
+	}
 }
