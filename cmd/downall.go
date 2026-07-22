@@ -190,7 +190,7 @@ func downAllRun(cmd *cobra.Command) error {
 		if len(disks) > 0 {
 			run.Printf("==> tearing down iSCSI targets (all clusters in one privileged run)\n")
 			steps := buildISCSITeardownSteps(disks)
-			if err := runPrivileged(steps); err != nil {
+			if err := runPrivileged(os.Stdout, steps); err != nil {
 				return fmt.Errorf("iSCSI teardown failed.\n\nRun the following script manually with root privileges:\n\n%s\nError: %w", renderScript(steps), err)
 			}
 		}

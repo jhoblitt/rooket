@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -64,46 +65,83 @@ func blockSetupRun(_ *cobra.Command, _ []string) error {
 	if err := validateIQNDate(blockSetupIQNDate); err != nil {
 		return err
 	}
+	dataDir, err := blockDataDir(blockSetupName, blockSetupDataDir)
+	if err != nil {
+		return err
+	}
+	return blockSetupRunTo(os.Stdout, blockSetupName, dataDir, blockSetupIQNDate,
+		blockSetupWorkers, blockSetupDiskCount, blockSetupDiskSizeGB)
+}
 
-	dataDir := blockSetupDataDir
+// blockDataDir resolves the disk-image directory — the cluster's state dir by
+// default — and ensures it exists.
+func blockDataDir(name, override string) (string, error) {
+	dataDir := override
 	if dataDir == "" {
 		var err error
-		dataDir, err = stateDirPath(blockSetupName)
+		dataDir, err = stateDirPath(name)
 		if err != nil {
-			return err
+			return "", err
 		}
 	}
 	if err := os.MkdirAll(dataDir, 0o755); err != nil {
-		return fmt.Errorf("create data dir: %w", err)
+		return "", fmt.Errorf("create data dir: %w", err)
 	}
+	return dataDir, nil
+}
 
-	initIQN := fmt.Sprintf("iqn.%s.local.rooket:initiator", blockSetupIQNDate)
-
-	// Build the disk list.
+// iscsiDiskList builds the iSCSI disk descriptors for a cluster's workers and
+// per-worker disks. Shared by block setup and by the up command's pre-flight
+// overlap check so both name the same images, backstores, and target IQNs.
+func iscsiDiskList(name, dataDir, iqnDate string, workers, diskCount int) []iscsiDisk {
 	var disks []iscsiDisk
-	for w := 0; w < blockSetupWorkers; w++ {
-		for d := 0; d < blockSetupDiskCount; d++ {
+	for w := 0; w < workers; w++ {
+		for d := 0; d < diskCount; d++ {
 			id := fmt.Sprintf("worker%d-disk%d", w, d)
 			disks = append(disks, iscsiDisk{
 				workerIdx:     w,
 				diskIdx:       d,
 				imgPath:       filepath.Join(dataDir, id+".img"),
-				backstoreName: fmt.Sprintf("%s-%s", blockSetupName, id),
-				targetIQN:     fmt.Sprintf("iqn.%s.local.rooket:%s-%s", blockSetupIQNDate, blockSetupName, id),
+				backstoreName: fmt.Sprintf("%s-%s", name, id),
+				targetIQN:     fmt.Sprintf("iqn.%s.local.rooket:%s-%s", iqnDate, name, id),
 			})
 		}
 	}
+	return disks
+}
+
+// blockSetupPromptFree reports whether block setup for these disks will finish
+// without a pkexec prompt — either because every device is already attached (so
+// the privileged step is skipped entirely) or because a root or passwordless-
+// sudo path is available. Only then is it safe to overlap block setup with a
+// make that owns the terminal: otherwise the pkexec prompt would compete with
+// make's stream for the terminal, so the caller keeps block setup serial and in
+// front. The probes are the same ones runPrivileged itself branches on.
+func blockSetupPromptFree(disks []iscsiDisk) bool {
+	return allISCSIDevicesPresent(disks) ||
+		os.Geteuid() == 0 ||
+		sudoersGrantLive() ||
+		sudoNoPasswordAvailable()
+}
+
+// blockSetupRunTo is the block-setup core, writing every rooket-emitted line and
+// child stream to out so a caller can buffer it while another phase (make) owns
+// the terminal. It must not mutate process-global state, so a caller can run it
+// concurrently with other phases.
+func blockSetupRunTo(out io.Writer, name, dataDir, iqnDate string, workers, diskCount, diskSizeGB int) error {
+	initIQN := fmt.Sprintf("iqn.%s.local.rooket:initiator", iqnDate)
+	disks := iscsiDiskList(name, dataDir, iqnDate, workers, diskCount)
 
 	// Step 1: Create sparse image files (no privilege needed).
-	run.Printf("==> creating disk images\n")
+	run.Fprintf(out, "==> creating disk images\n")
 	for _, d := range disks {
 		if _, err := os.Stat(d.imgPath); os.IsNotExist(err) {
-			if err := run.Cmd("truncate", "-s", fmt.Sprintf("%dG", blockSetupDiskSizeGB), d.imgPath); err != nil {
+			if err := run.CmdTo(out, "truncate", "-s", fmt.Sprintf("%dG", diskSizeGB), d.imgPath); err != nil {
 				return fmt.Errorf("create image %s: %w", d.imgPath, err)
 			}
-			run.Printf("created %s (%dGiB)\n", d.imgPath, blockSetupDiskSizeGB)
+			run.Fprintf(out, "created %s (%dGiB)\n", d.imgPath, diskSizeGB)
 		} else {
-			run.Printf("image %s already exists, reusing\n", d.imgPath)
+			run.Fprintf(out, "image %s already exists, reusing\n", d.imgPath)
 		}
 	}
 
@@ -111,26 +149,26 @@ func blockSetupRun(_ *cobra.Command, _ []string) error {
 	// Checking the (world-readable) by-path symlinks first means a re-run with
 	// nothing to do skips the privileged step and its sudo/pkexec prompt.
 	if allISCSIDevicesPresent(disks) {
-		run.Printf("==> iSCSI targets already present, skipping privileged setup\n")
+		run.Fprintf(out, "==> iSCSI targets already present, skipping privileged setup\n")
 	} else {
-		run.Printf("==> configuring iSCSI targets\n")
-		steps := buildISCSISteps(initIQN, disks, blockSetupDiskSizeGB, !initiatorNameCurrent(initiatorNamePath, initIQN))
-		if err := runPrivileged(steps); err != nil {
+		run.Fprintf(out, "==> configuring iSCSI targets\n")
+		steps := buildISCSISteps(initIQN, disks, diskSizeGB, !initiatorNameCurrent(initiatorNamePath, initIQN))
+		if err := runPrivileged(out, steps); err != nil {
 			return fmt.Errorf("iSCSI setup failed.\n\nRun the following script manually with root privileges:\n\n%s\nError: %w", renderScript(steps), err)
 		}
 	}
 
 	// Step 3: Wait for block devices to appear and print their paths.
-	run.Printf("==> waiting for block devices\n")
+	run.Fprintf(out, "==> waiting for block devices\n")
 	var missing []string
 	for _, d := range disks {
 		dev, err := waitForISCSIDevice(d.targetIQN)
 		if err != nil {
-			run.Printf("warning: %v\n", err)
+			run.Fprintf(out, "warning: %v\n", err)
 			missing = append(missing, d.targetIQN)
 			continue
 		}
-		run.Printf("worker%d disk%d: %s\n", d.workerIdx, d.diskIdx, dev)
+		run.Fprintf(out, "worker%d disk%d: %s\n", d.workerIdx, d.diskIdx, dev)
 	}
 	if len(missing) > 0 {
 		return fmt.Errorf("block devices not found for targets: %s", strings.Join(missing, ", "))
@@ -185,7 +223,7 @@ func blockTeardownRun(_ *cobra.Command, _ []string) error {
 
 	run.Printf("==> tearing down iSCSI targets\n")
 	steps := buildISCSITeardownSteps(disks)
-	if err := runPrivileged(steps); err != nil {
+	if err := runPrivileged(os.Stdout, steps); err != nil {
 		return fmt.Errorf("iSCSI teardown failed.\n\nRun the following script manually with root privileges:\n\n%s\nError: %w", renderScript(steps), err)
 	}
 

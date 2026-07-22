@@ -187,22 +187,22 @@ func sudoNoPasswordAvailable() bool {
 // re-running the whole step list re-applies the same state, so retrying it
 // through pkexec costs one extra prompt rather than any incorrect or
 // duplicated work.
-func runPrivileged(steps []privStep) error {
+func runPrivileged(out io.Writer, steps []privStep) error {
 	if err := validateSteps(steps); err != nil {
 		return err
 	}
 	if os.Geteuid() == 0 {
-		return runSteps(os.Stdout, nil, steps)
+		return runSteps(out, nil, steps)
 	}
 	if sudoersGrantLive() || sudoNoPasswordAvailable() {
-		if err := runSteps(os.Stdout, []string{"sudo", "-n"}, steps); err == nil {
+		if err := runSteps(out, []string{"sudo", "-n"}, steps); err == nil {
 			return nil
 		}
 	}
-	return runPrivilegedViaPkexec(renderScript(steps))
+	return runPrivilegedViaPkexec(out, renderScript(steps))
 }
 
-func runPrivilegedViaPkexec(script string) error {
+func runPrivilegedViaPkexec(out io.Writer, script string) error {
 	if _, err := exec.LookPath("pkexec"); err != nil {
 		return fmt.Errorf("no passwordless sudo rule (run `rooket sudoers install`) and pkexec is unavailable: %w", err)
 	}
@@ -219,8 +219,10 @@ func runPrivilegedViaPkexec(script string) error {
 	if err := os.Chmod(f.Name(), 0o700); err != nil {
 		return err
 	}
-	run.Printf("==> requesting root via pkexec (you may be prompted to authenticate)\n")
-	return run.Cmd("pkexec", "sh", f.Name())
+	// CmdTo still wires the child's stdin to /dev/tty, so pkexec's polkit agent
+	// can prompt even though its trace and output are routed to out.
+	run.Fprintf(out, "==> requesting root via pkexec (you may be prompted to authenticate)\n")
+	return run.CmdTo(out, "pkexec", "sh", f.Name())
 }
 
 func renderStepLine(s privStep) string {
