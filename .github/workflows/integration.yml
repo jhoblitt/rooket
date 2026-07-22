@@ -151,18 +151,13 @@ jobs:
           permit "$TEE_BIN" /etc/iscsi/initiatorname.iscsi
           permit "$CAT_BIN" /etc/sudoers.d/rooket
 
-          # rooket itself never invokes the resolved path: its argv is the
-          # bare command name (e.g. "iscsiadm"), which sudo resolves through
-          # its own secure_path rather than the caller's $PATH. The rule must
-          # permit both forms, since sudo matches by resolved device+inode
-          # regardless of which spelling named it — the assertions above alone
-          # would miss a rule that only happened to match the resolved path.
-          permit targetcli /iscsi create iqn.2003-01.local.rooket:x
-          permit iscsiadm -m node --login
-          permit systemctl restart iscsid
-          permit systemctl start iscsid
-          permit tee /etc/iscsi/initiatorname.iscsi
-          permit cat /etc/sudoers.d/rooket
+          # Only the resolved paths are asserted, because sudo does NOT match a
+          # symlink against a rule naming that symlink's target: where a distro
+          # ships /usr/sbin/iscsiadm -> ../bin/iscsiadm, `sudo iscsiadm` resolves
+          # to the /usr/sbin spelling and is denied by a rule granting /usr/bin.
+          # rooket therefore invokes the resolved path itself (resolvedCommandPath),
+          # so a bare-name assertion here would test a form rooket never uses —
+          # and would false-alarm on any image that does ship that symlink.
 
       - name: Assert the denied commands
         run: |

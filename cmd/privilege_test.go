@@ -153,10 +153,10 @@ func writeStubSudoDenyingRooketRule(t *testing.T) (dir, logPath string) {
 printf '%%s\n' "$*" >> %q
 printf '%%s\n' "$*"
 case "$*" in
-  "-n cat %s") exit 1 ;;
+  "-n %s %s") exit 1 ;;
   *) exit 0 ;;
 esac
-`, logPath, sudoersPath)
+`, logPath, resolvedCommandPath("cat"), sudoersPath)
 	if err := os.WriteFile(filepath.Join(dir, "sudo"), []byte(stub), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -178,7 +178,8 @@ func TestRunStepsIssuesItemizedCommands(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := "-n systemctl start iscsid\n-n targetcli saveconfig\n"
+	want := fmt.Sprintf("-n %s start iscsid\n-n %s saveconfig\n",
+		resolvedCommandPath("systemctl"), resolvedCommandPath("targetcli"))
 	if string(got) != want {
 		t.Errorf("stub sudo recorded\n%q\nwant\n%q", got, want)
 	}
@@ -312,10 +313,10 @@ func TestRunPrivilegedFallsBackToPkexec(t *testing.T) {
 	}
 	// Both probes run first and fail (the stub denies everything), so no
 	// itemized step is attempted and the whole script goes to pkexec instead.
-	if !strings.Contains(string(got), "-n cat "+sudoersPath) {
+	if !strings.Contains(string(got), "-n "+resolvedCommandPath("cat")+" "+sudoersPath) {
 		t.Errorf("rooket-rule probe not attempted; log:\n%s", got)
 	}
-	if strings.Contains(string(got), "-n targetcli saveconfig") {
+	if strings.Contains(string(got), "-n "+resolvedCommandPath("targetcli")+" saveconfig") {
 		t.Errorf("itemized step attempted despite a dead grant; log:\n%s", got)
 	}
 	if !strings.Contains(string(got), "sh /") {
@@ -342,7 +343,7 @@ func TestRunPrivilegedTakesItemizedPathWhenProbeSucceeds(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(got), "-n targetcli saveconfig") {
+	if !strings.Contains(string(got), "-n "+resolvedCommandPath("targetcli")+" saveconfig") {
 		t.Errorf("itemized invocation missing; log:\n%s", got)
 	}
 	if strings.Contains(string(got), "sh /") {
@@ -369,13 +370,13 @@ func TestRunPrivilegedTakesItemizedPathOnBlanketSudoWithoutRooketRule(t *testing
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(got), "-n cat "+sudoersPath) {
+	if !strings.Contains(string(got), "-n "+resolvedCommandPath("cat")+" "+sudoersPath) {
 		t.Errorf("rooket-rule probe not attempted; log:\n%s", got)
 	}
 	if !strings.Contains(string(got), "-n true") {
 		t.Errorf("blanket-sudo probe not attempted; log:\n%s", got)
 	}
-	if !strings.Contains(string(got), "-n targetcli saveconfig") {
+	if !strings.Contains(string(got), "-n "+resolvedCommandPath("targetcli")+" saveconfig") {
 		t.Errorf("itemized step not attempted despite blanket sudo; log:\n%s", got)
 	}
 	if strings.Contains(string(got), "sh /") {
@@ -395,11 +396,11 @@ func TestRunPrivilegedFallsBackToPkexecWhenItemizedRunFails(t *testing.T) {
 	sudoStub := fmt.Sprintf(`#!/bin/sh
 printf '%%s\n' "$*" >> %q
 case "$*" in
-  "-n cat %s") exit 0 ;;
-  "-n targetcli saveconfig") exit 1 ;;
+  "-n %s %s") exit 0 ;;
+  "-n %s saveconfig") exit 1 ;;
   *) exit 0 ;;
 esac
-`, logPath, sudoersPath)
+`, logPath, resolvedCommandPath("cat"), sudoersPath, resolvedCommandPath("targetcli"))
 	if err := os.WriteFile(filepath.Join(dir, "sudo"), []byte(sudoStub), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -417,7 +418,7 @@ esac
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(got), "-n targetcli saveconfig") {
+	if !strings.Contains(string(got), "-n "+resolvedCommandPath("targetcli")+" saveconfig") {
 		t.Errorf("itemized attempt not made; log:\n%s", got)
 	}
 	if !strings.Contains(string(got), "sh /") {
@@ -428,5 +429,66 @@ esac
 func TestRunPrivilegedRejectsUngrantedStep(t *testing.T) {
 	if err := runPrivileged([]privStep{{argv: []string{"rm", "-rf", "/"}}}); err == nil {
 		t.Fatal("runPrivileged accepted an ungranted command, want error")
+	}
+}
+
+// sudo matches a rule by the command path it resolves through secure_path, and
+// will not match a symlink against a rule naming the symlink's target. rooket's
+// generated rule records the resolved path, so an itemized invocation must name
+// that same resolved path rather than the bare command name.
+func TestResolvedCommandPathFollowsSymlinks(t *testing.T) {
+	dir := t.TempDir()
+	real := filepath.Join(dir, "real-tool")
+	if err := os.WriteFile(real, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(real, filepath.Join(dir, "targetcli")); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	want, err := filepath.EvalSymlinks(real)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := resolvedCommandPath("targetcli"); got != want {
+		t.Errorf("resolvedCommandPath(targetcli) = %q, want the symlink target %q", got, want)
+	}
+}
+
+func TestResolvedCommandPathFallsBackToTheBareName(t *testing.T) {
+	t.Setenv("PATH", t.TempDir())
+	const missing = "rooket-no-such-command"
+	if got := resolvedCommandPath(missing); got != missing {
+		t.Errorf("resolvedCommandPath(%q) = %q, want the name unchanged", missing, got)
+	}
+}
+
+func TestRunStepsInvokesTheResolvedPath(t *testing.T) {
+	dir, logPath := writeStubSudo(t, 0, 0)
+	real := filepath.Join(dir, "real-targetcli")
+	if err := os.WriteFile(real, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(real, filepath.Join(dir, "targetcli")); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	if err := runSteps(io.Discard, []string{"sudo", "-n"}, []privStep{
+		{argv: []string{"targetcli", "saveconfig"}},
+	}); err != nil {
+		t.Fatalf("runSteps: %v", err)
+	}
+	got, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want, err := filepath.EvalSymlinks(real)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(got), "-n "+want+" saveconfig") {
+		t.Errorf("stub sudo recorded\n%s\nwant the resolved path %q", got, want)
 	}
 }

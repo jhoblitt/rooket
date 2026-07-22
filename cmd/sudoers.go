@@ -23,7 +23,7 @@ var readInstalledSudoersFunc = readInstalledSudoers
 // through the pinned `cat` the rule grants, because /etc/sudoers.d is mode
 // 0750 and the file is therefore unreadable directly.
 func readInstalledSudoers() (string, bool) {
-	out, err := exec.Command("sudo", "-n", "cat", sudoersPath).Output()
+	out, err := exec.Command("sudo", "-n", resolvedCommandPath("cat"), sudoersPath).Output()
 	if err != nil {
 		return "", false
 	}
