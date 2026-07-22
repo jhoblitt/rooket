@@ -387,9 +387,16 @@ func forEachNode(w io.Writer, nodes []string, fn func(node string, out *bytes.Bu
 }
 
 // rbdMaxDevices is the number of /dev/rbdN nodes nodePrepScript pre-creates
-// (see rbdNodeScript), i.e. the number of RBD volumes a node can have
-// concurrently mapped afterwards.
-const rbdMaxDevices = 16
+// (see rbdNodeScript). This is NOT a per-node limit: every kind node is a
+// container sharing the one host kernel, and with single_major=Y there is a
+// single kernel-wide rbd major and dev_id allocator, so these slots are a
+// HOST-WIDE ceiling shared across every node in this cluster, every other
+// rooket cluster on the same workstation, and any manual `rbd map` the
+// operator runs outside rooket entirely. 256 is chosen generously because the
+// cost is negligible — these are empty inodes in a per-node tmpfs, so
+// pre-creating 256 of them costs nothing measurable — while a host-wide
+// ceiling is easy to exhaust at a much smaller count.
+const rbdMaxDevices = 256
 
 // allowedDevs is the allowlist of device-node paths kept in every node's /dev;
 // nodePrepScript removes every other block or char node, plus per node the
@@ -486,6 +493,13 @@ fi
 	b.WriteString(`  rm -f "$dev" || { echo "ROOKET_FAIL:mask host device $dev"; rc=1; }
 done
 `)
+	// A warm rerun against a live cluster never unlinks an already-mapped
+	// /dev/rbdN out from under its mount: every such path (0..rbdMaxDevices-1)
+	// is always a member of the static allowedDevs list above, so the case
+	// match above always takes the "continue" branch for it and this rm -f
+	// never runs against it; rbdNodeScript's own mknod loop then also skips
+	// any path that already exists. There is no remove-then-recreate step, so
+	// no window where the path is briefly absent.
 	b.WriteString(rbdNodeScript())
 	b.WriteString("echo ROOKET_DONE\nexit $rc\n")
 	return b.String()
@@ -509,6 +523,15 @@ done
 // misattributing OSDs across nodes — see PrepareNodes). Pre-creating the
 // nodes here sidesteps both problems.
 //
+// This has a residual isolation cost: because every node's /dev/rbdN nodes
+// are pre-created with the SAME major:minor pairs and those numbers address
+// the one shared host kernel object, a privileged pod on node A can open the
+// device mapped for node B's mount, bypassing Kubernetes' single-attach
+// semantics. This is acceptable for rooket's threat model — a single-operator
+// local dev cluster where the node containers are already privileged and the
+// operator already has host root — but would not be for a multi-tenant
+// cluster.
+//
 // With /sys/module/rbd/parameters/single_major = Y (checked at runtime, not
 // assumed) the kernel assigns image N minor N<<4 under one dynamically
 // numbered major — confirmed against the kernel source (drivers/block/rbd.c:
@@ -520,6 +543,14 @@ done
 // modprobe needs /lib/modules in the node, which kind only bind-mounts on
 // request; rooket's kind config does not, so this is expected to no-op via
 // the "already loaded" path whenever some other cluster has used RBD before.
+//
+// The mknod loop below is a silent single point of failure for two distinct
+// causes that look identical at runtime: a wrong N<<4 minor still mknods
+// successfully (a wrong minor is still a valid minor) and just leaves the
+// volume unmountable, and an exhausted rbdMaxDevices does too — both
+// reproduce the exact "rbd: mapping succeeded but /dev/rbdN is not
+// accessible" error this step exists to eliminate, with nothing pointing at
+// rooket as the cause. If that message resurfaces, look here first.
 func rbdNodeScript() string {
 	return fmt.Sprintf(`modprobe rbd 2>/dev/null || true
 rbd_major=$(awk '$2 == "rbd" { print $1 }' /proc/devices)
