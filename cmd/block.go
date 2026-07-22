@@ -351,9 +351,15 @@ func buildISCSISteps(initIQN string, disks []iscsiDisk, sizeGB int, writeInitiat
 	return steps
 }
 
+const (
+	iscsiByPathDir    = "/dev/disk/by-path"
+	iscsiByPathPrefix = "ip-127.0.0.1:3260-iscsi-"
+	iscsiByPathSuffix = "-lun-0"
+)
+
 // iscsiByPathLink returns the /dev/disk/by-path symlink for a target's LUN 0.
 func iscsiByPathLink(targetIQN string) string {
-	return fmt.Sprintf("/dev/disk/by-path/ip-127.0.0.1:3260-iscsi-%s-lun-0", targetIQN)
+	return filepath.Join(iscsiByPathDir, iscsiByPathPrefix+targetIQN+iscsiByPathSuffix)
 }
 
 // resolveDeviceLink reads a symlink and returns its target as an absolute path,
