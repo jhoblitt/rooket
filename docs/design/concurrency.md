@@ -196,6 +196,36 @@ Concurrent teardown output follows invariant 3: each cluster's delete writes to
 its own `runConcurrent` buffer (including its zap lines, which is why
 `cluster.ZapISCSIDisks` takes an `io.Writer`), flushed in cluster-name order.
 
+## Concurrency in `deploy`
+
+`deploy` installs four helm releases in a strict chain — rook-ceph (operator)
+→ ceph-csi-drivers → rook-ceph-cluster → rooket-profiles — and every edge is a
+real data dependency (invariant 1):
+
+- **operator → ceph-csi-drivers.** ceph-csi-drivers needs the csi.ceph.io CRDs
+  the operator chart's ceph-csi-operator subchart installs; they may not be
+  established the instant the operator install returns, which is why
+  `installCephCsiDrivers` retries up to five times rather than assuming they
+  are ready.
+- **operator → rook-ceph-cluster.** The cluster chart's CRs (CephCluster,
+  pools, object store, ...) need the operator running to reconcile them.
+- **rook-ceph-cluster → rooket-profiles.** Profile resources reference
+  cluster-chart resources — a CephObjectStoreUser's object store, a
+  StorageClass a PVC binds to — so they cannot be applied first.
+
+A second, narrower rule sits inside the chain: the two `ensureChartDeps` calls
+(one for rook-ceph, one for rook-ceph-cluster) share the "make" purpose helm
+home (`helmEnv`'s `HELM_CACHE_HOME` / `HELM_REPOSITORY_CONFIG`, non-atomic per
+that function's own comment), so they must never run concurrently with each
+other (invariant 2). The chain's sequencing already keeps them apart — the
+whole operator install, including ceph-csi-drivers, completes before the
+cluster install's `ensureChartDeps` call starts — so no extra synchronization
+is needed to enforce it.
+
+Every edge here is a real invariant, not a leftover of code structure, so — as
+with single-cluster teardown in `down` — the design goal is satisfied by *not*
+manufacturing unsafe concurrency in this chain, and by documenting why.
+
 ## Per-command status
 
 | Command | Concurrency exploited |
@@ -206,6 +236,7 @@ its own `runConcurrent` buffer (including its zap lines, which is why
 | node operations | every per-node script fans out across nodes via `forEachNode` |
 | `down --all` | every cluster deleted concurrently, then one batched iSCSI target teardown as the barrier |
 | `cluster delete` / `down` | sequential by invariant (zap needs a confirmed delete; registry stays intact on a failed delete) |
+| `deploy` | sequential by invariant: operator → ceph-csi-drivers → cluster → profiles, each edge a real data dependency; `ensureChartDeps` calls share a helm home and must stay apart |
 
 ## Adding concurrency to new work
 
