@@ -9,6 +9,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/jhoblitt/rooket/internal/clone"
+	"github.com/jhoblitt/rooket/internal/profiles"
 	"github.com/jhoblitt/rooket/internal/run"
 	"github.com/jhoblitt/rooket/internal/values"
 )
@@ -49,17 +50,23 @@ Example:
   rooket deploy --dir ~/github/rook
 `,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		dir, err := deploySetup(cmd)
+		dir, active, err := deploySetup(cmd)
 		if err != nil {
 			return err
 		}
-		if err := installRookCephOperator(dir); err != nil {
+		if err := installRookCephOperator(dir, active); err != nil {
 			return err
 		}
-		if err := installRookCephCluster(dir); err != nil {
+		// rook-ceph-cluster's CRs (CephCluster, pools, object store, ...) need
+		// the operator running to reconcile them, so cluster waits on the
+		// operator install (invariant 1).
+		if err := installRookCephCluster(dir, active); err != nil {
 			return err
 		}
-		if err := installProfilesChart(dir); err != nil {
+		// Profile resources reference cluster-chart resources — e.g. a
+		// CephObjectStoreUser's object store, a StorageClass's PVC binds — so
+		// profiles waits on cluster (invariant 1).
+		if err := installProfilesChart(dir, active); err != nil {
 			return err
 		}
 		switchKubectlNamespace("rook-ceph")
@@ -79,11 +86,11 @@ Example:
   rooket deploy operator --dir ~/github/rook
 `,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		dir, err := deploySetup(cmd)
+		dir, active, err := deploySetup(cmd)
 		if err != nil {
 			return err
 		}
-		if err := installRookCephOperator(dir); err != nil {
+		if err := installRookCephOperator(dir, active); err != nil {
 			return err
 		}
 		switchKubectlNamespace("rook-ceph")
@@ -101,14 +108,17 @@ Example:
   rooket deploy cluster --dir ~/github/rook
 `,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		dir, err := deploySetup(cmd)
+		dir, active, err := deploySetup(cmd)
 		if err != nil {
 			return err
 		}
-		if err := installRookCephCluster(dir); err != nil {
+		if err := installRookCephCluster(dir, active); err != nil {
 			return err
 		}
-		if err := installProfilesChart(dir); err != nil {
+		// Profile resources reference cluster-chart resources — e.g. a
+		// CephObjectStoreUser's object store, a StorageClass's PVC binds — so
+		// profiles waits on cluster (invariant 1).
+		if err := installProfilesChart(dir, active); err != nil {
 			return err
 		}
 		switchKubectlNamespace("rook-ceph")
@@ -117,12 +127,17 @@ Example:
 }
 
 // deploySetup resolves everything a deploy needs: the cluster name (pointing
-// $KUBECONFIG at its kubeconfig), the kubectl context, the registry port, and
-// finally the rook source directory, which it returns.
-func deploySetup(cmd *cobra.Command) (string, error) {
+// $KUBECONFIG at its kubeconfig), the kubectl context, the registry port, the
+// rook source directory, and the active profile set. It returns the source
+// directory and the resolved profiles.
+//
+// The profile set is resolved here — once — rather than by each chart
+// installer, so every chart in this deploy and the profiles release itself
+// see the same selection even if .rooket/config.yaml changes mid-deploy.
+func deploySetup(cmd *cobra.Command) (string, []profiles.Profile, error) {
 	name, err := useCluster(deployName)
 	if err != nil {
-		return "", err
+		return "", nil, err
 	}
 	deployName = name
 	if deployKubeContext == "" {
@@ -130,22 +145,37 @@ func deploySetup(cmd *cobra.Command) (string, error) {
 	}
 	applyWithOnlyGuard(cmd.Flags().Changed("with-only"))
 	if deployHelmEnv, err = helmEnv(name, "rooket"); err != nil {
-		return "", err
+		return "", nil, err
 	}
 	port, err := resolveRegistryPort(name, deployRegistryPort, cmd.Flags().Changed("registry-port"))
 	if err != nil {
-		return "", err
+		return "", nil, err
 	}
 	deployRegistryPort = port
 
-	if deployDir != "" {
-		return deployDir, nil
+	dir := deployDir
+	if dir == "" {
+		cwd, err := os.Getwd()
+		if err != nil {
+			return "", nil, fmt.Errorf("get working directory: %w", err)
+		}
+		dir = cwd
 	}
-	cwd, err := os.Getwd()
+
+	cloneDir := clone.Open(dir)
+	if err := cloneDir.Ensure(); err != nil {
+		return "", nil, err
+	}
+	names, err := activeProfileNames(cloneDir, deployWith, deployWithOnly, deployWithOnlySet)
 	if err != nil {
-		return "", fmt.Errorf("get working directory: %w", err)
+		return "", nil, err
 	}
-	return cwd, nil
+	active, err := loadProfiles(names)
+	if err != nil {
+		return "", nil, err
+	}
+
+	return dir, active, nil
 }
 
 // applyWithOnlyGuard sets deployWithOnlySet when deployCmd's own --with-only
@@ -160,7 +190,7 @@ func applyWithOnlyGuard(changed bool) {
 	}
 }
 
-func installRookCephOperator(dir string) error {
+func installRookCephOperator(dir string, active []profiles.Profile) error {
 	gitRef, err := gitHeadRef(dir)
 	if err != nil {
 		return fmt.Errorf("determine git ref in %s: %w", dir, err)
@@ -171,6 +201,10 @@ func installRookCephOperator(dir string) error {
 	imageTag := gitRef // already sanitized by gitHeadRef
 
 	chartPath := filepath.Join(dir, "deploy", "charts", "rook-ceph")
+	// Shares the "make" purpose helm home (see helmEnv) with
+	// installRookCephCluster's ensureChartDeps call — the two must never run
+	// concurrently (invariant 2). They already can't: this whole operator
+	// install (including ceph-csi-drivers) completes before cluster starts.
 	if err := ensureChartDeps(dir, "rook-ceph"); err != nil {
 		return err
 	}
@@ -186,7 +220,7 @@ func installRookCephOperator(dir string) error {
 		ImageTag:  imageTag,
 		Digest:    digestOrEmpty(deployRegistryPort, deployNamespace+"/"+deployImageName, imageTag),
 	})
-	valuesPath, err := writeComposed(chartOperator, base, dir)
+	valuesPath, err := writeComposed(chartOperator, base, dir, active)
 	if err != nil {
 		return err
 	}
@@ -201,7 +235,10 @@ func installRookCephOperator(dir string) error {
 		return err
 	}
 
-	return installCephCsiDrivers(dir)
+	// ceph-csi-drivers needs the csi.ceph.io CRDs the operator chart's
+	// ceph-csi-operator subchart installs, so it waits on the operator
+	// (invariant 1); see the retry loop in installCephCsiDrivers.
+	return installCephCsiDrivers(dir, active)
 }
 
 func digestOrEmpty(port int, repo, tag string) string {
@@ -214,17 +251,10 @@ func digestOrEmpty(port int, repo, tag string) string {
 
 // writeComposed stacks every layer for chart and writes the result into the
 // cluster's state dir, where it survives a failed deploy for inspection.
-func writeComposed(chart string, base map[string]any, rookDir string) (string, error) {
+// active is the deploy's profile set, resolved once by deploySetup.
+func writeComposed(chart string, base map[string]any, rookDir string, active []profiles.Profile) (string, error) {
 	cloneDir := clone.Open(rookDir)
 	if err := cloneDir.Ensure(); err != nil {
-		return "", err
-	}
-	names, err := activeProfileNames(cloneDir, deployWith, deployWithOnly, deployWithOnlySet)
-	if err != nil {
-		return "", err
-	}
-	active, err := loadProfiles(names)
-	if err != nil {
 		return "", err
 	}
 	c, err := composeChart(chart, base, cloneDir, active, deployValueFiles)
@@ -274,7 +304,7 @@ func deployValuesDir(cluster string) (string, error) {
 // in the same move that took Driver creation out of rook, so the condition
 // name identifies the flow, and the dependency's version pin — released in
 // lockstep with the drivers chart — supplies the matching chart version.
-func installCephCsiDrivers(dir string) error {
+func installCephCsiDrivers(dir string, active []profiles.Profile) error {
 	chartYAML := filepath.Join(dir, "deploy", "charts", "rook-ceph", "Chart.yaml")
 	version, condition, err := cephCsiOperatorDep(chartYAML)
 	if err != nil {
@@ -289,7 +319,7 @@ func installCephCsiDrivers(dir string) error {
 	}
 
 	run.Printf("==> deploying ceph-csi-drivers %s (Driver CRs and driver RBAC the rook-ceph chart does not ship)\n", version)
-	valuesPath, err := writeComposed(chartCSI, values.CSIBase(), dir)
+	valuesPath, err := writeComposed(chartCSI, values.CSIBase(), dir, active)
 	if err != nil {
 		return err
 	}
@@ -331,8 +361,11 @@ func cephCsiOperatorDep(chartYAML string) (version, condition string, err error)
 	return "", "", nil
 }
 
-func installRookCephCluster(dir string) error {
+func installRookCephCluster(dir string, active []profiles.Profile) error {
 	chartPath := filepath.Join(dir, "deploy", "charts", "rook-ceph-cluster")
+	// Shares the "make" purpose helm home with installRookCephOperator's
+	// ensureChartDeps call — must stay sequential with it, never concurrent
+	// (invariant 2).
 	if err := ensureChartDeps(dir, "rook-ceph-cluster"); err != nil {
 		return err
 	}
@@ -352,7 +385,7 @@ func installRookCephCluster(dir string) error {
 		}
 	}
 	base := values.ClusterBase(values.ClusterInput{OperatorNamespace: "rook-ceph", Nodes: nodes})
-	valuesPath, err := writeComposed(chartCluster, base, dir)
+	valuesPath, err := writeComposed(chartCluster, base, dir, active)
 	if err != nil {
 		return err
 	}
