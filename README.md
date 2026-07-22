@@ -68,6 +68,43 @@ state dir; all target teardowns are batched into one privileged run, so the
 sweep costs at most a single prompt (or none, with rooket's sudoers rule
 installed).
 
+### Shared OCI image cache
+
+The CSI node plugins are DaemonSets, so every worker independently pulls the
+same images. On an 11-node cluster that meant ~7.6 GB downloaded to deliver
+~0.9 GB of distinct images — `quay.io/cephcsi/cephcsi` alone was fetched ten
+times at 725 MB a copy, 2–3 minutes per node.
+
+`rooket up` therefore starts **one** [zot](https://zotregistry.dev) container,
+`rooket-cache`, on the kind network and points every node's containerd at it.
+kind gives all clusters the same network, so a single cache serves every rooket
+cluster on the host: an image is downloaded once per workstation, and the next
+`up` — in this clone or any other — reuses it.
+
+The cache is an optimisation, never a dependency. Its mirrors set no containerd
+`server`, so if the cache is down or an image comes from a registry it does not
+proxy, containerd pulls straight from upstream and the cluster comes up as it
+always did — just slower.
+
+Proxied registries are `quay.io`, `registry.k8s.io`, `docker.io`, `ghcr.io`,
+and `gcr.io`. zot resolves an upstream from the repository prefix rather than
+from containerd's `ns` parameter, so upstreams are enumerated rather than
+matched by wildcard; one that is missing simply is not cached.
+
+No teardown touches the cache unless asked, since surviving `down` is the whole
+point:
+
+```console
+$ rooket down                  # cache preserved
+$ rooket down --all            # cache preserved
+$ rooket down --delete-cache   # cache container and its volume removed
+```
+
+`--delete-cache` is separate from `--delete-disks` because they reclaim
+different things: `--delete-disks` removes one cluster's iSCSI targets and disk
+images, while `--delete-cache` discards images shared by every cluster on the
+host.
+
 `rooket up` finds the rook source via `--dir`, `$ROOK_DIR`, or by walking up
 from the current directory to the enclosing rook clone.
 

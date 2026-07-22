@@ -134,6 +134,11 @@ func downAllRun(cmd *cobra.Command) error {
 	} else {
 		run.Printf("Disk images and iSCSI targets will be preserved (pass --delete-disks to remove them).\n")
 	}
+	if downDeleteCache {
+		run.Printf("The host-wide OCI image cache will be removed.\n")
+	} else {
+		run.Printf("The host-wide OCI image cache will be preserved (pass --delete-cache to remove it).\n")
+	}
 	if downDryRun {
 		return nil
 	}
@@ -229,6 +234,15 @@ func downAllRun(cmd *cobra.Command) error {
 		}
 	} else if downDeleteDisks {
 		run.Printf("block teardown skipped by --skip-block; disk images and state dirs preserved\n")
+	}
+
+	// Safe to run even with clusters left behind: the cache is a soft
+	// dependency, so a node that outlives it falls back to pulling upstream.
+	if downDeleteCache {
+		run.Printf("==> removing the shared image cache\n")
+		if err := teardownCache(os.Stdout); err != nil {
+			run.Printf("warning: remove image cache: %v\n", err)
+		}
 	}
 
 	if len(blocked) > 0 {

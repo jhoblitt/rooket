@@ -48,7 +48,25 @@ what a reviewer checks before signing off on a parallelized step:
 5. **Optimizations are best-effort and never gate correctness.** A speculative
    step (the node-image pre-pull) warns and continues on failure rather than
    aborting the run; if it does not help, the work it was racing simply happens
-   later (kind pulls the image itself).
+   later (kind pulls the image itself). The shared image cache is the same
+   shape: it warns and clears a `cacheReady` flag, and the nodes it would have
+   served just pull from upstream as they did before it existed.
+
+6. **Host-wide singletons must tolerate concurrent *processes*, not just
+   concurrent goroutines.** Invariants 1–3 bound concurrency *within* one
+   command. Some resources are shared across simultaneous `rooket` invocations
+   — one cluster per rook clone is an explicitly supported workflow, so two
+   `up` runs overlap routinely. Anything host-wide rather than per-cluster (the
+   shared image cache container and its volume) is reached by both, and an
+   exists-then-create sequence across two processes is a race no in-process
+   lock can close.
+
+   The rule is to make such a step **idempotent and race-absorbing** rather
+   than to serialize it: let the container engine arbitrate (it enforces unique
+   names), and on failure re-check whether the winner produced what was wanted.
+   `cache.Create` does exactly this — losing the race is the expected path and
+   reports success. The alternative, treating a lost race as an error, would
+   silently degrade the loser's cluster.
 
 ## Primitives
 
@@ -129,12 +147,23 @@ run as one `runConcurrent` group:
 - **prepare nodes** — `exec` into workers: remount `/sys`, install lvm2 and
   cryptsetup, mask host devices (the long pole here — apt over the network).
 - **create registry** — a host-side container on the kind network.
+- **start the shared image cache** — likewise a host-side container on the kind
+  network, but host-wide rather than per-cluster (invariant 6).
 - **apply registry ConfigMap** — to the apiserver (`kube-public`).
 - **install prometheus-operator CRDs** — a helm install to the apiserver.
 
-Containerd-registry wiring runs *after* this group: it needs the registry to
-exist (data dependency) and it `exec`s into the same nodes as node preparation
-(exclusive resource — invariant 2), so it cannot join the group.
+Containerd mirror wiring runs *after* this group: it needs both the registry
+and the cache to exist (data dependency) and it `exec`s into the same nodes as
+node preparation (exclusive resource — invariant 2), so it cannot join the
+group.
+
+That wiring is **one** per-node pass, not two. The registry mirror and the
+cache mirrors are separate concerns but mutate the same exclusive resource, so
+invariant 2 forbids running them as concurrent siblings; composing both into a
+single `containerdScript` is strictly better than sequencing two passes,
+because it halves the number of `exec`s into each node. When the cache failed
+to start, the same script is rendered with no cache mirrors and the registry
+wiring proceeds unchanged (invariant 5).
 
 ## Concurrency in `down`
 
@@ -172,7 +201,7 @@ its own `runConcurrent` buffer (including its zap lines, which is why
 | Command | Concurrency exploited |
 | --- | --- |
 | `up` | infra lane `(block ∥ pre-pull → create)` overlaps the `make` build lane; deploy follows on the join |
-| `cluster create` | node prep ∥ registry ∥ ConfigMap ∥ prometheus CRDs, then containerd wiring |
+| `cluster create` | node prep ∥ registry ∥ image cache ∥ ConfigMap ∥ prometheus CRDs, then one combined containerd mirror pass |
 | `build` | `make` overlaps cluster create (via `up`); push follows |
 | node operations | every per-node script fans out across nodes via `forEachNode` |
 | `down --all` | every cluster deleted concurrently, then one batched iSCSI target teardown as the barrier |

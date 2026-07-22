@@ -7,6 +7,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/jhoblitt/rooket/internal/cache"
 	"github.com/jhoblitt/rooket/internal/cluster"
 	"github.com/jhoblitt/rooket/internal/registry"
 	"github.com/jhoblitt/rooket/internal/run"
@@ -38,8 +39,16 @@ var createCmd = &cobra.Command{
      localhost:<registry-port> on the host. The registry must be created after
      the cluster so that the "kind" network exists.
   5. Configure containerd on every node to mirror localhost:<registry-port>
-     to the registry container (reachable by name on the kind network).
+     to the registry container (reachable by name on the kind network), and
+     each proxied upstream registry to the shared cache.
   6. Apply the standard local-registry-hosting ConfigMap to kube-public.
+  7. Install the prometheus-operator-crds helm chart.
+  8. Start the shared OCI pull-through cache: a single zot container reused by
+     every rooket cluster on the host, so an upstream image is downloaded once
+     per workstation instead of once per node per cluster.
+
+Steps 3, 4, 6, 7, and 8 run concurrently; step 5 follows them because it needs
+the registry and the cache, and must not exec into a node while step 3 does.
 
 Run 'rooket block setup' before 'rooket cluster create' to prepare block devices.
 `,
@@ -128,14 +137,19 @@ func createClusterRun(out io.Writer, name string, requestedPort int, portExplici
 		}
 	}
 
-	// --- Steps 3, 4, 6, 7 run concurrently ---
+	// --- Steps 3, 4, 6, 7, 8 run concurrently ---
 	// They share only the cluster created above (Step 2) and otherwise touch
 	// disjoint subsystems: node prep execs into the worker containers, the
-	// registry is a host-side container on the "kind" network, and the ConfigMap
-	// and prometheus CRDs go to the apiserver. Step 5 (containerd wiring) is the
-	// one that cannot join them — it needs the registry from Step 4 AND execs
-	// into the same nodes as Step 3, and two per-node script passes must not run
-	// at once — so it follows the group.
+	// registry and the shared cache are host-side containers on the "kind"
+	// network, and the ConfigMap and prometheus CRDs go to the apiserver.
+	// Step 5 (containerd wiring) is the one that cannot join them — it needs the
+	// registry from Step 4 and the cache from Step 8, AND execs into the same
+	// nodes as Step 3, and two per-node script passes must not run at once — so
+	// it follows the group.
+	//
+	// cacheReady is written by exactly one branch of the group and read only
+	// after runConcurrent joins, so it needs no synchronization of its own.
+	cacheReady := true
 	ownDevsByNode := make(map[string][]string)
 	for i := 0; i < workers; i++ {
 		node := workerNodeName(name, i)
@@ -155,7 +169,7 @@ func createClusterRun(out io.Writer, name string, requestedPort int, portExplici
 		HostPort: port,
 		Network:  "kind",
 	}
-	run.Fprintf(out, "==> preparing nodes, registry, ConfigMap, and prometheus CRDs (concurrent)\n")
+	run.Fprintf(out, "==> preparing nodes, registry, cache, ConfigMap, and prometheus CRDs (concurrent)\n")
 	if err := runConcurrent(out,
 		func(w io.Writer) error { // Step 3: prepare nodes for OSD provisioning
 			run.Fprintf(w, "==> preparing nodes for OSD provisioning\n")
@@ -185,16 +199,31 @@ func createClusterRun(out io.Writer, name string, requestedPort int, portExplici
 			}
 			return nil
 		},
+		func(w io.Writer) error { // Step 8: shared OCI pull-through cache
+			run.Fprintf(w, "==> starting the shared OCI pull-through cache\n")
+			if err := setupCache(w); err != nil {
+				cacheReady = false
+				run.Fprintf(w, "warning: image cache unavailable (%v); nodes will pull directly from upstream\n", err)
+			}
+			return nil
+		},
 	); err != nil {
 		return err
 	}
 
-	// --- Step 5: Configure containerd registry on each node ---
-	// After Step 4 (the registry exists) and after Step 3 (so two per-node
-	// script passes never exec into the same node at once).
-	run.Fprintf(out, "==> configuring containerd registry on cluster nodes\n")
-	if err := cluster.ConfigureRegistry(out, containerEngine, name, regName, port); err != nil {
-		return fmt.Errorf("configure registry on nodes: %w", err)
+	// --- Step 5: Configure containerd mirrors on each node ---
+	// After the concurrent group: it needs the registry (Step 4) and the cache
+	// (Step 8), and it execs into the same nodes as node prep (Step 3), so two
+	// per-node script passes never run into the same node at once. Registry and
+	// cache wiring compose into that one pass for the same reason.
+	cacheUpstreams := cache.Upstreams
+	if !cacheReady {
+		cacheUpstreams = nil
+	}
+	run.Fprintf(out, "==> configuring containerd mirrors on cluster nodes\n")
+	if err := cluster.ConfigureContainerd(out, containerEngine, name, regName, port,
+		cache.InClusterAddr(), cacheUpstreams); err != nil {
+		return fmt.Errorf("configure containerd mirrors on nodes: %w", err)
 	}
 
 	run.Fprintf(out, `
