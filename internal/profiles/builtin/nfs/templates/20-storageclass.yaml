@@ -16,3 +16,15 @@ parameters:
   csi.storage.k8s.io/node-stage-secret-name: rook-csi-cephfs-node
   csi.storage.k8s.io/node-stage-secret-namespace: {{ .Values.rooket.namespace }}
 reclaimPolicy: Delete
+# A hard NFS mount (the kernel default) blocks forever once the CephNFS
+# server disappears out from under it, which is exactly what happens when
+# the prune path (e.g. `rooket deploy --with-only rbd`) deletes the
+# rooket-profiles release while a pod still has this export mounted. That
+# wedges the node's `docker rm` at teardown and breaks `rooket down`. soft +
+# timeo/retrans let the mount fail fast instead of hanging; nofail keeps a
+# failed mount from blocking the pod.
+mountOptions:
+  - soft
+  - timeo=30
+  - retrans=2
+  - nofail
