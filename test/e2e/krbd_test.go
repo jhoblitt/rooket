@@ -11,6 +11,20 @@ import (
 )
 
 var _ = Describe("rooket krbd", Ordered, func() {
+	// Top-level Describe containers run in Ginkgo's randomised order, so this
+	// spec can't assume the up/down suite already brought up (and hasn't yet
+	// torn down) the cluster — it must ensure one itself.
+	BeforeAll(func() {
+		args := []string{"up", "--dir", rookDir, "--workers", workers, "--name", clusterName}
+		if skipBlock {
+			args = append(args, "--skip-block")
+		}
+		out, err := rooketRun(40*time.Minute, args...)
+		Expect(err).NotTo(HaveOccurred(), "rooket up failed:\n%s", tail(out, 40))
+
+		waitClusterSettled()
+	})
+
 	It("serves I/O on an RBD PVC through CSI, mounted via krbd", func() {
 		// Exercises the full krbd data path: provision, kernel map, node mount,
 		// pod I/O, unmap, reclaim. This needs the /dev/rbdN nodes PrepareNodes
