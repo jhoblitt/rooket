@@ -57,15 +57,11 @@ var _ = Describe("rooket up/down", Ordered, func() {
 	It("provisions and reclaims a block PVC through CSI", func() {
 		// The RADOS round-trip above bypasses CSI entirely; this exercises the
 		// RBD provisioner: PVC on the chart's ceph-block StorageClass →
-		// csi-rbdplugin creates the image → bind → delete reclaims it. No pod
-		// mounts it: krbd-mapping succeeds on the node (ceph-csi already
-		// passes --options noudev, so udev is not the issue), but the
-		// resulting /dev/rbd0 exists only in the host's devtmpfs, not the
-		// kind node's per-container tmpfs /dev — CI observed exactly this:
-		// "rbd: mapping succeeded but /dev/rbd0 is not accessible, is host
-		// /dev mounted?". That isolation is what lets rooket mask each
-		// node's /dev to its own OSD disk, so it's not fixable here. The
-		// CephFS spec below covers the mount-and-I/O half of CSI.
+		// csi-rbdplugin creates the image → bind → delete reclaims it. This
+		// spec deliberately covers provisioning and reclaim only; the
+		// mount-and-I/O path is covered by krbd_test.go, which works because
+		// node prep pre-creates the /dev/rbdN device nodes each node needs to
+		// see the krbd mapping.
 		const manifest = `apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:

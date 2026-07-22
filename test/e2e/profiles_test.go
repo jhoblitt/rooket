@@ -102,14 +102,14 @@ data:
 		// bind against.
 		waitClusterSettled()
 
-		By("binding the rbd PVC")
-		// No pod mounts this PVC: krbd maps the image fine, but the device
-		// node lands in the host's /dev, not the per-container tmpfs /dev
-		// rooket gives a kind node, so the mount never becomes visible there.
-		// That isolation is the price of rooket's per-node OSD device
-		// masking; see updown_test.go's CSI note for the CI-observed error.
+		By("binding the rbd PVC and running its pod")
 		Eventually(func() (string, error) { return pvcPhase("rooket-rbd-pvc") }, 5*time.Minute, 10*time.Second).
 			Should(Equal("Bound"))
+		// The pod krbd-maps the PVC's image. This depends on the pre-created
+		// /dev/rbdN nodes node prep adds to every kind node's per-container
+		// tmpfs /dev; a regression there will surface here first.
+		Eventually(func() (string, error) { return podPhase("rooket-rbd-smoke") }, 5*time.Minute, 10*time.Second).
+			Should(Equal("Running"))
 
 		By("binding the OBC and running the s3 pod")
 		Eventually(func() string {
@@ -166,9 +166,13 @@ data:
 			3*time.Minute, 5*time.Second).
 			Should(BeTrue(), "nfs pod was neither pruned nor marked for deletion")
 
-		rbdPhase, err := pvcPhase("rooket-rbd-pvc")
+		rbdPVCPhase, err := pvcPhase("rooket-rbd-pvc")
 		Expect(err).NotTo(HaveOccurred())
-		Expect(rbdPhase).To(Equal("Bound"), "rbd PVC should survive")
+		Expect(rbdPVCPhase).To(Equal("Bound"), "rbd PVC should survive")
+
+		rbdPodPhase, err := podPhase("rooket-rbd-smoke")
+		Expect(err).NotTo(HaveOccurred())
+		Expect(rbdPodPhase).To(Equal("Running"), "rbd pod should survive")
 
 		cm, err := kubectl("-n", "rook-ceph", "get", "cm", "rooket-scratch", "-o", "jsonpath={.data.from}")
 		Expect(err).NotTo(HaveOccurred())
