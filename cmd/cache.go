@@ -81,6 +81,28 @@ func teardownCache(out io.Writer) error {
 	return nil
 }
 
+// cacheSummaryIndent aligns a continuation line under the value column of the
+// cluster-ready banner.
+const cacheSummaryIndent = "\n                     "
+
+// cacheSummary renders the image-cache line of the cluster-ready banner.
+//
+// A cache that fails to start only warns, and that warning is emitted inside
+// the concurrent group's buffer — five steps' output flushed at once, then
+// several more bring-up phases after it. In practice nobody sees it, and an
+// absent cache is otherwise indistinguishable from a working one until someone
+// goes looking for the container. So the banner states the outcome either way,
+// and on failure repeats the cause and what it means for this cluster.
+func cacheSummary(ready bool, cause error) string {
+	if ready {
+		return cache.ContainerName + " (shared by every rooket cluster on this host)"
+	}
+	return "UNAVAILABLE — every image was pulled from upstream" +
+		cacheSummaryIndent + "cause: " + cause.Error() +
+		cacheSummaryIndent + "this cluster's nodes are NOT wired to the cache;" +
+		cacheSummaryIndent + "fix the cause above, then re-run to use it"
+}
+
 // noteCachePreserved mirrors how a plain 'down' reports preserved disk images,
 // so several GB of cache are never left behind silently.
 func noteCachePreserved(out io.Writer) {
