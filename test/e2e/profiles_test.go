@@ -234,6 +234,21 @@ data:
 		// residue for the next run (or the sibling up/down suite) to trip over.
 		_, err := kubectl("-n", "rook-ceph", "delete", "cm", "rooket-scratch", "--ignore-not-found")
 		Expect(err).NotTo(HaveOccurred(), "failed to delete rooket-scratch ConfigMap")
+
+		// This suite shares one cluster with two other top-level Describe
+		// containers in Ginkgo's randomised run order, and it's the only one
+		// that stands up an RGW gateway and a CephNFS server. With the clone
+		// template gone (above), --with-only "" selects zero profiles, so this
+		// deploy prunes the whole rooket-profiles release — releasing the nfs
+		// pod's mount and shedding the RGW/NFS/CephFS load before the next
+		// container or teardown runs. Left in place, a pod with a hung NFS
+		// mount (see the prune spec above) wedges `docker rm` on its node at
+		// teardown. Best-effort: a slow or failed restore is logged, not
+		// fatal, since the suite has already passed by this point.
+		out, err := rooketRun(20*time.Minute, "deploy", "--dir", rookDir, "--name", clusterName, "--with-only", "")
+		if err != nil {
+			GinkgoWriter.Printf("AfterAll: restoring cluster to zero profiles failed (non-fatal):\n%s\n", tail(out, 40))
+		}
 	})
 })
 
