@@ -67,6 +67,11 @@ data:
 		out, err := rooketRun(40*time.Minute, args...)
 		Expect(err).NotTo(HaveOccurred(), "rooket up failed:\n%s", tail(out, 40))
 
+		// rooket up returns once helm has installed the charts, well before OSD
+		// prepare jobs finish and Ceph has pools/daemons for the specs below to
+		// bind against.
+		waitClusterSettled()
+
 		By("binding the rbd PVC and running its pod")
 		Eventually(func() (string, error) { return pvcPhase("rooket-rbd-pvc") }, 5*time.Minute, 10*time.Second).
 			Should(Equal("Bound"))
@@ -82,14 +87,14 @@ data:
 			out, _ := kubectl("-n", "rook-ceph", "get", "obc", "rooket-rgw-bucket",
 				"-o", "jsonpath={.status.phase}")
 			return strings.TrimSpace(out)
-		}, 5*time.Minute, 10*time.Second).Should(Equal("Bound"))
-		Eventually(func() (string, error) { return podPhase("rooket-rgw-smoke") }, 5*time.Minute, 10*time.Second).
+		}, 10*time.Minute, 10*time.Second).Should(Equal("Bound"))
+		Eventually(func() (string, error) { return podPhase("rooket-rgw-smoke") }, 10*time.Minute, 10*time.Second).
 			Should(Equal("Running"))
 
 		By("binding the nfs PVC and running its pod")
-		Eventually(func() (string, error) { return pvcPhase("rooket-nfs-pvc") }, 10*time.Minute, 15*time.Second).
+		Eventually(func() (string, error) { return pvcPhase("rooket-nfs-pvc") }, 15*time.Minute, 15*time.Second).
 			Should(Equal("Bound"))
-		Eventually(func() (string, error) { return podPhase("rooket-nfs-smoke") }, 10*time.Minute, 15*time.Second).
+		Eventually(func() (string, error) { return podPhase("rooket-nfs-smoke") }, 15*time.Minute, 15*time.Second).
 			Should(Equal("Running"))
 
 		By("installing the clone's own template")

@@ -424,6 +424,10 @@ func hostSensitiveDevsOnNode(node string) string {
 // A short window caught the bad instant and failed a cluster that was seconds
 // from ready. Ten minutes lets a restarted apiserver recover and late pools
 // finish; a cluster that is genuinely wedged still fails, just later.
+//
+// Call this before any spec that asserts on storage: `rooket up` returns as
+// soon as helm has installed the charts, well before the OSD prepare jobs
+// finish and Ceph has pools to bind PVCs against.
 func waitClusterSettled() {
 	By("settling: mons quorate, mgr active, mds up, all OSDs up, PGs active+clean, not unhealthy")
 	Eventually(func(g Gomega) {
