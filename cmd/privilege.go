@@ -18,12 +18,13 @@ import (
 // fallback, so anything that changes the command's shape belongs here rather
 // than in either executor.
 type privStep struct {
-	argv        []string
-	stdinLine   string // written to the command's stdin, newline appended
-	ignoreErr   bool
-	quietStdout bool // discard the command's stdout, e.g. tee's echo of what it wrote
-	quietStderr bool // discard the command's stderr, e.g. a re-run's "already exists" noise
-	settle      time.Duration
+	argv          []string
+	stdinLine     string // written to the command's stdin, newline appended
+	ignoreErr     bool
+	warnOnFailure bool // like ignoreErr, but prints a warning naming the step instead of swallowing the failure silently
+	quietStdout   bool // discard the command's stdout, e.g. tee's echo of what it wrote
+	quietStderr   bool // discard the command's stderr, e.g. a re-run's "already exists" noise
+	settle        time.Duration
 }
 
 // privCommand is one entry in the vocabulary of commands rooket may run as
@@ -133,8 +134,16 @@ func runSteps(w io.Writer, prefix []string, steps []privStep) error {
 		} else {
 			err = run.CmdSplitTo(outW, errW, argv[0], argv[1:]...)
 		}
-		if err != nil && !s.ignoreErr {
-			return fmt.Errorf("%s: %w", strings.Join(s.argv, " "), err)
+		if err != nil {
+			switch {
+			case s.warnOnFailure:
+				fmt.Fprintf(w, "warning: %s failed, continuing: %v\n", strings.Join(s.argv, " "), err)
+			case s.ignoreErr:
+				// swallowed silently: this is the expected re-run case (e.g. --login
+				// on an already-established session), not a diagnostic-worthy failure.
+			default:
+				return fmt.Errorf("%s: %w", strings.Join(s.argv, " "), err)
+			}
 		}
 		if s.settle > 0 {
 			time.Sleep(s.settle)
@@ -174,9 +183,10 @@ func sudoNoPasswordAvailable() bool {
 // passes the itemized path's probes but then denies the individual command,
 // so an itemized run that errors falls back to pkexec rather than surfacing
 // the denial. This is safe because every step is idempotent by construction:
-// the targetcli steps carry ignoreErr, and re-running the whole step list
-// re-applies the same state, so retrying it through pkexec costs one extra
-// prompt rather than any incorrect or duplicated work.
+// the targetcli create steps carry warnOnFailure rather than aborting, and
+// re-running the whole step list re-applies the same state, so retrying it
+// through pkexec costs one extra prompt rather than any incorrect or
+// duplicated work.
 func runPrivileged(steps []privStep) error {
 	if err := validateSteps(steps); err != nil {
 		return err
@@ -234,8 +244,17 @@ func renderStepLine(s privStep) string {
 	if s.quietStderr {
 		line += " 2>/dev/null"
 	}
-	if s.ignoreErr {
+	switch {
+	case s.ignoreErr:
 		line += " || true"
+	case s.warnOnFailure:
+		// "|| true" would also satisfy set -e, but would leave the failure as
+		// unreported here as ignoreErr does; a printf that always succeeds
+		// keeps the script going while still naming the step that failed.
+		// Writes to stdout, matching runSteps' warnOnFailure branch (which
+		// writes to w, always stdout in production) — the two executors must
+		// agree on which stream carries the warning.
+		line += fmt.Sprintf(" || printf 'warning: %%s failed, continuing\\n' %s", shQuote(strings.Join(s.argv, " ")))
 	}
 	if s.settle > 0 {
 		settle := s.settle

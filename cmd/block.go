@@ -226,18 +226,28 @@ func stateDirDisks(clusterName, dir, iqnDate string) []iscsiDisk {
 // iSCSI sessions, delete node records, and remove targets and backstores via
 // targetcli. Every step is best-effort so a partial setup can still be
 // cleaned up.
+//
+// The targetcli deletes carry warnOnFailure rather than ignoreErr: a single
+// stale backstore (e.g. left by an unrelated cluster) aborts every targetcli
+// mutation, including these, and a caller that deletes state right after this
+// runs (prune) must not let that failure go unreported — silently discarding
+// it is what let a target survive with nothing left to name it again. The
+// iscsiadm logout/delete steps stay ignoreErr: unlike targetcli, they fail
+// routinely and harmlessly (no session or node record ever existed, e.g. a
+// setup that never reached iscsiadm login), so warning on every one of them
+// would bury the signal the targetcli warnings are meant to surface.
 func buildISCSITeardownSteps(disks []iscsiDisk) []privStep {
 	var steps []privStep
 	for _, d := range disks {
 		steps = append(steps,
-			privStep{argv: []string{"iscsiadm", "-m", "node", "-T", d.targetIQN, "-u"}, quietStderr: true, ignoreErr: true},
-			privStep{argv: []string{"iscsiadm", "-m", "node", "-T", d.targetIQN, "-o", "delete"}, quietStderr: true, ignoreErr: true},
+			privStep{argv: []string{"iscsiadm", "-m", "node", "-T", d.targetIQN, "-u"}, ignoreErr: true},
+			privStep{argv: []string{"iscsiadm", "-m", "node", "-T", d.targetIQN, "-o", "delete"}, ignoreErr: true},
 		)
 	}
 	for _, d := range disks {
 		steps = append(steps,
-			privStep{argv: []string{"targetcli", "/iscsi", "delete", d.targetIQN}, quietStderr: true, ignoreErr: true},
-			privStep{argv: []string{"targetcli", "/backstores/fileio", "delete", d.backstoreName}, quietStderr: true, ignoreErr: true},
+			privStep{argv: []string{"targetcli", "/iscsi", "delete", d.targetIQN}, warnOnFailure: true},
+			privStep{argv: []string{"targetcli", "/backstores/fileio", "delete", d.backstoreName}, warnOnFailure: true},
 		)
 	}
 	return append(steps, privStep{argv: []string{"targetcli", "saveconfig"}})
@@ -304,6 +314,7 @@ func initiatorNameCurrent(path, wantIQN string) bool {
 //  4. Save the targetcli config
 //  5. Restart iscsid, if writeInitiator, to pick up the new name
 //  6. Discover targets and log in with iscsiadm
+//  7. Rescan each target's LUNs with iscsiadm
 func buildISCSISteps(initIQN string, disks []iscsiDisk, sizeGB int, writeInitiator bool) []privStep {
 	steps := []privStep{{argv: []string{"systemctl", "start", "iscsid"}}}
 	if writeInitiator {
@@ -313,29 +324,52 @@ func buildISCSISteps(initIQN string, disks []iscsiDisk, sizeGB int, writeInitiat
 			quietStdout: true,
 		})
 	}
+	// These create steps tolerate "already exists" on a re-run, but that is
+	// not the only way targetcli can fail: an unrelated stale backstore (e.g.
+	// referencing another cluster's deleted image file) makes every targetcli
+	// mutation abort, including these. warnOnFailure keeps that failure from
+	// being silently discarded — quietStderr+ignoreErr once hid exactly this,
+	// leaving "block devices not found" as the only, misleading symptom.
 	for _, d := range disks {
 		tpg := "/iscsi/" + d.targetIQN + "/tpg1"
 		steps = append(steps,
-			privStep{argv: []string{"targetcli", "/backstores/fileio", "create", d.backstoreName, d.imgPath, fmt.Sprintf("%dG", sizeGB)}, quietStderr: true, ignoreErr: true},
-			privStep{argv: []string{"targetcli", "/iscsi", "create", d.targetIQN}, quietStderr: true, ignoreErr: true},
-			privStep{argv: []string{"targetcli", tpg + "/luns", "create", "/backstores/fileio/" + d.backstoreName}, quietStderr: true, ignoreErr: true},
-			privStep{argv: []string{"targetcli", tpg + "/acls", "create", initIQN}, quietStderr: true, ignoreErr: true},
-			privStep{argv: []string{"targetcli", tpg + "/acls/" + initIQN, "create", "tpg_lun_or_backstore=lun0", "mapped_lun=0"}, quietStderr: true, ignoreErr: true},
+			privStep{argv: []string{"targetcli", "/backstores/fileio", "create", d.backstoreName, d.imgPath, fmt.Sprintf("%dG", sizeGB)}, warnOnFailure: true},
+			privStep{argv: []string{"targetcli", "/iscsi", "create", d.targetIQN}, warnOnFailure: true},
+			privStep{argv: []string{"targetcli", tpg + "/luns", "create", "/backstores/fileio/" + d.backstoreName}, warnOnFailure: true},
+			privStep{argv: []string{"targetcli", tpg + "/acls", "create", initIQN}, warnOnFailure: true},
+			privStep{argv: []string{"targetcli", tpg + "/acls/" + initIQN, "create", "tpg_lun_or_backstore=lun0", "mapped_lun=0"}, warnOnFailure: true},
 		)
 	}
 	steps = append(steps, privStep{argv: []string{"targetcli", "saveconfig"}})
 	if writeInitiator {
 		steps = append(steps, privStep{argv: []string{"systemctl", "restart", "iscsid"}, settle: time.Second})
 	}
-	return append(steps,
+	steps = append(steps,
 		privStep{argv: []string{"iscsiadm", "-m", "discovery", "-t", "sendtargets", "-p", "127.0.0.1"}},
 		privStep{argv: []string{"iscsiadm", "-m", "node", "--login"}, ignoreErr: true},
 	)
+	// --login is a no-op on a target the initiator already has a session
+	// with: it prints nothing and scans nothing. So a target created (or
+	// given a new LUN) after that session was established — e.g. a prior run
+	// that created the target but failed before adding its backstore — never
+	// gets its LUN scanned in, and no /dev/disk/by-path symlink ever appears.
+	// -R forces the existing session to rescan, which is the actual recovery;
+	// like --login, it fails harmlessly on a target with no session.
+	for _, d := range disks {
+		steps = append(steps, privStep{argv: []string{"iscsiadm", "-m", "node", "-T", d.targetIQN, "-R"}, ignoreErr: true})
+	}
+	return steps
 }
+
+const (
+	iscsiByPathDir    = "/dev/disk/by-path"
+	iscsiByPathPrefix = "ip-127.0.0.1:3260-iscsi-"
+	iscsiByPathSuffix = "-lun-0"
+)
 
 // iscsiByPathLink returns the /dev/disk/by-path symlink for a target's LUN 0.
 func iscsiByPathLink(targetIQN string) string {
-	return fmt.Sprintf("/dev/disk/by-path/ip-127.0.0.1:3260-iscsi-%s-lun-0", targetIQN)
+	return filepath.Join(iscsiByPathDir, iscsiByPathPrefix+targetIQN+iscsiByPathSuffix)
 }
 
 // resolveDeviceLink reads a symlink and returns its target as an absolute path,
