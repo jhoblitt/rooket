@@ -43,19 +43,7 @@ var _ = Describe("rooket up/down", Ordered, func() {
 				"sensitive host devices still reachable from %s", node)
 		}
 
-		By("settling: mons quorate, mgr active, mds up, all OSDs up, PGs active+clean, not unhealthy")
-		Eventually(func(g Gomega) {
-			s := cephTool(g, "-s")
-			g.Expect(s).To(MatchRegexp(`mon:\s+\d+\s+daemons,\s+quorum`), "no mon quorum:\n%s", s)
-			g.Expect(s).To(MatchRegexp(`mgr:.*\(active`), "no active mgr:\n%s", s)
-			g.Expect(s).To(MatchRegexp(`mds:\s+\d+/\d+\s+daemons up`), "no mds up:\n%s", s)
-			m := reOsdUp.FindStringSubmatch(s)
-			g.Expect(m).NotTo(BeNil(), "no osd line in ceph -s:\n%s", s)
-			g.Expect(m[1]).To(Equal(workers), "expected %s OSDs:\n%s", workers, s)
-			g.Expect(m[2]).To(Equal(m[1]), "not all OSDs up:\n%s", s)
-			g.Expect(s).NotTo(ContainSubstring("HEALTH_ERR"), "cluster unhealthy:\n%s", s)
-			pgsSettled(g)
-		}, 5*time.Minute, 15*time.Second).Should(Succeed())
+		waitClusterSettled()
 
 		By("serving I/O: round-tripping an object through RADOS")
 		Eventually(func(g Gomega) {
@@ -423,6 +411,24 @@ func hostSensitiveDevsOnNode(node string) string {
 			`/dev/tpm* /dev/hidraw* /dev/video* /dev/watchdog* 2>/dev/null; `+
 			`ls /dev/mapper 2>/dev/null | grep -v '^control$'`)
 	return strings.TrimSpace(o)
+}
+
+// waitClusterSettled blocks until mons are quorate, mgr is active, mds is up,
+// all OSDs are up, PGs are active+clean, and the cluster isn't HEALTH_ERR.
+func waitClusterSettled() {
+	By("settling: mons quorate, mgr active, mds up, all OSDs up, PGs active+clean, not unhealthy")
+	Eventually(func(g Gomega) {
+		s := cephTool(g, "-s")
+		g.Expect(s).To(MatchRegexp(`mon:\s+\d+\s+daemons,\s+quorum`), "no mon quorum:\n%s", s)
+		g.Expect(s).To(MatchRegexp(`mgr:.*\(active`), "no active mgr:\n%s", s)
+		g.Expect(s).To(MatchRegexp(`mds:\s+\d+/\d+\s+daemons up`), "no mds up:\n%s", s)
+		m := reOsdUp.FindStringSubmatch(s)
+		g.Expect(m).NotTo(BeNil(), "no osd line in ceph -s:\n%s", s)
+		g.Expect(m[1]).To(Equal(workers), "expected %s OSDs:\n%s", workers, s)
+		g.Expect(m[2]).To(Equal(m[1]), "not all OSDs up:\n%s", s)
+		g.Expect(s).NotTo(ContainSubstring("HEALTH_ERR"), "cluster unhealthy:\n%s", s)
+		pgsSettled(g)
+	}, 5*time.Minute, 15*time.Second).Should(Succeed())
 }
 
 func pgsSettled(g Gomega) {
