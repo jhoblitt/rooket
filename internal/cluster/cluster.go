@@ -40,6 +40,11 @@ type Config struct {
 	RegistryName string
 	// RegistryHostPort is the port the registry listens on on the host.
 	RegistryHostPort int
+	// NodeImage is the kindest/node image passed to `kind create cluster
+	// --image`. Pinning it (rather than letting kind pick its built-in default)
+	// keeps the Kubernetes version reproducible and lets the caller pre-pull the
+	// exact ref concurrently with other work; empty means use kind's default.
+	NodeImage string
 	// WorkerDisks maps worker index → Disk descriptors to bind-mount into each
 	// worker node. kind runs node containers privileged, so a bind-mounted
 	// device file is usable inside the node under either engine (podman's crun
@@ -154,11 +159,17 @@ func Create(w io.Writer, cfg Config) error {
 
 	// The kind provider comes from KIND_EXPERIMENTAL_PROVIDER, which the root
 	// command exports from the selected engine.
-	return run.CmdTo(w,
-		"kind", "create", "cluster",
+	args := []string{
+		"create", "cluster",
 		"--name", cfg.Name,
 		"--config", tmpFile,
-	)
+	}
+	// A pinned node image keeps the Kubernetes version reproducible and lets the
+	// caller pre-pull the exact ref; kind picks its built-in default when unset.
+	if cfg.NodeImage != "" {
+		args = append(args, "--image", cfg.NodeImage)
+	}
+	return run.CmdTo(w, "kind", args...)
 }
 
 // Delete deletes the named kind cluster. The kind provider comes from
@@ -188,30 +199,31 @@ func DeleteWith(eng engine.Engine, name, kubeconfig string) error {
 // udev DB (the truncate doesn't notify the kernel, so lsblk/ceph-volume would
 // otherwise see a stale "ceph_bluestore" signature and skip the disk). Run AFTER
 // the kind cluster is deleted, when the disks are idle. Best-effort; targets the
-// image files in dataDir (the cluster's state directory).
-func ZapISCSIDisks(eng engine.Engine, clusterName, dataDir string) {
+// image files in dataDir (the cluster's state directory). Output goes to w so a
+// caller zapping several clusters concurrently can buffer each cluster's lines.
+func ZapISCSIDisks(w io.Writer, eng engine.Engine, clusterName, dataDir string) {
 	imgs, _ := filepath.Glob(filepath.Join(dataDir, "*.img"))
 	if len(imgs) == 0 {
-		run.Printf("no OSD disk images for cluster %q; skipping zap\n", clusterName)
+		run.Fprintf(w, "no OSD disk images for cluster %q; skipping zap\n", clusterName)
 		return
 	}
 
-	run.Printf("==> zapping OSD disks (re-sparsifying backing images)\n")
+	run.Fprintf(w, "==> zapping OSD disks (re-sparsifying backing images)\n")
 	for _, img := range imgs {
 		fi, err := os.Stat(img)
 		if err != nil {
-			run.Printf("warning: stat %s: %v\n", img, err)
+			run.Fprintf(w, "warning: stat %s: %v\n", img, err)
 			continue
 		}
 		if err := os.Truncate(img, 0); err != nil {
-			run.Printf("warning: truncate %s to 0: %v\n", img, err)
+			run.Fprintf(w, "warning: truncate %s to 0: %v\n", img, err)
 			continue
 		}
 		if err := os.Truncate(img, fi.Size()); err != nil {
-			run.Printf("warning: truncate %s to %d: %v\n", img, fi.Size(), err)
+			run.Fprintf(w, "warning: truncate %s to %d: %v\n", img, fi.Size(), err)
 			continue
 		}
-		run.Printf("zapped %s\n", img)
+		run.Fprintf(w, "zapped %s\n", img)
 	}
 
 	// Refresh udev so lsblk/ceph-volume don't see the stale "ceph_bluestore"
@@ -228,7 +240,7 @@ func ZapISCSIDisks(eng engine.Engine, clusterName, dataDir string) {
 done
 udevadm trigger --action=change --subsystem-match=block >/dev/null 2>&1 || true
 udevadm settle >/dev/null 2>&1 || true`, clusterName)
-		_ = run.Cmd(eng.String(), "run", "--rm", "--privileged",
+		_ = run.CmdTo(w, eng.String(), "run", "--rm", "--privileged",
 			"-v", "/dev:/dev", "-v", "/run/udev:/run/udev",
 			"--entrypoint", "sh", cimg, "-c", script)
 	}

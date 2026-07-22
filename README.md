@@ -109,6 +109,16 @@ $ export KUBECONFIG="$(rooket kubeconfig --path)"    # or point your own tools a
 | `rooket config` | print the kind config that `create` would use |
 | `rooket version` | print the version, commit, build time, and Go toolchain |
 
+## Design
+
+A standing design goal is that **every command exploits all available
+concurrency to minimize wallclock time** — independent work runs in parallel,
+and sequencing is used only where a real dependency, shared resource, or
+terminal/prompt constraint requires it. For example, `rooket up` overlaps block
+setup, the kind node-image pre-pull, and cluster create with the (long-pole)
+rook `make` build. See [docs/design/concurrency.md](docs/design/concurrency.md)
+for the dependency graph, the primitives, and the invariants that bound it.
+
 ## Tests
 
 Unit tests: `go test ./...`. The end-to-end suite

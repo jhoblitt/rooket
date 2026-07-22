@@ -149,7 +149,7 @@ does not add a new restriction there.
 // teardown all render on a privileged-run failure.
 func teardownISCSI(disks []iscsiDisk) error {
 	steps := buildISCSITeardownSteps(disks)
-	if err := runPrivileged(steps); err != nil {
+	if err := runPrivileged(os.Stdout, steps); err != nil {
 		return fmt.Errorf("iSCSI teardown failed.\n\nRun the following script manually with root privileges:\n\n%s\nError: %w", renderScript(steps), err)
 	}
 	return nil

@@ -354,7 +354,7 @@ func TestRunPrivilegedFallsBackToPkexec(t *testing.T) {
 	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
 
 	steps := []privStep{{argv: []string{"targetcli", "saveconfig"}}}
-	if err := runPrivileged(steps); err != nil {
+	if err := runPrivileged(io.Discard, steps); err != nil {
 		t.Fatalf("runPrivileged: %v", err)
 	}
 	got, err := os.ReadFile(logPath)
@@ -386,7 +386,7 @@ func TestRunPrivilegedTakesItemizedPathWhenProbeSucceeds(t *testing.T) {
 	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
 
 	steps := []privStep{{argv: []string{"targetcli", "saveconfig"}}}
-	if err := runPrivileged(steps); err != nil {
+	if err := runPrivileged(io.Discard, steps); err != nil {
 		t.Fatalf("runPrivileged: %v", err)
 	}
 	got, err := os.ReadFile(logPath)
@@ -413,7 +413,7 @@ func TestRunPrivilegedTakesItemizedPathOnBlanketSudoWithoutRooketRule(t *testing
 	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
 
 	steps := []privStep{{argv: []string{"targetcli", "saveconfig"}}}
-	if err := runPrivileged(steps); err != nil {
+	if err := runPrivileged(io.Discard, steps); err != nil {
 		t.Fatalf("runPrivileged: %v", err)
 	}
 	got, err := os.ReadFile(logPath)
@@ -461,7 +461,7 @@ esac
 	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
 
 	steps := []privStep{{argv: []string{"targetcli", "saveconfig"}}}
-	if err := runPrivileged(steps); err != nil {
+	if err := runPrivileged(io.Discard, steps); err != nil {
 		t.Fatalf("runPrivileged: %v", err)
 	}
 	got, err := os.ReadFile(logPath)
@@ -477,7 +477,7 @@ esac
 }
 
 func TestRunPrivilegedRejectsUngrantedStep(t *testing.T) {
-	if err := runPrivileged([]privStep{{argv: []string{"rm", "-rf", "/"}}}); err == nil {
+	if err := runPrivileged(io.Discard, []privStep{{argv: []string{"rm", "-rf", "/"}}}); err == nil {
 		t.Fatal("runPrivileged accepted an ungranted command, want error")
 	}
 }

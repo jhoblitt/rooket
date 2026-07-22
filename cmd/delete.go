@@ -64,7 +64,7 @@ must be torn down separately if desired.
 		// --- Step 2: zap OSD disks now that the nodes have released them ---
 		if deleteZap {
 			if dir, err := stateDirPath(deleteName); err == nil {
-				cluster.ZapISCSIDisks(containerEngine, deleteName, dir)
+				cluster.ZapISCSIDisks(os.Stdout, containerEngine, deleteName, dir)
 			} else {
 				run.Printf("warning: zap OSD disks: %v\n", err)
 			}
