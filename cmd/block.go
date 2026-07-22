@@ -304,6 +304,7 @@ func initiatorNameCurrent(path, wantIQN string) bool {
 //  4. Save the targetcli config
 //  5. Restart iscsid, if writeInitiator, to pick up the new name
 //  6. Discover targets and log in with iscsiadm
+//  7. Rescan each target's LUNs with iscsiadm
 func buildISCSISteps(initIQN string, disks []iscsiDisk, sizeGB int, writeInitiator bool) []privStep {
 	steps := []privStep{{argv: []string{"systemctl", "start", "iscsid"}}}
 	if writeInitiator {
@@ -327,10 +328,21 @@ func buildISCSISteps(initIQN string, disks []iscsiDisk, sizeGB int, writeInitiat
 	if writeInitiator {
 		steps = append(steps, privStep{argv: []string{"systemctl", "restart", "iscsid"}, settle: time.Second})
 	}
-	return append(steps,
+	steps = append(steps,
 		privStep{argv: []string{"iscsiadm", "-m", "discovery", "-t", "sendtargets", "-p", "127.0.0.1"}},
 		privStep{argv: []string{"iscsiadm", "-m", "node", "--login"}, ignoreErr: true},
 	)
+	// --login is a no-op on a target the initiator already has a session
+	// with: it prints nothing and scans nothing. So a target created (or
+	// given a new LUN) after that session was established — e.g. a prior run
+	// that created the target but failed before adding its backstore — never
+	// gets its LUN scanned in, and no /dev/disk/by-path symlink ever appears.
+	// -R forces the existing session to rescan, which is the actual recovery;
+	// like --login, it fails harmlessly on a target with no session.
+	for _, d := range disks {
+		steps = append(steps, privStep{argv: []string{"iscsiadm", "-m", "node", "-T", d.targetIQN, "-R"}, ignoreErr: true})
+	}
+	return steps
 }
 
 // iscsiByPathLink returns the /dev/disk/by-path symlink for a target's LUN 0.

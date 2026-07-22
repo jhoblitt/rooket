@@ -192,3 +192,56 @@ func TestBuildISCSIScriptInitiatorWriteGatesRestart(t *testing.T) {
 		t.Errorf("steps without the initiator write are not granted: %v", err)
 	}
 }
+
+// --login is a no-op on a target the initiator already has a session with, so
+// a LUN added to that target after the session was established is never
+// scanned in by --login alone. A per-disk rescan after --login is the actual
+// recovery; this must appear for every disk and only after --login, and must
+// still be granted by the sudoers vocabulary in both writeInitiator states.
+func TestBuildISCSIStepsRescansAfterLogin(t *testing.T) {
+	disks := []iscsiDisk{
+		{targetIQN: "iqn.2003-01.local.rooket:c-worker0-disk0"},
+		{targetIQN: "iqn.2003-01.local.rooket:c-worker1-disk0"},
+	}
+	initIQN := "iqn.2003-01.local.rooket:initiator"
+
+	for _, write := range []bool{true, false} {
+		steps := buildISCSISteps(initIQN, disks, 10, write)
+
+		loginIdx := -1
+		for i, s := range steps {
+			if slices.Equal(s.argv, []string{"iscsiadm", "-m", "node", "--login"}) {
+				loginIdx = i
+				break
+			}
+		}
+		if loginIdx == -1 {
+			t.Fatalf("writeInitiator=%v: no --login step found", write)
+		}
+
+		for _, d := range disks {
+			want := []string{"iscsiadm", "-m", "node", "-T", d.targetIQN, "-R"}
+			idx := -1
+			for i, s := range steps {
+				if slices.Equal(s.argv, want) {
+					idx = i
+					break
+				}
+			}
+			if idx == -1 {
+				t.Errorf("writeInitiator=%v: no rescan step for %s", write, d.targetIQN)
+				continue
+			}
+			if idx <= loginIdx {
+				t.Errorf("writeInitiator=%v: rescan step for %s at index %d is not after --login at index %d", write, d.targetIQN, idx, loginIdx)
+			}
+			if !steps[idx].ignoreErr {
+				t.Errorf("writeInitiator=%v: rescan step for %s must tolerate failure like --login does", write, d.targetIQN)
+			}
+		}
+
+		if err := validateSteps(steps); err != nil {
+			t.Errorf("writeInitiator=%v: %v", write, err)
+		}
+	}
+}
