@@ -300,7 +300,10 @@ func Nodes(w io.Writer, clusterName string) ([]string, error) {
 //     OSDs are raw bluestore on the whole disk (no LVM child), so keeping the
 //     node's own /dev/sdX suffices. ownDevsByNode maps node name -> the OSD
 //     device(s) it keeps; a node absent from the map (the control-plane) keeps
-//     only the allowlist.
+//     only the allowlist,
+//   - pre-creates /dev/rbdN block device nodes so ceph-csi can krbd-map RBD
+//     PVCs onto a node's per-node tmpfs /dev (see rbdNodeScript); best-effort
+//     and never fails prep.
 //
 // Failures across all nodes are collected and returned together (not just
 // logged), so creation aborts before deploying onto a mis-prepared node — for
@@ -383,17 +386,34 @@ func forEachNode(w io.Writer, nodes []string, fn func(node string, out *bytes.Bu
 	return errors.Join(errs...)
 }
 
+// rbdMaxDevices is the number of /dev/rbdN nodes nodePrepScript pre-creates
+// (see rbdNodeScript), i.e. the number of RBD volumes a node can have
+// concurrently mapped afterwards.
+const rbdMaxDevices = 16
+
 // allowedDevs is the allowlist of device-node paths kept in every node's /dev;
 // nodePrepScript removes every other block or char node, plus per node the
 // node's own OSD disk. It is the minimal set a kind node needs: the OCI standard
 // devices (null/zero/full/random/urandom/tty/console/ptmx) plus the kernel-log
-// (kmsg), FUSE, CNI tun, device-mapper-control and loop-control nodes. None of
-// these is a host-storage, -memory, or -hardware access path — unlike the host
-// disks, /dev/mem, /dev/kvm, /dev/sg*, etc. that the prune strips. Runtime nodes
-// like CSI's /dev/rbdN are created after prep and so are never pruned.
-const allowedDevs = "/dev/null /dev/zero /dev/full /dev/random /dev/urandom " +
+// (kmsg), FUSE, CNI tun, device-mapper-control and loop-control nodes, plus the
+// /dev/rbdN nodes nodePrepScript itself pre-creates — listed here so the prune
+// doesn't strip one a privileged node container already inherited from the
+// host before prep ran. None of these is a host-storage, -memory, or -hardware
+// access path — unlike the host disks, /dev/mem, /dev/kvm, /dev/sg*, etc. that
+// the prune strips.
+var allowedDevs = "/dev/null /dev/zero /dev/full /dev/random /dev/urandom " +
 	"/dev/tty /dev/console /dev/ptmx /dev/kmsg /dev/fuse /dev/net/tun " +
-	"/dev/mapper/control /dev/loop-control"
+	"/dev/mapper/control /dev/loop-control" + rbdAllowlist()
+
+// rbdAllowlist renders the " /dev/rbd0 /dev/rbd1 ... /dev/rbdN-1" suffix
+// appended to allowedDevs.
+func rbdAllowlist() string {
+	var b strings.Builder
+	for i := 0; i < rbdMaxDevices; i++ {
+		fmt.Fprintf(&b, " /dev/rbd%d", i)
+	}
+	return b.String()
+}
 
 // nodePrepScript renders the per-node preparation script. Operations do NOT
 // stop at the first failure — a failed remount must not skip the
@@ -431,6 +451,10 @@ const allowedDevs = "/dev/null /dev/zero /dev/full /dev/random /dev/urandom " +
 // pids cap remains the real ceiling. The 90- prefix keeps a stock kind-image
 // drop-in from lexicographically overriding it, and the post-reload check
 // fails loudly if something did. Guarded so warm reruns skip the reload.
+//
+// After the mask, rbdNodeScript pre-creates the krbd device nodes. UNLIKE the
+// rest of this script, that step is best-effort and never sets rc or emits a
+// ROOKET_FAIL marker — see its own doc comment for why.
 func nodePrepScript(keepDevs []string) string {
 	var b strings.Builder
 	b.WriteString(`rc=0
@@ -462,8 +486,54 @@ fi
 	b.WriteString(`  rm -f "$dev" || { echo "ROOKET_FAIL:mask host device $dev"; rc=1; }
 done
 `)
+	b.WriteString(rbdNodeScript())
 	b.WriteString("echo ROOKET_DONE\nexit $rc\n")
 	return b.String()
+}
+
+// rbdNodeScript renders the best-effort step that pre-creates /dev/rbdN block
+// device nodes for N in [0, rbdMaxDevices).
+//
+// ceph-csi already maps krbd volumes with --options noudev, so udev is not
+// the problem: the kernel's own map still creates the device node, but it
+// does so in the HOST's devtmpfs. A kind node's /dev is a per-node tmpfs, so
+// that node is invisible inside the node container, and mounting the PVC
+// fails with exactly this observed error:
+//
+//	rbd: mapping succeeded but /dev/rbd0 is not accessible, is host /dev
+//	mounted?
+//
+// rook's own CI dodges this by bind-mounting the host's whole /dev into every
+// node, which rooket cannot do: that would re-expose every host device the
+// prune above just stripped (and re-enable Rook's global ceph-volume scan
+// misattributing OSDs across nodes — see PrepareNodes). Pre-creating the
+// nodes here sidesteps both problems.
+//
+// With /sys/module/rbd/parameters/single_major = Y (checked at runtime, not
+// assumed) the kernel assigns image N minor N<<4 under one dynamically
+// numbered major — confirmed against the kernel source (drivers/block/rbd.c:
+// rbd_dev_id_to_minor() returns dev_id<<RBD_SINGLE_MAJOR_PART_SHIFT, and
+// RBD_SINGLE_MAJOR_PART_SHIFT is 4), not merely documentation. This step is
+// best-effort: a node that can't load the module or find its major just
+// can't mount RBD, which is today's behaviour, so it warns rather than
+// failing prep (no rc=1, no ROOKET_FAIL marker — contrast the mask above).
+// modprobe needs /lib/modules in the node, which kind only bind-mounts on
+// request; rooket's kind config does not, so this is expected to no-op via
+// the "already loaded" path whenever some other cluster has used RBD before.
+func rbdNodeScript() string {
+	return fmt.Sprintf(`modprobe rbd 2>/dev/null || true
+rbd_major=$(awk '$2 == "rbd" { print $1 }' /proc/devices)
+if [ -n "$rbd_major" ]; then
+  i=0
+  while [ "$i" -lt %d ]; do
+    minor=$((i << 4))
+    [ -e "/dev/rbd$i" ] || mknod "/dev/rbd$i" b "$rbd_major" "$minor" || echo "warning: mknod /dev/rbd$i failed"
+    i=$((i + 1))
+  done
+else
+  echo "warning: rbd kernel module not loaded and no major found in /proc/devices; RBD PVCs will not be mountable on this node"
+fi
+`, rbdMaxDevices)
 }
 
 // nodeScriptErrors converts a node script's ROOKET_FAIL markers back into
