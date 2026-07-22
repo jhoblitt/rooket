@@ -226,18 +226,28 @@ func stateDirDisks(clusterName, dir, iqnDate string) []iscsiDisk {
 // iSCSI sessions, delete node records, and remove targets and backstores via
 // targetcli. Every step is best-effort so a partial setup can still be
 // cleaned up.
+//
+// The targetcli deletes carry warnOnFailure rather than ignoreErr: a single
+// stale backstore (e.g. left by an unrelated cluster) aborts every targetcli
+// mutation, including these, and a caller that deletes state right after this
+// runs (prune) must not let that failure go unreported — silently discarding
+// it is what let a target survive with nothing left to name it again. The
+// iscsiadm logout/delete steps stay ignoreErr: unlike targetcli, they fail
+// routinely and harmlessly (no session or node record ever existed, e.g. a
+// setup that never reached iscsiadm login), so warning on every one of them
+// would bury the signal the targetcli warnings are meant to surface.
 func buildISCSITeardownSteps(disks []iscsiDisk) []privStep {
 	var steps []privStep
 	for _, d := range disks {
 		steps = append(steps,
-			privStep{argv: []string{"iscsiadm", "-m", "node", "-T", d.targetIQN, "-u"}, quietStderr: true, ignoreErr: true},
-			privStep{argv: []string{"iscsiadm", "-m", "node", "-T", d.targetIQN, "-o", "delete"}, quietStderr: true, ignoreErr: true},
+			privStep{argv: []string{"iscsiadm", "-m", "node", "-T", d.targetIQN, "-u"}, ignoreErr: true},
+			privStep{argv: []string{"iscsiadm", "-m", "node", "-T", d.targetIQN, "-o", "delete"}, ignoreErr: true},
 		)
 	}
 	for _, d := range disks {
 		steps = append(steps,
-			privStep{argv: []string{"targetcli", "/iscsi", "delete", d.targetIQN}, quietStderr: true, ignoreErr: true},
-			privStep{argv: []string{"targetcli", "/backstores/fileio", "delete", d.backstoreName}, quietStderr: true, ignoreErr: true},
+			privStep{argv: []string{"targetcli", "/iscsi", "delete", d.targetIQN}, warnOnFailure: true},
+			privStep{argv: []string{"targetcli", "/backstores/fileio", "delete", d.backstoreName}, warnOnFailure: true},
 		)
 	}
 	return append(steps, privStep{argv: []string{"targetcli", "saveconfig"}})

@@ -128,7 +128,7 @@ func TestRenderStepLineClampsSubSecondSettle(t *testing.T) {
 // swallowed failure here was once invisible.
 func TestRenderStepLineWarnOnFailure(t *testing.T) {
 	step := privStep{argv: []string{"targetcli", "create", "iqn.y"}, warnOnFailure: true}
-	want := `targetcli 'create' 'iqn.y' || printf 'warning: %s failed, continuing\n' 'targetcli create iqn.y' >&2`
+	want := `targetcli 'create' 'iqn.y' || printf 'warning: %s failed, continuing\n' 'targetcli create iqn.y'`
 	if got := renderStepLine(step); got != want {
 		t.Errorf("renderStepLine = %q, want %q", got, want)
 	}

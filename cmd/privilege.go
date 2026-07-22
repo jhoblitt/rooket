@@ -251,7 +251,10 @@ func renderStepLine(s privStep) string {
 		// "|| true" would also satisfy set -e, but would leave the failure as
 		// unreported here as ignoreErr does; a printf that always succeeds
 		// keeps the script going while still naming the step that failed.
-		line += fmt.Sprintf(" || printf 'warning: %%s failed, continuing\\n' %s >&2", shQuote(strings.Join(s.argv, " ")))
+		// Writes to stdout, matching runSteps' warnOnFailure branch (which
+		// writes to w, always stdout in production) — the two executors must
+		// agree on which stream carries the warning.
+		line += fmt.Sprintf(" || printf 'warning: %%s failed, continuing\\n' %s", shQuote(strings.Join(s.argv, " ")))
 	}
 	if s.settle > 0 {
 		settle := s.settle
