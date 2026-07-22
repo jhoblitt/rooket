@@ -29,7 +29,7 @@ const (
 
 	// ZotImage is pinned: an unpinned cache would resync on every silent
 	// upstream rebuild.
-	ZotImage = "ghcr.io/project-zot/zot-linux-amd64:v2.1.5"
+	ZotImage = "ghcr.io/project-zot/zot-linux-amd64:v2.1.17"
 
 	// InternalPort is the port zot listens on inside the container.
 	InternalPort = 5000
