@@ -122,6 +122,18 @@ func TestRenderStepLineClampsSubSecondSettle(t *testing.T) {
 	}
 }
 
+// The rendered script runs the whole list under "set -e", so a warnOnFailure
+// step must still not abort it — but unlike ignoreErr's "|| true", it must
+// leave a visible trace when it fails, since the whole point is that a
+// swallowed failure here was once invisible.
+func TestRenderStepLineWarnOnFailure(t *testing.T) {
+	step := privStep{argv: []string{"targetcli", "create", "iqn.y"}, warnOnFailure: true}
+	want := `targetcli 'create' 'iqn.y' || printf 'warning: %s failed, continuing\n' 'targetcli create iqn.y' >&2`
+	if got := renderStepLine(step); got != want {
+		t.Errorf("renderStepLine = %q, want %q", got, want)
+	}
+}
+
 // writeStubSudo puts fake sudo and pkexec on PATH, each recording its argv to
 // a shared log and also echoing it to its own stdout, so a test can assert on
 // either the log (argv actually issued) or the stdout a caller's writer
@@ -198,6 +210,44 @@ func TestRunStepsHonoursIgnoreErr(t *testing.T) {
 		{argv: []string{"targetcli", "saveconfig"}},
 	}); err == nil {
 		t.Error("runSteps returned nil for a failing step, want error")
+	}
+}
+
+// This is the regression test for the targetcli-create-swallowing bug: a
+// warnOnFailure step's failure must not abort the run, must still let the
+// next step execute, and must be reported (both the command's own stderr and
+// an explicit warning naming the failed command) rather than discarded, the
+// way ignoreErr+quietStderr used to discard it.
+func TestRunStepsWarnOnFailureContinuesAndReportsFailure(t *testing.T) {
+	dir := t.TempDir()
+	stub := fmt.Sprintf(`#!/bin/sh
+case "$*" in
+  "-n %s fail-step") echo boom-diagnostic >&2; exit 1 ;;
+  *) exit 0 ;;
+esac
+`, resolvedCommandPath("targetcli"))
+	if err := os.WriteFile(filepath.Join(dir, "sudo"), []byte(stub), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	var buf bytes.Buffer
+	steps := []privStep{
+		{argv: []string{"targetcli", "fail-step"}, warnOnFailure: true},
+		{argv: []string{"systemctl", "next-step"}},
+	}
+	if err := runSteps(&buf, []string{"sudo", "-n"}, steps); err != nil {
+		t.Fatalf("runSteps returned %v for a warnOnFailure step, want nil", err)
+	}
+	got := buf.String()
+	if !strings.Contains(got, "boom-diagnostic") {
+		t.Errorf("failed step's own stderr was not visible: %q", got)
+	}
+	if !strings.Contains(got, "warning") || !strings.Contains(got, "fail-step") {
+		t.Errorf("no warning naming the failed command: %q", got)
+	}
+	if !strings.Contains(got, "next-step") {
+		t.Errorf("subsequent step did not run: %q", got)
 	}
 }
 

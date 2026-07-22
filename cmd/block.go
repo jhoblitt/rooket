@@ -314,14 +314,20 @@ func buildISCSISteps(initIQN string, disks []iscsiDisk, sizeGB int, writeInitiat
 			quietStdout: true,
 		})
 	}
+	// These create steps tolerate "already exists" on a re-run, but that is
+	// not the only way targetcli can fail: an unrelated stale backstore (e.g.
+	// referencing another cluster's deleted image file) makes every targetcli
+	// mutation abort, including these. warnOnFailure keeps that failure from
+	// being silently discarded — quietStderr+ignoreErr once hid exactly this,
+	// leaving "block devices not found" as the only, misleading symptom.
 	for _, d := range disks {
 		tpg := "/iscsi/" + d.targetIQN + "/tpg1"
 		steps = append(steps,
-			privStep{argv: []string{"targetcli", "/backstores/fileio", "create", d.backstoreName, d.imgPath, fmt.Sprintf("%dG", sizeGB)}, quietStderr: true, ignoreErr: true},
-			privStep{argv: []string{"targetcli", "/iscsi", "create", d.targetIQN}, quietStderr: true, ignoreErr: true},
-			privStep{argv: []string{"targetcli", tpg + "/luns", "create", "/backstores/fileio/" + d.backstoreName}, quietStderr: true, ignoreErr: true},
-			privStep{argv: []string{"targetcli", tpg + "/acls", "create", initIQN}, quietStderr: true, ignoreErr: true},
-			privStep{argv: []string{"targetcli", tpg + "/acls/" + initIQN, "create", "tpg_lun_or_backstore=lun0", "mapped_lun=0"}, quietStderr: true, ignoreErr: true},
+			privStep{argv: []string{"targetcli", "/backstores/fileio", "create", d.backstoreName, d.imgPath, fmt.Sprintf("%dG", sizeGB)}, warnOnFailure: true},
+			privStep{argv: []string{"targetcli", "/iscsi", "create", d.targetIQN}, warnOnFailure: true},
+			privStep{argv: []string{"targetcli", tpg + "/luns", "create", "/backstores/fileio/" + d.backstoreName}, warnOnFailure: true},
+			privStep{argv: []string{"targetcli", tpg + "/acls", "create", initIQN}, warnOnFailure: true},
+			privStep{argv: []string{"targetcli", tpg + "/acls/" + initIQN, "create", "tpg_lun_or_backstore=lun0", "mapped_lun=0"}, warnOnFailure: true},
 		)
 	}
 	steps = append(steps, privStep{argv: []string{"targetcli", "saveconfig"}})
