@@ -20,6 +20,7 @@ var (
 	createISCSIQNDate     string
 	createPromCRDsVersion string
 	createPromCRDsRelease string
+	createNodeImage       string
 )
 
 var createCmd = &cobra.Command{
@@ -50,7 +51,7 @@ Run 'rooket block setup' before 'rooket cluster create' to prepare block devices
 		createName = name
 		return createClusterRun(os.Stdout, name, createRegistryPort,
 			cmd.Flags().Changed("registry-port"), createWorkers, createDiskCount,
-			createISCSIQNDate, createPromCRDsVersion, createPromCRDsRelease)
+			createISCSIQNDate, createPromCRDsVersion, createPromCRDsRelease, createNodeImage)
 	},
 }
 
@@ -59,7 +60,7 @@ Run 'rooket block setup' before 'rooket cluster create' to prepare block devices
 // (useCluster's Setenv stays in the cobra wrapper) so a caller can run it
 // concurrently with other phases.
 func createClusterRun(out io.Writer, name string, requestedPort int, portExplicit bool,
-	workers, diskCount int, iqnDate, promVersion, promRelease string) error {
+	workers, diskCount int, iqnDate, promVersion, promRelease, nodeImage string) error {
 	port, err := resolveRegistryPort(name, requestedPort, portExplicit)
 	if err != nil {
 		return err
@@ -112,6 +113,7 @@ func createClusterRun(out io.Writer, name string, requestedPort int, portExplici
 		Workers:          workers,
 		RegistryName:     regName,
 		RegistryHostPort: port,
+		NodeImage:        nodeImage,
 		WorkerDisks:      workerDisks,
 	}
 	exists, err := cluster.Exists(out, containerEngine, name)
@@ -126,8 +128,14 @@ func createClusterRun(out io.Writer, name string, requestedPort int, portExplici
 		}
 	}
 
-	// --- Step 3: Prepare nodes for OSD provisioning ---
-	run.Fprintf(out, "==> preparing nodes for OSD provisioning\n")
+	// --- Steps 3, 4, 6, 7 run concurrently ---
+	// They share only the cluster created above (Step 2) and otherwise touch
+	// disjoint subsystems: node prep execs into the worker containers, the
+	// registry is a host-side container on the "kind" network, and the ConfigMap
+	// and prometheus CRDs go to the apiserver. Step 5 (containerd wiring) is the
+	// one that cannot join them — it needs the registry from Step 4 AND execs
+	// into the same nodes as Step 3, and two per-node script passes must not run
+	// at once — so it follows the group.
 	ownDevsByNode := make(map[string][]string)
 	for i := 0; i < workers; i++ {
 		node := workerNodeName(name, i)
@@ -135,46 +143,58 @@ func createClusterRun(out io.Writer, name string, requestedPort int, portExplici
 			ownDevsByNode[node] = append(ownDevsByNode[node], d.HostPath)
 		}
 	}
-	if err := cluster.PrepareNodes(out, containerEngine, name, ownDevsByNode); err != nil {
-		return fmt.Errorf("prepare nodes: %w", err)
+	hEnv, err := helmEnv(name, "rooket")
+	if err != nil {
+		return err
 	}
-
-	// --- Step 4: Registry ---
-	// Created after the cluster so the "kind" network exists.
-	// --network=kind makes the container reachable by name from cluster nodes.
-	run.Fprintf(out, "==> creating local OCI registry on the kind network\n")
+	// Created after the cluster so the "kind" network exists; --network=kind
+	// makes the container reachable by name from cluster nodes.
 	regCfg := registry.Config{
 		Engine:   containerEngine,
 		Name:     regName,
 		HostPort: port,
 		Network:  "kind",
 	}
-	if err := registry.Create(out, regCfg); err != nil {
-		return fmt.Errorf("create registry: %w", err)
+	run.Fprintf(out, "==> preparing nodes, registry, ConfigMap, and prometheus CRDs (concurrent)\n")
+	if err := runConcurrent(out,
+		func(w io.Writer) error { // Step 3: prepare nodes for OSD provisioning
+			run.Fprintf(w, "==> preparing nodes for OSD provisioning\n")
+			if err := cluster.PrepareNodes(w, containerEngine, name, ownDevsByNode); err != nil {
+				return fmt.Errorf("prepare nodes: %w", err)
+			}
+			return nil
+		},
+		func(w io.Writer) error { // Step 4: local OCI registry
+			run.Fprintf(w, "==> creating local OCI registry on the kind network\n")
+			if err := registry.Create(w, regCfg); err != nil {
+				return fmt.Errorf("create registry: %w", err)
+			}
+			return nil
+		},
+		func(w io.Writer) error { // Step 6: registry ConfigMap
+			run.Fprintf(w, "==> applying local-registry-hosting ConfigMap\n")
+			if err := cluster.ApplyRegistryConfigMap(w, name, regName, port); err != nil {
+				return fmt.Errorf("apply registry ConfigMap: %w", err)
+			}
+			return nil
+		},
+		func(w io.Writer) error { // Step 7: prometheus-operator CRDs
+			run.Fprintf(w, "==> installing prometheus-operator-crds helm chart\n")
+			if err := cluster.InstallPrometheusOperatorCRDs(w, name, promRelease, promVersion, hEnv); err != nil {
+				return fmt.Errorf("install prometheus-operator-crds: %w", err)
+			}
+			return nil
+		},
+	); err != nil {
+		return err
 	}
 
 	// --- Step 5: Configure containerd registry on each node ---
+	// After Step 4 (the registry exists) and after Step 3 (so two per-node
+	// script passes never exec into the same node at once).
 	run.Fprintf(out, "==> configuring containerd registry on cluster nodes\n")
 	if err := cluster.ConfigureRegistry(out, containerEngine, name, regName, port); err != nil {
 		return fmt.Errorf("configure registry on nodes: %w", err)
-	}
-
-	// --- Step 6: Registry ConfigMap ---
-	run.Fprintf(out, "==> applying local-registry-hosting ConfigMap\n")
-	if err := cluster.ApplyRegistryConfigMap(out, name, regName, port); err != nil {
-		return fmt.Errorf("apply registry ConfigMap: %w", err)
-	}
-
-	// --- Step 7: prometheus-operator CRDs ---
-	run.Fprintf(out, "==> installing prometheus-operator-crds helm chart\n")
-	hEnv, err := helmEnv(name, "rooket")
-	if err != nil {
-		return err
-	}
-	if err := cluster.InstallPrometheusOperatorCRDs(
-		out, name, promRelease, promVersion, hEnv,
-	); err != nil {
-		return fmt.Errorf("install prometheus-operator-crds: %w", err)
 	}
 
 	run.Fprintf(out, `
@@ -198,4 +218,5 @@ func init() {
 	createCmd.Flags().StringVar(&createISCSIQNDate, "iqn-date", "2003-01", "IQN date component matching 'rooket block setup' (YYYY-MM)")
 	createCmd.Flags().StringVar(&createPromCRDsVersion, "prometheus-operator-crds-version", "29.0.0", "version of the prometheus-operator-crds helm chart to install (exact versions enable the reinstall skip)")
 	createCmd.Flags().StringVar(&createPromCRDsRelease, "prometheus-operator-crds-release", "my-prometheus-operator-crds", "helm release name for prometheus-operator-crds")
+	createCmd.Flags().StringVar(&createNodeImage, "node-image", defaultNodeImage, "kindest/node image for 'kind create cluster --image' (pin tag@digest for a reproducible Kubernetes version)")
 }

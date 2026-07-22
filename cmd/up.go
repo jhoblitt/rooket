@@ -29,6 +29,7 @@ var (
 	upSkipBuild       bool
 	upSkipDeploy      bool
 	upForceBuild      bool
+	upNodeImage       string
 )
 
 var upCmd = &cobra.Command{
@@ -73,30 +74,65 @@ Example:
 		}
 		upRegistryPort = port
 
-		if err := upStep("[1/4] block setup", upSkipBlock || upDiskCount == 0, func() error {
-			blockSetupName = upName
-			blockSetupWorkers = upWorkers
-			blockSetupDiskCount = upDiskCount
-			blockSetupDiskSizeGB = upDiskSizeGB
-			blockSetupIQNDate = upIQNDate
-			if err := blockSetupRun(nil, nil); err != nil {
-				return fmt.Errorf("block setup: %w", err)
-			}
-			return nil
-		}); err != nil {
+		if err := validateIQNDate(upIQNDate); err != nil {
 			return err
 		}
+
+		// The infra that cluster create depends on — block setup (the iSCSI OSD
+		// devices create bind-mounts into the nodes) and the kind node-image
+		// pre-pull — is built here as one concurrent unit that runs ahead of
+		// create. Both are independent of the make portion of build, so when
+		// make runs and block setup needs no terminal prompt this whole unit
+		// overlaps make rather than sitting in front of it; see
+		// docs/design/concurrency.md.
+		blockSkipped := upSkipBlock || upDiskCount == 0
+		var runBlock func(io.Writer) error
+		blockPromptFree := true
+		if !blockSkipped {
+			dataDir, err := blockDataDir(upName, "")
+			if err != nil {
+				return err
+			}
+			disks := iscsiDiskList(upName, dataDir, upIQNDate, upWorkers, upDiskCount)
+			blockPromptFree = blockSetupPromptFree(disks)
+			runBlock = func(w io.Writer) error {
+				if err := blockSetupRunTo(w, upName, dataDir, upIQNDate, upWorkers, upDiskCount, upDiskSizeGB); err != nil {
+					return fmt.Errorf("block setup: %w", err)
+				}
+				return nil
+			}
+		}
+		infra := func(w io.Writer) error {
+			return runConcurrent(w,
+				func(bw io.Writer) error {
+					if runBlock != nil {
+						return runBlock(bw)
+					}
+					return nil
+				},
+				func(pw io.Writer) error { prePullNodeImage(pw, upNodeImage); return nil },
+			)
+		}
+		// Only block setup can prompt (via pkexec); the pre-pull never does. When
+		// it would prompt, the unit must own the terminal and so cannot overlap a
+		// streaming make.
+		infraOverlapSafe := blockSkipped || blockPromptFree
 
 		portExplicit := cmd.Flags().Changed("registry-port")
 		createRun := func(w io.Writer) error {
 			if err := createClusterRun(w, upName, upRegistryPort, portExplicit,
-				upWorkers, upDiskCount, upIQNDate, upPromVersion, upPromRelease); err != nil {
+				upWorkers, upDiskCount, upIQNDate, upPromVersion, upPromRelease, upNodeImage); err != nil {
 				return fmt.Errorf("cluster create: %w", err)
 			}
 			return nil
 		}
 
 		if upSkipBuild {
+			if err := upStep("[1/4] block setup + node image", false, func() error {
+				return infra(os.Stdout)
+			}); err != nil {
+				return err
+			}
 			if err := upStep("[2/4] cluster create", false, func() error {
 				return createRun(os.Stdout)
 			}); err != nil {
@@ -107,7 +143,7 @@ Example:
 				upRegistryPort = p
 			}
 			run.Printf("==> [3/4] build (skipped)\n")
-		} else if err := upCreateAndBuild(createRun, rookDir); err != nil {
+		} else if err := upCreateAndBuild(createRun, infra, infraOverlapSafe, rookDir); err != nil {
 			return err
 		}
 
@@ -140,22 +176,28 @@ rooket up complete in %s. cluster %q is ready.
 	},
 }
 
-// upCreateAndBuild runs cluster create concurrently with the make portion of
-// build. make owns the terminal (it is the long pole a user watches); create
-// writes into a switchWriter whose backlog flushes — then streams live — the
-// moment the build side stops streaming. The pre-create skip probe is only a
-// scheduling hint: the authoritative gate runs after the join, against the
-// registry and port that create may have just repaired, so a wrong hint
-// degrades to sequential speed, never to a wrong image. When the hint says
-// make is needed it starts immediately; a built result goes straight to the
-// push phase with no gate re-run (a re-run would see the still-unstamped
-// mismatch and build a second time).
+// upCreateAndBuild runs the infra-plus-create side concurrently with the make
+// portion of build. make owns the terminal (it is the long pole a user
+// watches); the other side writes into a switchWriter whose backlog flushes —
+// then streams live — the moment the build side stops streaming. The
+// pre-create skip probe is only a scheduling hint: the authoritative gate runs
+// after the join, against the registry and port that create may have just
+// repaired, so a wrong hint degrades to sequential speed, never to a wrong
+// image. When the hint says make is needed it starts immediately; a built
+// result goes straight to the push phase with no gate re-run (a re-run would
+// see the still-unstamped mismatch and build a second time).
+//
+// infra (block setup + node-image pre-pull) is the work create depends on. It
+// joins the concurrent region — overlapping make — only when make actually runs
+// and infraOverlapSafe says block setup will not prompt on the terminal;
+// otherwise it runs serially in front, where it can own the terminal and there
+// is no make to overlap anyway.
 //
 // Neither side is cancelled on the other's failure: killing make would
 // orphan the container build it spawned, and its warm caches help the retry.
 // The failing side prints an immediate one-line notice; both errors surface
 // after the join.
-func upCreateAndBuild(createRun func(io.Writer) error, rookDir string) error {
+func upCreateAndBuild(createRun, infra func(io.Writer) error, infraOverlapSafe bool, rookDir string) error {
 	buildForce = upForceBuild
 	gitRef, gitErr := gitHeadRef(rookDir)
 	if gitErr != nil {
@@ -180,8 +222,22 @@ func upCreateAndBuild(createRun func(io.Writer) error, rookDir string) error {
 		run.Printf("warning: could not determine git branch (%v); using \"latest\"\n", gitErr)
 	}
 
+	// Overlap infra with make only when make runs AND block setup needs no
+	// terminal prompt; otherwise run it serially in front.
+	overlap := startMake && infraOverlapSafe
+	if !overlap {
+		if err := upStep("[1/4] block setup + node image", false, func() error { return infra(os.Stdout) }); err != nil {
+			return err
+		}
+		infra = nil
+	}
+
 	sw := newSwitchWriter("=== cluster create output (ran concurrently with build) ===\n")
-	run.Printf("==> [2/4] cluster create (concurrent with [3/4] build)\n")
+	createBanner := "[2/4] cluster create"
+	if infra != nil {
+		createBanner = "[1-2/4] block setup + node image + cluster create"
+	}
+	run.Printf("==> %s (concurrent with [3/4] build)\n", createBanner)
 	run.Printf("==> [3/4] build\n")
 
 	var (
@@ -194,6 +250,15 @@ func upCreateAndBuild(createRun func(io.Writer) error, rookDir string) error {
 	go func() {
 		defer wg.Done()
 		started := time.Now()
+		// In the overlap case infra runs here, ahead of create and concurrent
+		// with make; a failed infra skips create and surfaces after the join.
+		if infra != nil {
+			if createErr = infra(sw); createErr != nil {
+				createDur = time.Since(started)
+				run.Printf("setup failed (%v)\n", createErr)
+				return
+			}
+		}
 		createErr = createRun(sw)
 		createDur = time.Since(started)
 		if createErr != nil {
@@ -217,9 +282,9 @@ func upCreateAndBuild(createRun func(io.Writer) error, rookDir string) error {
 	wg.Wait()
 	sw.Promote(os.Stdout)
 	if createErr != nil {
-		run.Printf("==> [2/4] cluster create failed after %s\n", fmtDur(createDur))
+		run.Printf("==> %s failed after %s\n", createBanner, fmtDur(createDur))
 	} else {
-		run.Printf("==> [2/4] cluster create done in %s\n", fmtDur(createDur))
+		run.Printf("==> %s done in %s\n", createBanner, fmtDur(createDur))
 	}
 	if makeErr != nil {
 		run.Printf("==> [3/4] build failed after %s\n", fmtDur(makeDur))
@@ -290,5 +355,6 @@ func init() {
 	upCmd.Flags().BoolVar(&upSkipBuild, "skip-build", false, "skip 'build'")
 	upCmd.Flags().BoolVar(&upSkipDeploy, "skip-deploy", false, "skip 'deploy'")
 	upCmd.Flags().BoolVar(&upForceBuild, "force-build", false, "run make even when the rook tree is unchanged since the last push")
+	upCmd.Flags().StringVar(&upNodeImage, "node-image", defaultNodeImage, "kindest/node image for the cluster, pre-pulled before create (pin tag@digest for a reproducible Kubernetes version)")
 	upCmd.MarkFlagsMutuallyExclusive("skip-build", "force-build")
 }

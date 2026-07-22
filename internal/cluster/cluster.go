@@ -40,6 +40,11 @@ type Config struct {
 	RegistryName string
 	// RegistryHostPort is the port the registry listens on on the host.
 	RegistryHostPort int
+	// NodeImage is the kindest/node image passed to `kind create cluster
+	// --image`. Pinning it (rather than letting kind pick its built-in default)
+	// keeps the Kubernetes version reproducible and lets the caller pre-pull the
+	// exact ref concurrently with other work; empty means use kind's default.
+	NodeImage string
 	// WorkerDisks maps worker index → Disk descriptors to bind-mount into each
 	// worker node. kind runs node containers privileged, so a bind-mounted
 	// device file is usable inside the node under either engine (podman's crun
@@ -154,11 +159,17 @@ func Create(w io.Writer, cfg Config) error {
 
 	// The kind provider comes from KIND_EXPERIMENTAL_PROVIDER, which the root
 	// command exports from the selected engine.
-	return run.CmdTo(w,
-		"kind", "create", "cluster",
+	args := []string{
+		"create", "cluster",
 		"--name", cfg.Name,
 		"--config", tmpFile,
-	)
+	}
+	// A pinned node image keeps the Kubernetes version reproducible and lets the
+	// caller pre-pull the exact ref; kind picks its built-in default when unset.
+	if cfg.NodeImage != "" {
+		args = append(args, "--image", cfg.NodeImage)
+	}
+	return run.CmdTo(w, "kind", args...)
 }
 
 // Delete deletes the named kind cluster. The kind provider comes from
