@@ -5,6 +5,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"slices"
 	"strings"
 	"time"
@@ -87,12 +88,38 @@ func renderScript(steps []privStep) string {
 	return sb.String()
 }
 
+// resolvedCommandPath returns the absolute, symlink-resolved path of name --
+// the same path resolveCommandPaths records in the generated sudoers rule.
+//
+// sudo matches a rule against the path it resolves the command to through
+// secure_path, and will NOT match a symlink against a rule naming that
+// symlink's target: on Fedora `iscsiadm` resolves to /usr/sbin/iscsiadm, which
+// sudo refuses to match against the rule's /usr/bin/iscsiadm, so a bare-name
+// invocation is denied. Naming the resolved path here keeps what rooket runs
+// and what the rule grants identical by construction.
+//
+// Resolution failures degrade to the bare name rather than erroring: this is
+// about agreeing with the rule, not about trusting the binary, which is an
+// install-time concern handled by checkTrustedBinary.
+func resolvedCommandPath(name string) string {
+	p, err := exec.LookPath(name)
+	if err != nil {
+		return name
+	}
+	resolved, err := filepath.EvalSymlinks(p)
+	if err != nil {
+		return p
+	}
+	return resolved
+}
+
 // runSteps runs each step with prefix prepended to its argv. quietStdout and
 // quietStderr each discard their own stream independently, matching what the
 // rendered script does with "> /dev/null" and "2>/dev/null".
 func runSteps(w io.Writer, prefix []string, steps []privStep) error {
 	for _, s := range steps {
 		argv := append(append([]string{}, prefix...), s.argv...)
+		argv[len(prefix)] = resolvedCommandPath(s.argv[0])
 		outW, errW := w, w
 		if s.quietStdout {
 			outW = io.Discard
