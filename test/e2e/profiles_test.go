@@ -40,6 +40,15 @@ func pvcPhase(name string) (string, error) {
 	return strings.TrimSpace(out), nil
 }
 
+// withOnlyArgs expands a profile selection into repeated --with-only flags.
+func withOnlyArgs(profiles []string) []string {
+	args := make([]string, 0, 2*len(profiles))
+	for _, p := range profiles {
+		args = append(args, "--with-only", p)
+	}
+	return args
+}
+
 // podGoneOrTerminating reports whether a pod is either fully deleted or has
 // been marked for deletion (non-empty deletionTimestamp). It fetches the
 // pod's name alongside its deletionTimestamp in one call so "gone" (no
@@ -167,6 +176,18 @@ data:
 	})
 
 	It("shows exactly the values helm received", func() {
+		// The previous spec ran 'deploy cluster', which refreshes only the
+		// rook-ceph-cluster release. The operator and ceph-csi-drivers releases
+		// still carry nfs's overlay (csi.nfs.enabled) left over from the first
+		// spec's 'up', so previewing --with-only rbd here would legitimately
+		// diverge from what helm has for those releases. Run a full 'deploy'
+		// with the exact selection this spec then previews so every release
+		// matches before comparing.
+		previewWithOnly := []string{"rbd"}
+		deployArgs := append([]string{"deploy", "--dir", rookDir, "--name", clusterName}, withOnlyArgs(previewWithOnly)...)
+		deployOut, err := rooketRun(15*time.Minute, deployArgs...)
+		Expect(err).NotTo(HaveOccurred(), "deploy failed:\n%s", tail(deployOut, 40))
+
 		// 'values show' fakes the parts of the base layer that need a live
 		// cluster to resolve for real (see showBase in cmd/values.go): the
 		// operator's image repo/tag/digest, and the cluster's per-node OSD
@@ -181,8 +202,8 @@ data:
 			{"cluster", "rook-ceph-cluster", [][]string{{"cephClusterSpec", "storage"}}},
 			{"operator", "rook-ceph", [][]string{{"image"}, {"annotations"}}},
 		} {
-			shownRaw, err := rooketRun(2*time.Minute, "values", "show", c.chart,
-				"--dir", rookDir, "--with-only", "rbd")
+			showArgs := append([]string{"values", "show", c.chart, "--dir", rookDir}, withOnlyArgs(previewWithOnly)...)
+			shownRaw, err := rooketRun(2*time.Minute, showArgs...)
 			Expect(err).NotTo(HaveOccurred())
 
 			suppliedRaw, err := rooketRun(2*time.Minute, "helm", "-n", "rook-ceph",

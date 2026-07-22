@@ -180,6 +180,12 @@ Switching off the `nfs` profile removes its CephNFS server at the same time as
 its pod, so the pod can be left `Terminating` (and its PVC with it) until
 kubelet gives up on the now-unreachable unmount — this is expected, not a bug.
 
+A profile can also carry a values overlay for the operator or
+ceph-csi-drivers chart, not just the cluster chart — `nfs` does, setting
+`csi.nfs.enabled` for rook refs older than v1.20. `rooket deploy cluster`
+only refreshes the cluster chart, so enabling or disabling such a profile
+needs a full `rooket deploy` or `rooket up` to reach those other releases.
+
 ## Commands
 
 | Command | Purpose |
