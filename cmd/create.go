@@ -147,9 +147,11 @@ func createClusterRun(out io.Writer, name string, requestedPort int, portExplici
 	// nodes as Step 3, and two per-node script passes must not run at once — so
 	// it follows the group.
 	//
-	// cacheReady is written by exactly one branch of the group and read only
-	// after runConcurrent joins, so it needs no synchronization of its own.
+	// cacheReady and cacheErr are written by exactly one branch of the group and
+	// read only after runConcurrent joins, so they need no synchronization of
+	// their own.
 	cacheReady := true
+	var cacheErr error
 	ownDevsByNode := make(map[string][]string)
 	for i := 0; i < workers; i++ {
 		node := workerNodeName(name, i)
@@ -202,7 +204,7 @@ func createClusterRun(out io.Writer, name string, requestedPort int, portExplici
 		func(w io.Writer) error { // Step 8: shared OCI pull-through cache
 			run.Fprintf(w, "==> starting the shared OCI pull-through cache\n")
 			if err := setupCache(w); err != nil {
-				cacheReady = false
+				cacheReady, cacheErr = false, err
 				run.Fprintf(w, "warning: image cache unavailable (%v); nodes will pull directly from upstream\n", err)
 			}
 			return nil
@@ -232,8 +234,9 @@ Cluster %q is ready.
   kubectl:           rooket k <args>   (or: export KUBECONFIG="$(rooket kubeconfig --path)")
   local registry:    localhost:%d
   push images with:  %s push localhost:%d/<image>
+  image cache:       %s
 
-`, name, port, containerEngine.String(), port)
+`, name, port, containerEngine.String(), port, cacheSummary(cacheReady, cacheErr))
 	return nil
 }
 
