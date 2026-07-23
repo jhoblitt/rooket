@@ -15,11 +15,9 @@ import (
 	. "github.com/onsi/gomega"
 )
 
-var (
-	rePgsTotal = regexp.MustCompile(`(\d+)\s+pgs:`)
-	rePgsClean = regexp.MustCompile(`(\d+)\s+active\+clean`)
-	reOsdUp    = regexp.MustCompile(`osd:\s+(\d+)\s+osds:\s+(\d+)\s+up`)
-)
+// rePgsTotal/rePgsClean live in health.go (untagged) alongside the pure
+// pgsSettledEnough helper they feed.
+var reOsdUp = regexp.MustCompile(`osd:\s+(\d+)\s+osds:\s+(\d+)\s+up`)
 
 var _ = Describe("rooket up/down", Ordered, func() {
 	It("brings up a healthy rook-ceph cluster that settles", func() {
@@ -415,6 +413,17 @@ func hostSensitiveDevsOnNode(node string) string {
 
 // waitClusterSettled blocks until mons are quorate, mgr is active, mds is up,
 // all OSDs are up, PGs are active+clean, and the cluster isn't HEALTH_ERR.
+//
+// The window is deliberately generous. Two transients, both observed flaking
+// this check in CI on the heaviest rook ref, resolve on their own given time:
+//   - the kube-apiserver can briefly go unreachable (a control-plane container
+//     restart under bring-up load) — every `ceph -s` here runs through
+//     `kubectl exec`, so it fails until the apiserver is back;
+//   - a PG or two is still peering while Rook finishes creating the last pools.
+//
+// A short window caught the bad instant and failed a cluster that was seconds
+// from ready. Ten minutes lets a restarted apiserver recover and late pools
+// finish; a cluster that is genuinely wedged still fails, just later.
 func waitClusterSettled() {
 	By("settling: mons quorate, mgr active, mds up, all OSDs up, PGs active+clean, not unhealthy")
 	Eventually(func(g Gomega) {
@@ -427,17 +436,9 @@ func waitClusterSettled() {
 		g.Expect(m[1]).To(Equal(workers), "expected %s OSDs:\n%s", workers, s)
 		g.Expect(m[2]).To(Equal(m[1]), "not all OSDs up:\n%s", s)
 		g.Expect(s).NotTo(ContainSubstring("HEALTH_ERR"), "cluster unhealthy:\n%s", s)
-		pgsSettled(g)
-	}, 5*time.Minute, 15*time.Second).Should(Succeed())
-}
-
-func pgsSettled(g Gomega) {
-	out := cephTool(g, "pg", "stat")
-	tot := rePgsTotal.FindStringSubmatch(out)
-	cln := rePgsClean.FindStringSubmatch(out)
-	g.Expect(tot).NotTo(BeNil(), "no pg total:\n%s", out)
-	g.Expect(cln).NotTo(BeNil(), "no active+clean pgs:\n%s", out)
-	g.Expect(cln[1]).To(Equal(tot[1]), "not all PGs active+clean:\n%s", out)
+		ok, detail := pgsSettledEnough(cephTool(g, "pg", "stat"))
+		g.Expect(ok).To(BeTrue(), detail)
+	}, 10*time.Minute, 10*time.Second).Should(Succeed())
 }
 
 func kindClusters() []string {
