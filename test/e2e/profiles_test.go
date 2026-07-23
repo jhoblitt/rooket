@@ -74,6 +74,16 @@ func podGoneOrTerminating(name string) (bool, error) {
 // Describe blocks sharing one cluster name (clusterName); Ginkgo randomizes
 // top-level order by default, so neither suite may assume it runs before or
 // after the other, or rely on cluster state the other leaves behind.
+//
+// The three built-in profiles run one at a time, never together. rbd+rgw+nfs
+// simultaneously exhausts CPU on the smallest supported ref's 4-core kind
+// cluster: the RGW gateway and rook's detect-version jobs sit Pending on
+// Insufficient cpu, since nfs alone adds a CSI nodeplugin DaemonSet (one pod
+// per node) plus a provisioner and a CephNFS server on top of rbd+rgw's load.
+// Exercising one profile at a time bounds peak load to whichever single
+// profile is heaviest, and doubles as a direct test of prune-on-switch: each
+// switch below first asserts the previous profile's resources are gone, then
+// that the new one is up.
 var _ = Describe("rooket profiles", Ordered, func() {
 	scratch := filepath.Join(rookDir, ".rooket", "templates", "scratch-cm.yaml")
 
@@ -86,11 +96,9 @@ metadata:
 data:
   from: clone-templates
 `), 0o644)).To(Succeed())
-	})
 
-	It("installs every built-in profile", func() {
 		args := []string{"up", "--dir", rookDir, "--workers", workers, "--name", clusterName,
-			"--with-only", "rbd", "--with-only", "rgw", "--with-only", "nfs"}
+			"--with-only", "rbd"}
 		if skipBlock {
 			args = append(args, "--skip-block")
 		}
@@ -101,7 +109,9 @@ data:
 		// prepare jobs finish and Ceph has pools/daemons for the specs below to
 		// bind against.
 		waitClusterSettled()
+	})
 
+	It("brings up the rbd profile", func() {
 		By("binding the rbd PVC and running its pod")
 		Eventually(func() (string, error) { return pvcPhase("rooket-rbd-pvc") }, 5*time.Minute, 10*time.Second).
 			Should(Equal("Bound"))
@@ -109,21 +119,6 @@ data:
 		// /dev/rbdN nodes node prep adds to every kind node's per-container
 		// tmpfs /dev; a regression there will surface here first.
 		Eventually(func() (string, error) { return podPhase("rooket-rbd-smoke") }, 5*time.Minute, 10*time.Second).
-			Should(Equal("Running"))
-
-		By("binding the OBC and running the s3 pod")
-		Eventually(func() string {
-			out, _ := kubectl("-n", "rook-ceph", "get", "obc", "rooket-rgw-bucket",
-				"-o", "jsonpath={.status.phase}")
-			return strings.TrimSpace(out)
-		}, 10*time.Minute, 10*time.Second).Should(Equal("Bound"))
-		Eventually(func() (string, error) { return podPhase("rooket-rgw-smoke") }, 10*time.Minute, 10*time.Second).
-			Should(Equal("Running"))
-
-		By("binding the nfs PVC and running its pod")
-		Eventually(func() (string, error) { return pvcPhase("rooket-nfs-pvc") }, 15*time.Minute, 15*time.Second).
-			Should(Equal("Bound"))
-		Eventually(func() (string, error) { return podPhase("rooket-nfs-smoke") }, 15*time.Minute, 15*time.Second).
 			Should(Equal("Running"))
 
 		By("installing the clone's own template")
@@ -134,45 +129,49 @@ data:
 		}, 2*time.Minute, 5*time.Second).Should(Equal("clone-templates"))
 	})
 
-	It("prunes the profiles that are switched off, keeping clone templates", func() {
-		out, err := rooketRun(15*time.Minute, "deploy", "cluster",
-			"--dir", rookDir, "--name", clusterName, "--with-only", "rbd")
+	It("switches to rgw, pruning rbd", func() {
+		out, err := rooketRun(15*time.Minute, "deploy",
+			"--dir", rookDir, "--name", clusterName, "--with-only", "rgw")
 		Expect(err).NotTo(HaveOccurred(), "deploy failed:\n%s", tail(out, 40))
 
+		By("binding the OBC and running the s3 pod")
+		Eventually(func() string {
+			out, _ := kubectl("-n", "rook-ceph", "get", "obc", "rooket-rgw-bucket",
+				"-o", "jsonpath={.status.phase}")
+			return strings.TrimSpace(out)
+		}, 10*time.Minute, 10*time.Second).Should(Equal("Bound"))
+		Eventually(func() (string, error) { return podPhase("rooket-rgw-smoke") }, 10*time.Minute, 10*time.Second).
+			Should(Equal("Running"))
+
+		By("pruning rbd's pod and PVC")
+		Eventually(func() (bool, error) { return podGoneOrTerminating("rooket-rbd-smoke") }, 3*time.Minute, 5*time.Second).
+			Should(BeTrue(), "rbd pod was neither pruned nor marked for deletion")
+		Eventually(func() (string, error) { return pvcPhase("rooket-rbd-pvc") }, 3*time.Minute, 5*time.Second).
+			Should(BeEmpty(), "rbd PVC was not pruned")
+
+		cm, err := kubectl("-n", "rook-ceph", "get", "cm", "rooket-scratch", "-o", "jsonpath={.data.from}")
+		Expect(err).NotTo(HaveOccurred())
+		Expect(strings.TrimSpace(cm)).To(Equal("clone-templates"), "clone template must not be pruned")
+	})
+
+	It("switches to nfs, pruning rgw", func() {
+		out, err := rooketRun(15*time.Minute, "deploy",
+			"--dir", rookDir, "--name", clusterName, "--with-only", "nfs")
+		Expect(err).NotTo(HaveOccurred(), "deploy failed:\n%s", tail(out, 40))
+
+		By("binding the nfs PVC and running its pod")
+		Eventually(func() (string, error) { return pvcPhase("rooket-nfs-pvc") }, 15*time.Minute, 15*time.Second).
+			Should(Equal("Bound"))
+		Eventually(func() (string, error) { return podPhase("rooket-nfs-smoke") }, 15*time.Minute, 15*time.Second).
+			Should(Equal("Running"))
+
+		// rgw's pod has no dependency on another profile's resource being torn
+		// down in the same operation (unlike nfs's, below), so it prunes cleanly
+		// and is held to full deletion rather than the relaxed
+		// gone-or-terminating check.
+		By("pruning rgw's pod")
 		Eventually(func() (string, error) { return podPhase("rooket-rgw-smoke") }, 3*time.Minute, 5*time.Second).
 			Should(BeEmpty(), "rgw pod was not pruned")
-
-		Eventually(func() (string, error) {
-			out, err := kubectl("-n", "rook-ceph", "get", "cephnfs", "rooket-nfs", "--ignore-not-found")
-			return strings.TrimSpace(out), err
-		}, 3*time.Minute, 5*time.Second).Should(BeEmpty(), "CephNFS rooket-nfs was not pruned")
-		Eventually(func() (string, error) {
-			out, err := kubectl("get", "storageclass", "rooket-nfs", "--ignore-not-found")
-			return strings.TrimSpace(out), err
-		}, 3*time.Minute, 5*time.Second).Should(BeEmpty(), "StorageClass rooket-nfs was not pruned")
-		// The nfs pod itself is not held to full deletion: helm's prune
-		// deletes the CephNFS server and the pod mounting its export in the
-		// same operation, so kubelet can't finish the volume teardown before
-		// the server backing it is gone. The pod is then stuck in Error,
-		// holding its PVC in Terminating — sometimes well past this suite's
-		// timeout. That's inherent to pruning a profile whose pod mounts a
-		// volume served by another resource in the same profile (rgw's pod
-		// has no such dependency and prunes cleanly above), not a rooket bug.
-		// Accept either full deletion or a deletionTimestamp as proof helm's
-		// prune reached the pod; don't tighten this back to BeEmpty() without
-		// re-deriving that kubelet can actually finish the unmount in time,
-		// or CI will burn ~25 minutes rediscovering this.
-		Eventually(func() (bool, error) { return podGoneOrTerminating("rooket-nfs-smoke") },
-			3*time.Minute, 5*time.Second).
-			Should(BeTrue(), "nfs pod was neither pruned nor marked for deletion")
-
-		rbdPVCPhase, err := pvcPhase("rooket-rbd-pvc")
-		Expect(err).NotTo(HaveOccurred())
-		Expect(rbdPVCPhase).To(Equal("Bound"), "rbd PVC should survive")
-
-		rbdPodPhase, err := podPhase("rooket-rbd-smoke")
-		Expect(err).NotTo(HaveOccurred())
-		Expect(rbdPodPhase).To(Equal("Running"), "rbd pod should survive")
 
 		cm, err := kubectl("-n", "rook-ceph", "get", "cm", "rooket-scratch", "-o", "jsonpath={.data.from}")
 		Expect(err).NotTo(HaveOccurred())
@@ -180,14 +179,15 @@ data:
 	})
 
 	It("shows exactly the values helm received", func() {
-		// The previous spec ran 'deploy cluster', which refreshes only the
-		// rook-ceph-cluster release. The operator and ceph-csi-drivers releases
-		// still carry nfs's overlay (csi.nfs.enabled) left over from the first
-		// spec's 'up', so previewing --with-only rbd here would legitimately
-		// diverge from what helm has for those releases. Run a full 'deploy'
-		// with the exact selection this spec then previews so every release
-		// matches before comparing.
-		previewWithOnly := []string{"rbd"}
+		// nfs is the only built-in profile with a values/ overlay onto either
+		// chart compared below — it sets the operator chart's csi.nfs.enabled.
+		// rbd and rgw carry no such overlay, so previewing either of them
+		// would pass even if profile-driven overlay composition were broken.
+		// Deploy nfs's exact selection again (a no-op reconcile, since the
+		// previous spec already left it active) so this spec is
+		// self-contained and not dependent on exactly what state the prior
+		// spec left, then compare against that known state.
+		previewWithOnly := []string{"nfs"}
 		deployArgs := append([]string{"deploy", "--dir", rookDir, "--name", clusterName}, withOnlyArgs(previewWithOnly)...)
 		deployOut, err := rooketRun(15*time.Minute, deployArgs...)
 		Expect(err).NotTo(HaveOccurred(), "deploy failed:\n%s", tail(deployOut, 40))
@@ -225,6 +225,47 @@ data:
 			}
 			Expect(shown).To(Equal(supplied), "%s: preview does not match what helm received", c.chart)
 		}
+	})
+
+	It("switches back to rbd, pruning nfs", func() {
+		out, err := rooketRun(15*time.Minute, "deploy",
+			"--dir", rookDir, "--name", clusterName, "--with-only", "rbd")
+		Expect(err).NotTo(HaveOccurred(), "deploy failed:\n%s", tail(out, 40))
+
+		By("pruning the CephNFS server and its StorageClass")
+		Eventually(func() (string, error) {
+			out, err := kubectl("-n", "rook-ceph", "get", "cephnfs", "rooket-nfs", "--ignore-not-found")
+			return strings.TrimSpace(out), err
+		}, 3*time.Minute, 5*time.Second).Should(BeEmpty(), "CephNFS rooket-nfs was not pruned")
+		Eventually(func() (string, error) {
+			out, err := kubectl("get", "storageclass", "rooket-nfs", "--ignore-not-found")
+			return strings.TrimSpace(out), err
+		}, 3*time.Minute, 5*time.Second).Should(BeEmpty(), "StorageClass rooket-nfs was not pruned")
+		// The nfs pod itself is not held to full deletion: helm's prune
+		// deletes the CephNFS server and the pod mounting its export in the
+		// same operation, so kubelet can't finish the volume teardown before
+		// the server backing it is gone. The pod is then stuck in Error,
+		// holding its PVC in Terminating — sometimes well past this suite's
+		// timeout. That's inherent to pruning a profile whose pod mounts a
+		// volume served by another resource in the same profile (rgw's pod
+		// has no such dependency and prunes cleanly above), not a rooket bug.
+		// Accept either full deletion or a deletionTimestamp as proof helm's
+		// prune reached the pod; don't tighten this back to BeEmpty() without
+		// re-deriving that kubelet can actually finish the unmount in time,
+		// or CI will burn ~25 minutes rediscovering this.
+		Eventually(func() (bool, error) { return podGoneOrTerminating("rooket-nfs-smoke") },
+			3*time.Minute, 5*time.Second).
+			Should(BeTrue(), "nfs pod was neither pruned nor marked for deletion")
+
+		By("rebinding the rbd PVC and running its pod")
+		Eventually(func() (string, error) { return pvcPhase("rooket-rbd-pvc") }, 5*time.Minute, 10*time.Second).
+			Should(Equal("Bound"))
+		Eventually(func() (string, error) { return podPhase("rooket-rbd-smoke") }, 5*time.Minute, 10*time.Second).
+			Should(Equal("Running"))
+
+		cm, err := kubectl("-n", "rook-ceph", "get", "cm", "rooket-scratch", "-o", "jsonpath={.data.from}")
+		Expect(err).NotTo(HaveOccurred())
+		Expect(strings.TrimSpace(cm)).To(Equal("clone-templates"), "clone template must not be pruned")
 	})
 
 	AfterAll(func() {
