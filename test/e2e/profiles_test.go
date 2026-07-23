@@ -165,10 +165,6 @@ data:
 		Eventually(func() (string, error) { return podPhase("rooket-nfs-smoke") }, 15*time.Minute, 15*time.Second).
 			Should(Equal("Running"))
 
-		// rgw's pod has no dependency on another profile's resource being torn
-		// down in the same operation (unlike nfs's, below), so it prunes cleanly
-		// and is held to full deletion rather than the relaxed
-		// gone-or-terminating check.
 		By("pruning rgw's pod")
 		Eventually(func() (string, error) { return podPhase("rooket-rgw-smoke") }, 3*time.Minute, 5*time.Second).
 			Should(BeEmpty(), "rgw pod was not pruned")
@@ -228,6 +224,15 @@ data:
 	})
 
 	It("switches back to rbd, pruning nfs", func() {
+		// Delete the client pod while its CephNFS server is still up so the
+		// kernel NFS client can unmount cleanly; otherwise the prune below
+		// removes the server and the pod in the same operation, the unmount
+		// hangs reaching the now-gone server, and the wedged mount blocks
+		// `docker rm` on that node at cluster teardown.
+		_, err := kubectl("-n", "rook-ceph", "delete", "pod", "rooket-nfs-smoke",
+			"--ignore-not-found", "--wait=true", "--timeout=120s")
+		Expect(err).NotTo(HaveOccurred(), "failed to pre-delete nfs pod before pruning its CephNFS server")
+
 		out, err := rooketRun(15*time.Minute, "deploy",
 			"--dir", rookDir, "--name", clusterName, "--with-only", "rbd")
 		Expect(err).NotTo(HaveOccurred(), "deploy failed:\n%s", tail(out, 40))
@@ -241,21 +246,10 @@ data:
 			out, err := kubectl("get", "storageclass", "rooket-nfs", "--ignore-not-found")
 			return strings.TrimSpace(out), err
 		}, 3*time.Minute, 5*time.Second).Should(BeEmpty(), "StorageClass rooket-nfs was not pruned")
-		// The nfs pod itself is not held to full deletion: helm's prune
-		// deletes the CephNFS server and the pod mounting its export in the
-		// same operation, so kubelet can't finish the volume teardown before
-		// the server backing it is gone. The pod is then stuck in Error,
-		// holding its PVC in Terminating — sometimes well past this suite's
-		// timeout. That's inherent to pruning a profile whose pod mounts a
-		// volume served by another resource in the same profile (rgw's pod
-		// has no such dependency and prunes cleanly above), not a rooket bug.
-		// Accept either full deletion or a deletionTimestamp as proof helm's
-		// prune reached the pod; don't tighten this back to BeEmpty() without
-		// re-deriving that kubelet can actually finish the unmount in time,
-		// or CI will burn ~25 minutes rediscovering this.
-		Eventually(func() (bool, error) { return podGoneOrTerminating("rooket-nfs-smoke") },
-			3*time.Minute, 5*time.Second).
-			Should(BeTrue(), "nfs pod was neither pruned nor marked for deletion")
+
+		By("pruning the nfs pod (already deleted above while its server was reachable)")
+		Eventually(func() (string, error) { return podPhase("rooket-nfs-smoke") }, 3*time.Minute, 5*time.Second).
+			Should(BeEmpty(), "nfs pod was not pruned")
 
 		By("rebinding the rbd PVC and running its pod")
 		Eventually(func() (string, error) { return pvcPhase("rooket-rbd-pvc") }, 5*time.Minute, 10*time.Second).
@@ -276,16 +270,24 @@ data:
 		_, err := kubectl("-n", "rook-ceph", "delete", "cm", "rooket-scratch", "--ignore-not-found")
 		Expect(err).NotTo(HaveOccurred(), "failed to delete rooket-scratch ConfigMap")
 
+		// Delete the nfs pod (a no-op if the "switches back to rbd" spec above
+		// already pruned it, or if nfs was never brought up) while its CephNFS
+		// server may still be running, before the restore below can otherwise
+		// prune both at once and wedge `docker rm` on that node at teardown.
+		podOut, podErr := kubectl("-n", "rook-ceph", "delete", "pod", "rooket-nfs-smoke",
+			"--ignore-not-found", "--wait=true", "--timeout=120s")
+		if podErr != nil {
+			GinkgoWriter.Printf("AfterAll: pre-delete of nfs pod failed (non-fatal):\n%s\n", tail(podOut, 40))
+		}
+
 		// This suite shares one cluster with two other top-level Describe
 		// containers in Ginkgo's randomised run order, and it's the only one
 		// that stands up an RGW gateway and a CephNFS server. With the clone
 		// template gone (above), --with-only "" selects zero profiles, so this
-		// deploy prunes the whole rooket-profiles release — releasing the nfs
-		// pod's mount and shedding the RGW/NFS/CephFS load before the next
-		// container or teardown runs. Left in place, a pod with a hung NFS
-		// mount (see the prune spec above) wedges `docker rm` on its node at
-		// teardown. Best-effort: a slow or failed restore is logged, not
-		// fatal, since the suite has already passed by this point.
+		// deploy prunes the whole rooket-profiles release, shedding the
+		// RGW/NFS/CephFS load before the next container or teardown runs.
+		// Best-effort: a slow or failed restore is logged, not fatal, since
+		// the suite has already passed by this point.
 		out, err := rooketRun(20*time.Minute, "deploy", "--dir", rookDir, "--name", clusterName, "--with-only", "")
 		if err != nil {
 			GinkgoWriter.Printf("AfterAll: restoring cluster to zero profiles failed (non-fatal):\n%s\n", tail(out, 40))
