@@ -1,0 +1,16 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: rooket-rbd-smoke
+spec:
+  containers:
+    - name: writer
+      image: busybox:1.36
+      command: ["sh", "-c", "echo rooket > /mnt/rbd/hello && sleep infinity"]
+      volumeMounts:
+        - name: vol
+          mountPath: /mnt/rbd
+  volumes:
+    - name: vol
+      persistentVolumeClaim:
+        claimName: rooket-rbd-pvc

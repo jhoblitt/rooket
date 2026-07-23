@@ -1,0 +1,5 @@
+drivers:
+  nfs:
+    enabled: true
+    name: rook-ceph.nfs.csi.ceph.com
+    snapshotPolicy: none

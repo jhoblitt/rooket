@@ -57,11 +57,11 @@ var _ = Describe("rooket up/down", Ordered, func() {
 	It("provisions and reclaims a block PVC through CSI", func() {
 		// The RADOS round-trip above bypasses CSI entirely; this exercises the
 		// RBD provisioner: PVC on the chart's ceph-block StorageClass →
-		// csi-rbdplugin creates the image → bind → delete reclaims it. No pod
-		// mounts it: attaching would krbd-map on the node, and the /dev/rbdN
-		// node udev would create on a real host never appears in a kind
-		// node's udev-less tmpfs /dev (which the per-node OSD masking relies
-		// on). The CephFS spec below covers the mount-and-I/O half of CSI.
+		// csi-rbdplugin creates the image → bind → delete reclaims it. This
+		// spec deliberately covers provisioning and reclaim only; the
+		// mount-and-I/O path is covered by krbd_test.go, which works because
+		// node prep pre-creates the /dev/rbdN device nodes each node needs to
+		// see the krbd mapping.
 		const manifest = `apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
@@ -424,6 +424,10 @@ func hostSensitiveDevsOnNode(node string) string {
 // A short window caught the bad instant and failed a cluster that was seconds
 // from ready. Ten minutes lets a restarted apiserver recover and late pools
 // finish; a cluster that is genuinely wedged still fails, just later.
+//
+// Call this before any spec that asserts on storage: `rooket up` returns as
+// soon as helm has installed the charts, well before the OSD prepare jobs
+// finish and Ceph has pools to bind PVCs against.
 func waitClusterSettled() {
 	By("settling: mons quorate, mgr active, mds up, all OSDs up, PGs active+clean, not unhealthy")
 	Eventually(func(g Gomega) {

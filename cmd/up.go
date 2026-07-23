@@ -30,6 +30,10 @@ var (
 	upSkipDeploy      bool
 	upForceBuild      bool
 	upNodeImage       string
+	upWith            []string
+	upWithOnly        []string
+	upValueFiles      []string
+	upSets            []string
 )
 
 var upCmd = &cobra.Command{
@@ -158,6 +162,7 @@ Example:
 			deployDiskCount = upDiskCount
 			deployDiskSizeGB = upDiskSizeGB
 			deployIQNDate = upIQNDate
+			applyUpValueFlags(cmd.Flags().Changed("with-only"))
 			if err := deployCmd.RunE(deployCmd, nil); err != nil {
 				return fmt.Errorf("deploy: %w", err)
 			}
@@ -174,6 +179,14 @@ rooket up complete in %s. cluster %q is ready.
 `, fmtDur(time.Since(upStart)), upName)
 		return nil
 	},
+}
+
+func applyUpValueFlags(withOnlySet bool) {
+	deployWith = upWith
+	deployWithOnly = upWithOnly
+	deployWithOnlySet = withOnlySet
+	deployValueFiles = upValueFiles
+	deploySets = upSets
 }
 
 // upCreateAndBuild runs the infra-plus-create side concurrently with the make
@@ -356,5 +369,9 @@ func init() {
 	upCmd.Flags().BoolVar(&upSkipDeploy, "skip-deploy", false, "skip 'deploy'")
 	upCmd.Flags().BoolVar(&upForceBuild, "force-build", false, "run make even when the rook tree is unchanged since the last push")
 	upCmd.Flags().StringVar(&upNodeImage, "node-image", defaultNodeImage, "kindest/node image for the cluster, pre-pulled before create (pin tag@digest for a reproducible Kubernetes version)")
+	upCmd.Flags().StringArrayVar(&upWith, "with", nil, "profile to enable, in addition to the clone's sticky list (repeatable)")
+	upCmd.Flags().StringArrayVar(&upWithOnly, "with-only", nil, "profile to enable, replacing the clone's sticky list (repeatable)")
+	upCmd.Flags().StringArrayVarP(&upValueFiles, "values", "f", nil, "additional values file, applied above profiles (repeatable)")
+	upCmd.Flags().StringArrayVar(&upSets, "set", nil, "value passed straight through to helm, applied above every layer (repeatable)")
 	upCmd.MarkFlagsMutuallyExclusive("skip-build", "force-build")
 }
