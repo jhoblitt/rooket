@@ -45,10 +45,30 @@ configuration at boot, so targets survive a reboot and setup needs root far
 less often. The trade-off is that targets belonging to deleted clusters also
 survive until `rooket down --all --delete-disks` clears them.
 
+## Installation
+
+Install straight from source with the Go toolchain — no clone needed:
+
+```console
+$ go install github.com/jhoblitt/rooket@latest
+```
+
+This drops a `rooket` binary in `$(go env GOBIN)`, or `$(go env GOPATH)/bin`
+(usually `~/go/bin`) when `GOBIN` is unset; make sure that directory is on your
+`PATH`. rooket is untagged, so `@latest` resolves to the newest commit on
+`main` as a pseudo-version; pin a specific one with `@<commit-sha>` in place of
+`@latest`.
+
+To hack on rooket itself, build from a checkout instead:
+
+```console
+$ git clone https://github.com/jhoblitt/rooket && cd rooket
+$ go build -o ~/bin/rooket .
+```
+
 ## Quick start
 
 ```console
-$ go build -o ~/bin/rooket .
 $ cd ~/github/rook            # any directory inside a rook clone
 $ rooket up                   # block setup → kind cluster → build → deploy
 $ rooket k get pods -n rook-ceph
