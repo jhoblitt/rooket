@@ -11,6 +11,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/jhoblitt/rooket/internal/lio"
 	"github.com/jhoblitt/rooket/internal/run"
 )
 
@@ -152,7 +153,11 @@ func blockSetupRunTo(out io.Writer, name, dataDir, iqnDate string, workers, disk
 		run.Fprintf(out, "==> iSCSI targets already present, skipping privileged setup\n")
 	} else {
 		run.Fprintf(out, "==> configuring iSCSI targets\n")
-		steps := buildISCSISteps(initIQN, disks, diskSizeGB, !initiatorNameCurrent(initiatorNamePath, initIQN))
+		repair, err := lioRepairPreflight(out, disks)
+		if err != nil {
+			return err
+		}
+		steps := append(repair, buildISCSISteps(initIQN, disks, diskSizeGB, !initiatorNameCurrent(initiatorNamePath, initIQN))...)
 		if err := runPrivileged(out, steps); err != nil {
 			return fmt.Errorf("iSCSI setup failed.\n\nRun the following script manually with root privileges:\n\n%s\nError: %w", renderScript(steps), err)
 		}
@@ -175,6 +180,198 @@ func blockSetupRunTo(out io.Writer, name, dataDir, iqnDate string, workers, disk
 	}
 
 	return nil
+}
+
+// lioOrphan is a storage object the kernel still holds whose backing file is
+// gone.
+//
+// One of these anywhere on the host breaks EVERY fileio backstore creation,
+// for every cluster and every user: targetcli's create walks all existing
+// storage objects and calls os.path.samefile against each one's recorded
+// path, which raises ENOENT on the missing file and aborts the create before
+// it starts. What the run then shows is a target with no LUN and, ten seconds
+// later, "block devices not found" — nothing that names the object actually
+// responsible, which is why rooket looks for them itself.
+type lioOrphan struct {
+	object lio.StorageObject
+	iqns   []string // the targets exporting it, which must go before it can
+}
+
+// repairableBackstores maps a configfs plugin directory to the targetcli path
+// that addresses it. Only fileio is listed: it is the only kind of backstore
+// rooket creates, so it is the only kind rooket removes. An orphan of any
+// other kind is reported for a human to deal with, even if rooket's own IQN
+// names it.
+var repairableBackstores = map[string]string{"fileio": "/backstores/fileio"}
+
+// rooketIQNRE matches one of rooket's target IQNs and captures the
+// "<cluster>-worker<N>-disk<M>" identity after the namespace prefix — the
+// same string rooket uses as the backstore name.
+var rooketIQNRE = regexp.MustCompile(`^iqn\.[0-9]{4}-[0-9]{2}\.local\.rooket:(.+)$`)
+
+// findLIOOrphans returns the storage objects whose recorded backing path no
+// longer exists. Only a definitively missing path counts: a path rooket
+// cannot stat for any other reason (one inside another user's home, say) is
+// still there as far as the root-run targetcli is concerned.
+func findLIOOrphans(st lio.State) []lioOrphan {
+	var orphans []lioOrphan
+	for _, so := range st.StorageObjects {
+		if so.Path == "" {
+			continue
+		}
+		if _, err := os.Stat(so.Path); !os.IsNotExist(err) {
+			continue
+		}
+		orphans = append(orphans, lioOrphan{object: so, iqns: st.TargetIQNs(so.Name)})
+	}
+	return orphans
+}
+
+// rooketOwned reports whether the orphan is rooket's to remove: the kernel
+// exports it through a target in rooket's own IQN namespace, or its backing
+// file was inside the state root rooket owns. Either is proof rooket created
+// it. An orphan matching neither belongs to something else on this host, and
+// removing it would destroy a stranger's storage — so it is only reported.
+func (o lioOrphan) rooketOwned(stateRoot string) bool {
+	for _, iqn := range o.iqns {
+		if rooketIQNRE.MatchString(iqn) {
+			return true
+		}
+	}
+	return pathUnder(stateRoot, o.object.Path)
+}
+
+// pathUnder reports whether p lies inside dir.
+func pathUnder(dir, p string) bool {
+	if dir == "" || p == "" {
+		return false
+	}
+	rel, err := filepath.Rel(dir, p)
+	if err != nil {
+		return false
+	}
+	return rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
+}
+
+// lioRepairPreflight finds the orphaned storage objects that would make every
+// backstore creation in this run fail, and returns the privileged steps that
+// remove the ones rooket owns, to be prepended to the run's own steps.
+//
+// Reading the kernel's configuration needs no privileges (see internal/lio),
+// so this costs nothing and cannot prompt. It runs only on the path that is
+// about to create backstores: a run whose devices are all attached creates
+// nothing an orphan could poison.
+func lioRepairPreflight(out io.Writer, disks []iscsiDisk) ([]privStep, error) {
+	st, err := lio.Read(lio.DefaultRoot)
+	if err != nil {
+		run.Fprintf(out, "warning: could not read the host's iSCSI configuration (%v); continuing\n", err)
+		return nil, nil
+	}
+	stateRoot, err := stateDirRoot()
+	if err != nil {
+		return nil, err
+	}
+	return lioRepairSteps(out, st, stateRoot, disks)
+}
+
+// lioRepairSteps splits the orphans of a configuration into the ones rooket
+// owns — returned as removal steps — and the ones it will not touch, which
+// stop a run that still has a backstore to create.
+func lioRepairSteps(out io.Writer, st lio.State, stateRoot string, disks []iscsiDisk) ([]privStep, error) {
+	orphans := findLIOOrphans(st)
+	if len(orphans) == 0 {
+		return nil, nil
+	}
+	var mine, foreign []lioOrphan
+	for _, o := range orphans {
+		if _, ok := repairableBackstores[o.object.Plugin]; ok && o.rooketOwned(stateRoot) {
+			mine = append(mine, o)
+		} else {
+			foreign = append(foreign, o)
+		}
+	}
+	// An orphan only bites a run that creates a backstore. One whose
+	// backstores all exist already — reattaching a logged-out device, say —
+	// is not blocked by anything rooket refuses to remove, so it is warned
+	// about rather than stopped.
+	if len(foreign) > 0 {
+		if backstoresMissing(st, disks) {
+			return nil, foreignOrphanError(foreign)
+		}
+		run.Fprintf(out, "warning: %d storage object(s) on this host have no backing file and are not rooket's to remove;\n"+
+			"  they will block the next run that has to create a backstore. See 'targetcli ls'.\n", len(foreign))
+	}
+	if len(mine) == 0 {
+		return nil, nil
+	}
+	run.Fprintf(out, "==> removing %d orphaned backstore(s) whose disk image is gone (they would block every backstore creation)\n", len(mine))
+	for _, o := range mine {
+		run.Fprintf(out, "    %s (%s)\n", o.object.Name, o.object.Path)
+	}
+	return buildLIORepairSteps(mine), nil
+}
+
+// backstoresMissing reports whether any of the run's disks still needs its
+// backstore created — the only step an orphan can block.
+func backstoresMissing(st lio.State, disks []iscsiDisk) bool {
+	have := make(map[string]bool, len(st.StorageObjects))
+	for _, so := range st.StorageObjects {
+		have[so.Name] = true
+	}
+	for _, d := range disks {
+		if !have[d.backstoreName] {
+			return true
+		}
+	}
+	return false
+}
+
+// foreignOrphanError explains why a run cannot proceed past orphans rooket
+// will not touch, and hands over the exact commands that clear them.
+func foreignOrphanError(foreign []lioOrphan) error {
+	var what, how strings.Builder
+	for _, o := range foreign {
+		fmt.Fprintf(&what, "  %s (%s) -> %s\n", o.object.Name, o.object.Plugin, o.object.Path)
+		for _, iqn := range o.iqns {
+			fmt.Fprintf(&how, "  targetcli /iscsi delete %s\n", iqn)
+		}
+		fmt.Fprintf(&how, "  targetcli /backstores/%s delete %s\n", o.object.Plugin, o.object.Name)
+	}
+	return fmt.Errorf("the host's iSCSI configuration holds storage object(s) whose backing file no longer exists:\n\n%s\n"+
+		"targetcli stats every storage object's path when creating one, so it aborts every backstore creation while\n"+
+		"these exist — no disk of this cluster can be attached until they are gone. rooket did not create them, so it\n"+
+		"will not remove them. Remove them with root privileges:\n\n%s", what.String(), how.String())
+}
+
+// buildLIORepairSteps removes orphaned storage objects, and the targets that
+// export them, ahead of the run's own creates. Order is forced: the initiator
+// must log out before its session's device disappears, and the kernel refuses
+// to delete a storage object a LUN still exports.
+//
+// The backstore delete is fatal rather than warnOnFailure, unlike the same
+// command in teardown: an orphan left in place guarantees every create in
+// this run fails, so stopping here — with the manual script the caller
+// renders — beats letting the run continue to its misleading "block devices
+// not found".
+func buildLIORepairSteps(orphans []lioOrphan) []privStep {
+	if len(orphans) == 0 {
+		return nil
+	}
+	// A logout needs iscsid, and a kernel session outlives a stopped one: the
+	// repair runs ahead of the setup steps that start it, and must not delete
+	// a target out from under a session it failed to log out of.
+	steps := []privStep{{argv: []string{"systemctl", "start", "iscsid"}}}
+	for _, o := range orphans {
+		for _, iqn := range o.iqns {
+			steps = append(steps,
+				privStep{argv: []string{"iscsiadm", "-m", "node", "-T", iqn, "-u"}, ignoreErr: true},
+				privStep{argv: []string{"iscsiadm", "-m", "node", "-T", iqn, "-o", "delete"}, ignoreErr: true},
+				privStep{argv: []string{"targetcli", "/iscsi", "delete", iqn}, warnOnFailure: true},
+			)
+		}
+		steps = append(steps, privStep{argv: []string{"targetcli", repairableBackstores[o.object.Plugin], "delete", o.object.Name}})
+	}
+	return steps
 }
 
 var blockTeardownCmd = &cobra.Command{
@@ -207,19 +404,8 @@ func blockTeardownRun(_ *cobra.Command, _ []string) error {
 		}
 	}
 
-	var disks []iscsiDisk
-	for w := 0; w < blockTeardownWorkers; w++ {
-		for d := 0; d < blockTeardownDiskCount; d++ {
-			id := fmt.Sprintf("worker%d-disk%d", w, d)
-			disks = append(disks, iscsiDisk{
-				workerIdx:     w,
-				diskIdx:       d,
-				imgPath:       filepath.Join(dataDir, id+".img"),
-				backstoreName: fmt.Sprintf("%s-%s", blockTeardownName, id),
-				targetIQN:     fmt.Sprintf("iqn.%s.local.rooket:%s-%s", blockTeardownIQNDate, blockTeardownName, id),
-			})
-		}
-	}
+	disks := teardownDisks(lio.DefaultRoot, blockTeardownName, dataDir, blockTeardownIQNDate,
+		blockTeardownWorkers, blockTeardownDiskCount)
 
 	run.Printf("==> tearing down iSCSI targets\n")
 	steps := buildISCSITeardownSteps(disks)
@@ -230,6 +416,11 @@ func blockTeardownRun(_ *cobra.Command, _ []string) error {
 	if blockTeardownDeleteDisks {
 		run.Printf("==> deleting disk images\n")
 		for _, d := range disks {
+			// A disk named only by the kernel's configuration — its image
+			// already deleted — has no path left to remove.
+			if d.imgPath == "" {
+				continue
+			}
 			if err := os.Remove(d.imgPath); err == nil {
 				run.Printf("removed %s\n", d.imgPath)
 			} else if !os.IsNotExist(err) {
@@ -258,6 +449,138 @@ func stateDirDisks(clusterName, dir, iqnDate string) []iscsiDisk {
 		})
 	}
 	return disks
+}
+
+// teardownDisks assembles a cluster's teardown set from every source that can
+// name one of its disks: the requested --workers/--disk-count grid, the
+// images its state directory actually holds, and the objects the kernel still
+// holds for it. Passing 0 workers or disks contributes nothing from the grid,
+// for a caller (down --all) that has no per-cluster counts to trust.
+//
+// The grid alone is not enough, and getting that wrong is how the host
+// accumulates iSCSI configuration nothing can name again: a cluster brought
+// up with more workers than the teardown is told about leaves its extra
+// targets and backstores behind, and removing the state directory then
+// deletes the images that were the only remaining record of them. An orphan
+// like that goes on to break backstore creation for every cluster on the
+// host, so teardown deliberately over-collects — a name with nothing behind
+// it costs one warned-about, best-effort targetcli step.
+func teardownDisks(lioRoot, name, dataDir, iqnDate string, workers, diskCount int) []iscsiDisk {
+	return unionDisks(
+		iscsiDiskList(name, dataDir, iqnDate, workers, diskCount),
+		stateDirDisks(name, dataDir, iqnDate),
+		lioDisks(lioRoot, name, iqnDate),
+	)
+}
+
+// unionDisks concatenates disk sets, keeping the first entry that names a
+// given backstore and target. Earlier sets therefore win on the fields the
+// later ones cannot know (the worker and disk indices, and an image path that
+// is still on disk).
+func unionDisks(sets ...[]iscsiDisk) []iscsiDisk {
+	seen := map[string]bool{}
+	var out []iscsiDisk
+	for _, set := range sets {
+		for _, d := range set {
+			key := d.backstoreName + "\x00" + d.targetIQN
+			if seen[key] {
+				continue
+			}
+			seen[key] = true
+			out = append(out, d)
+		}
+	}
+	return out
+}
+
+// lioDisks returns the disks the kernel still holds for one cluster. A read
+// failure yields nothing: this is an extra source for teardown, never the
+// authority on whether a cluster has disks.
+func lioDisks(lioRoot, name, iqnDate string) []iscsiDisk {
+	st, err := lio.Read(lioRoot)
+	if err != nil {
+		return nil
+	}
+	return lioClusterDisks(st, iqnDate)[name]
+}
+
+// lioClusterDisks groups the iSCSI disks the kernel holds by rooket cluster,
+// reading the configuration itself rather than any host artefact a partial
+// teardown can erase. It sees strictly more than the /dev/disk/by-path scan:
+// a target with no active session has no by-path symlink, and a backstore
+// whose target was already deleted has neither a symlink nor an image.
+//
+// Storage objects are collected before targets so that a disk named by both
+// keeps the backing path the object records. A backstore no target exports
+// cannot have its IQN recovered from the configuration, so iqnDate
+// reconstructs it — the same assumption prune makes for an orphaned state
+// directory.
+func lioClusterDisks(st lio.State, iqnDate string) map[string][]iscsiDisk {
+	found := map[string][]iscsiDisk{}
+	seen := map[string]bool{}
+	add := func(cluster string, d iscsiDisk) {
+		key := d.backstoreName + "\x00" + d.targetIQN
+		if seen[key] {
+			return
+		}
+		seen[key] = true
+		found[cluster] = append(found[cluster], d)
+	}
+	for _, so := range st.StorageObjects {
+		cluster, ok := clusterOfBackstore(so.Name)
+		if !ok {
+			continue
+		}
+		iqns := st.TargetIQNs(so.Name)
+		if len(iqns) == 0 {
+			iqns = []string{fmt.Sprintf("iqn.%s.local.rooket:%s", iqnDate, so.Name)}
+		}
+		for _, iqn := range iqns {
+			add(cluster, iscsiDisk{imgPath: so.Path, backstoreName: so.Name, targetIQN: iqn})
+		}
+	}
+	for _, t := range st.Targets {
+		if d, cluster, ok := parseRooketIQN(t.IQN); ok {
+			add(cluster, d)
+		}
+	}
+	return found
+}
+
+// parseRooketIQN parses one of rooket's target IQNs into the disk identity a
+// teardown needs and the cluster it belongs to. ok is false for an IQN
+// outside rooket's namespace, one whose name does not carry the
+// worker/disk shape, or one whose cluster component is not a valid cluster
+// name — none of which are safe to treat as rooket's.
+func parseRooketIQN(iqn string) (disk iscsiDisk, cluster string, ok bool) {
+	m := rooketIQNRE.FindStringSubmatch(iqn)
+	if m == nil {
+		return iscsiDisk{}, "", false
+	}
+	cluster, ok = clusterOfBackstore(m[1])
+	if !ok {
+		return iscsiDisk{}, "", false
+	}
+	return iscsiDisk{backstoreName: m[1], targetIQN: iqn}, cluster, true
+}
+
+// backstoreNameRE splits a "<cluster>-worker<N>-disk<M>" backstore name into
+// the cluster name, anchored on the fixed "-worker<N>-disk<M>" suffix so a
+// cluster name that itself contains dashes (e.g. "home-jhoblitt-github-rook")
+// is not mis-split.
+var backstoreNameRE = regexp.MustCompile(`^(.+)-worker[0-9]+-disk[0-9]+$`)
+
+// clusterOfBackstore returns the cluster a backstore name belongs to, and
+// whether the name is one rooket could have created.
+func clusterOfBackstore(name string) (string, bool) {
+	m := backstoreNameRE.FindStringSubmatch(name)
+	if m == nil {
+		return "", false
+	}
+	if err := validateClusterName(m[1]); err != nil {
+		return "", false
+	}
+	return m[1], true
 }
 
 // buildISCSITeardownSteps generates the privileged steps that log out of

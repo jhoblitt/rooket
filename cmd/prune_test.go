@@ -134,6 +134,41 @@ func TestDiscoverStrandedByPath(t *testing.T) {
 	})
 }
 
+// The by-path scan sees a target only while a session is logged in, which is
+// the state a partial teardown does not leave things in. Reading the kernel's
+// configuration is what finds the leftovers: a target whose session is gone,
+// and a backstore whose target was already deleted.
+func TestDiscoverStrandedFindsWhatByPathCannot(t *testing.T) {
+	byPath := t.TempDir()
+	if err := os.Symlink("/dev/sdz", filepath.Join(byPath,
+		"ip-127.0.0.1:3260-iscsi-iqn.2003-01.local.rooket:c-worker0-disk0-lun-0")); err != nil {
+		t.Fatal(err)
+	}
+	lioRoot := writeFakeLIO(t, map[string]string{
+		"c-worker0-disk0": "/data/c/worker0-disk0.img", // also seen via by-path
+		"c-worker1-disk0": "/data/c/worker1-disk0.img", // logged out: no symlink
+		"c-worker2-disk0": "/data/c/worker2-disk0.img", // no target at all
+	}, "c-worker2-disk0")
+
+	found, err := discoverStranded(lioRoot, byPath, "2003-01")
+	if err != nil {
+		t.Fatalf("discoverStranded: %v", err)
+	}
+	if len(found["c"]) != 3 {
+		t.Fatalf("c disks = %v, want all 3 the kernel holds", diskKeys(found["c"]))
+	}
+
+	t.Run("falls back to by-path when the kernel cannot be read", func(t *testing.T) {
+		found, err := discoverStranded(filepath.Join(t.TempDir(), "absent"), byPath, "2003-01")
+		if err != nil {
+			t.Fatalf("discoverStranded: %v", err)
+		}
+		if len(found["c"]) != 1 {
+			t.Errorf("c disks = %v, want the one by-path names", diskKeys(found["c"]))
+		}
+	})
+}
+
 // The two strandable names are chosen so their insertion order into the map
 // (irrelevant — Go randomizes map iteration) cannot coincide with the
 // asserted sorted order by luck across runs: comparing directly against a

@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/jhoblitt/rooket/internal/engine"
+	"github.com/jhoblitt/rooket/internal/lio"
 	"github.com/jhoblitt/rooket/internal/run"
 	"github.com/spf13/cobra"
 )
@@ -30,21 +31,21 @@ their iSCSI targets first, while the state directory's worker*-disk*.img
 filenames can still be used to reconstruct them. All targets are torn down in
 one privileged run, so the whole prune costs at most a single authentication.
 
-prune also sweeps iSCSI targets left behind by an earlier deletion of their
-state directory, found via the world-readable /dev/disk/by-path symlinks
-iscsiadm creates for each logged-in session. A target with no active session
-has no such symlink and will not be found this way; see 'targetcli ls' to
-check by hand. The same by-path scan also backstops an orphan whose state
+prune also sweeps iSCSI targets and backstores left behind by an earlier
+deletion of their state directory, read straight from the kernel's own
+configuration (the world-readable configfs tree the target subsystem
+exports), so it finds targets with no active session and backstores whose
+target is already gone. That view also backstops an orphan whose state
 directory has lost its worker*-disk*.img files, or was built with a
 different --iqn-date than this run's: its targets are torn down from
 whichever source names them.
 
-This assumes rooket is the only user on this host driving iSCSI targets:
-/dev/disk/by-path is host-global, not per-user, so on a host where two users
-each run rooket against their own per-user container engine, one user's
-prune would see the other's targets too. rooket's usual rootful podman/docker
-setup makes every cluster visible to any querying user regardless, so this
-does not add a new restriction there.
+This assumes rooket is the only user on this host driving iSCSI targets: the
+kernel's target configuration is host-global, not per-user, so on a host
+where two users each run rooket against their own per-user container engine,
+one user's prune would see the other's targets too. rooket's usual rootful
+podman/docker setup makes every cluster visible to any querying user
+regardless, so this does not add a new restriction there.
 
   rooket prune --dry-run   # list what would be removed
   rooket prune             # prompt, then remove
@@ -79,7 +80,7 @@ does not add a new restriction there.
 			return fmt.Errorf("refusing to prune with an unqueryable engine present")
 		}
 
-		strandedFound, err := discoverStrandedByPath(iscsiByPathDir)
+		strandedFound, err := discoverStranded(lio.DefaultRoot, iscsiByPathDir, pruneIQNDate)
 		if err != nil {
 			return fmt.Errorf("scan %s: %w", iscsiByPathDir, err)
 		}
@@ -216,19 +217,9 @@ func prunePlan(stateNames []string, live map[string][]engine.Engine, hasState ma
 }
 
 // strandedByPathRE matches a rooket iSCSI by-path symlink for LUN 0 and
-// captures the target IQN (group 1) and the "<cluster>-worker<N>-disk<M>"
-// name after the "local.rooket:" prefix (group 2) — the same string used as
-// the backstore name.
+// captures the target IQN.
 var strandedByPathRE = regexp.MustCompile(
-	"^" + regexp.QuoteMeta(iscsiByPathPrefix) +
-		`(iqn\.[0-9]{4}-[0-9]{2}\.local\.rooket:(.+))` +
-		regexp.QuoteMeta(iscsiByPathSuffix) + "$")
-
-// strandedBackstoreRE splits a "<cluster>-worker<N>-disk<M>" backstore name
-// into the cluster name, anchored on the fixed "-worker<N>-disk<M>" suffix so
-// a cluster name that itself contains dashes (e.g.
-// "home-jhoblitt-github-rook") is not mis-split.
-var strandedBackstoreRE = regexp.MustCompile(`^(.+)-worker[0-9]+-disk[0-9]+$`)
+	"^" + regexp.QuoteMeta(iscsiByPathPrefix) + `(iqn\..+)` + regexp.QuoteMeta(iscsiByPathSuffix) + "$")
 
 // parseStrandedByPathLink parses one /dev/disk/by-path entry name (not a full
 // path) as a rooket iSCSI target, returning the disk's teardown identity and
@@ -241,25 +232,39 @@ func parseStrandedByPathLink(name string) (disk iscsiDisk, cluster string, ok bo
 	if m == nil {
 		return iscsiDisk{}, "", false
 	}
-	targetIQN, backstoreName := m[1], m[2]
+	return parseRooketIQN(m[1])
+}
 
-	cm := strandedBackstoreRE.FindStringSubmatch(backstoreName)
-	if cm == nil {
-		return iscsiDisk{}, "", false
+// discoverStranded groups every rooket iSCSI disk still configured on the
+// host by cluster name, from the kernel's own configuration unioned with the
+// /dev/disk/by-path symlinks. Neither source needs privileges.
+//
+// The kernel's view is the complete one — it holds targets with no session
+// and backstores with no target, which is exactly what a partial teardown
+// leaves behind and what the by-path scan alone can never see. by-path is
+// kept as a fallback for a host whose configfs cannot be read at all.
+func discoverStranded(lioRoot, byPathDir, iqnDate string) (map[string][]iscsiDisk, error) {
+	fromLIO := map[string][]iscsiDisk{}
+	if st, err := lio.Read(lioRoot); err != nil {
+		run.Printf("warning: could not read the host's iSCSI configuration (%v); "+
+			"falling back to the /dev/disk/by-path scan, which cannot see targets with no active session\n", err)
+	} else {
+		fromLIO = lioClusterDisks(st, iqnDate)
 	}
-	cluster = cm[1]
-	if err := validateClusterName(cluster); err != nil {
-		return iscsiDisk{}, "", false
+	byPath, err := discoverStrandedByPath(byPathDir)
+	if err != nil {
+		return nil, err
 	}
-	return iscsiDisk{backstoreName: backstoreName, targetIQN: targetIQN}, cluster, true
+	for cluster, disks := range byPath {
+		fromLIO[cluster] = unionDisks(fromLIO[cluster], disks)
+	}
+	return fromLIO, nil
 }
 
 // discoverStrandedByPath scans dir (normally /dev/disk/by-path) for rooket
 // iSCSI LUN-0 symlinks and groups their teardown-ready disk identities by
 // cluster name. This needs no privileges: the symlinks are world-readable
-// (see iscsiByPathLink / resolveDeviceLink). Its blind spot: a target
-// configured in LIO but with no active iscsiadm session has no by-path
-// symlink, so it will not be found this way. A missing directory (no iSCSI
+// (see iscsiByPathLink / resolveDeviceLink). A missing directory (no iSCSI
 // devices ever attached) is not an error.
 func discoverStrandedByPath(dir string) (map[string][]iscsiDisk, error) {
 	entries, err := os.ReadDir(dir)
