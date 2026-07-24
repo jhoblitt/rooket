@@ -128,6 +128,64 @@ $ rooket k <kubectl args>                            # kubectl wrapper ('k' = 'k
 $ export KUBECONFIG="$(rooket kubeconfig --path)"    # or point your own tools at it
 ```
 
+## Chart values and profiles
+
+rooket composes the Helm values for each chart from layers, lowest first:
+
+1. the chart's own `values.yaml`
+2. rooket's generated base (image refs, OSD device pinning, dev-host cpu trims)
+3. `<rook clone>/.rooket/values/<chart>.yaml` — sticky, this clone
+4. active profiles, in selection order
+5. `-f` files, then `--set`
+
+Nothing is locked: a values file can retarget the operator image or add to the
+storage topology. Named lists such as `cephClusterSpec.storage.nodes` merge by
+each entry's `name` rather than replacing the list, so naming an existing node
+adds to its devices rather than swapping them, and naming a new one adds a
+node alongside rooket's iSCSI-pinned ones. To actually replace such a list, set
+it to `null` in a lower-priority layer and re-add it in a higher one — that
+needs two layers, so it can't be done within a single sticky file.
+
+```console
+$ rooket values show cluster          # what would be deployed
+$ rooket values show cluster --layers # ...and which layer set each key
+$ rooket values edit cluster          # $EDITOR, seeded with the generated base
+$ rooket values profiles              # available profiles, active ones marked *
+$ rooket values profiles fork rgw     # copy a built-in to hack on
+```
+
+Profiles bundle values overrides with Kubernetes resources the rook charts do
+not template. Built-ins: `rbd` (PVC + pod on the default `ceph-block` class),
+`rgw` (object store user, OBC, s3 client pod), and `nfs` (enables the NFS CSI
+driver, a CephNFS server, and a pod mounting an export).
+
+```console
+$ rooket up --with rgw                # sticky list plus rgw
+$ rooket up --with-only rbd           # rbd alone, this run
+```
+
+Enable profiles for a clone by listing them in `.rooket/config.yaml`; later
+entries win when two profiles set the same key.
+
+```yaml
+profiles: [rbd, rgw]
+```
+
+Drop any manifest into `.rooket/templates/` and it is installed alongside the
+active profiles' resources — and pruned when you delete the file. Both live in
+a generated `rooket-profiles` Helm release, so removing a source removes its
+resources.
+
+Switching off the `nfs` profile removes its CephNFS server at the same time as
+its pod, so the pod can be left `Terminating` (and its PVC with it) until
+kubelet gives up on the now-unreachable unmount — this is expected, not a bug.
+
+A profile can also carry a values overlay for the operator or
+ceph-csi-drivers chart, not just the cluster chart — `nfs` does, setting
+`csi.nfs.enabled` for rook refs older than v1.20. `rooket deploy cluster`
+only refreshes the cluster chart, so enabling or disabling such a profile
+needs a full `rooket deploy` or `rooket up` to reach those other releases.
+
 ## Commands
 
 | Command | Purpose |
@@ -162,8 +220,8 @@ Unit tests: `go test ./...`. The end-to-end suite
 (`go test -tags e2e ./test/e2e/ -timeout 60m`, needs `ROOK_DIR` and existing
 block devices) drives a real `rooket up`/`down` and asserts one OSD per
 worker, no loop devices, a settled healthy cluster, RADOS I/O, CSI block-PVC
-provisioning and CephFS-PVC I/O (krbd mounts need udev-created device nodes,
-which kind nodes lack), the `list`/`kubectl`/`kubeconfig`/`prune` surfaces,
+provisioning and reclaim, krbd-mounted RBD I/O, CephFS-PVC I/O, the
+`list`/`kubectl`/`kubeconfig`/`prune` surfaces,
 registry-port reuse across re-ups, `down --all` ownership scoping against a
 foreign kind cluster, and clean teardown. CI runs the suite under docker on
 every PR against rook master, release-1.20, and release-1.19 — covering both

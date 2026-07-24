@@ -1,0 +1,35 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: rooket-rgw-smoke
+spec:
+  containers:
+    - name: s3
+      image: amazon/aws-cli:2.15.17
+      command: ["sh", "-c", "sleep infinity"]
+      env:
+        - name: AWS_ACCESS_KEY_ID
+          valueFrom:
+            secretKeyRef:
+              name: rooket-rgw-bucket
+              key: AWS_ACCESS_KEY_ID
+        - name: AWS_SECRET_ACCESS_KEY
+          valueFrom:
+            secretKeyRef:
+              name: rooket-rgw-bucket
+              key: AWS_SECRET_ACCESS_KEY
+        - name: BUCKET_NAME
+          valueFrom:
+            configMapKeyRef:
+              name: rooket-rgw-bucket
+              key: BUCKET_NAME
+        - name: BUCKET_HOST
+          valueFrom:
+            configMapKeyRef:
+              name: rooket-rgw-bucket
+              key: BUCKET_HOST
+        - name: BUCKET_PORT
+          valueFrom:
+            configMapKeyRef:
+              name: rooket-rgw-bucket
+              key: BUCKET_PORT
