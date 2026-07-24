@@ -7,7 +7,10 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
+
+	"go.yaml.in/yaml/v3"
 
 	"github.com/jhoblitt/rooket/internal/run"
 )
@@ -52,6 +55,104 @@ func chartDeps(chartYAML string) ([]chartDep, error) {
 	return deps, nil
 }
 
+// chartRepos returns the http(s) chart repositories the charts under
+// deploy/charts declare as dependencies, keyed by dependency name — the name
+// each is registered under, matching what rook's own make does. file://
+// dependencies live in the tree and need no repository.
+func chartRepos(rookDir string) map[string]string {
+	repos := map[string]string{}
+	chartsDir := filepath.Join(rookDir, "deploy", "charts")
+	charts, err := os.ReadDir(chartsDir)
+	if err != nil {
+		return repos
+	}
+	for _, chart := range charts {
+		if !chart.IsDir() {
+			continue
+		}
+		deps, err := chartDeps(filepath.Join(chartsDir, chart.Name(), "Chart.yaml"))
+		if err != nil {
+			continue
+		}
+		for _, d := range deps {
+			if d.name != "" && strings.HasPrefix(d.repository, "http") {
+				repos[d.name] = d.repository
+			}
+		}
+	}
+	return repos
+}
+
+// registeredRepoURLs reads the repository URLs already registered in the helm
+// configuration env points at. An unreadable or absent file is an empty set:
+// helm creates it on the first 'repo add'.
+func registeredRepoURLs(env []string) map[string]bool {
+	urls := map[string]bool{}
+	data, err := os.ReadFile(envValue(env, "HELM_REPOSITORY_CONFIG"))
+	if err != nil {
+		return urls
+	}
+	var cfg struct {
+		Repositories []struct {
+			URL string `yaml:"url"`
+		} `yaml:"repositories"`
+	}
+	if err := yaml.Unmarshal(data, &cfg); err != nil {
+		return urls
+	}
+	for _, r := range cfg.Repositories {
+		urls[strings.TrimRight(r.URL, "/")] = true
+	}
+	return urls
+}
+
+// envValue returns the value of key in an environment slice, or "".
+func envValue(env []string, key string) string {
+	for _, e := range env {
+		if v, ok := strings.CutPrefix(e, key+"="); ok {
+			return v
+		}
+	}
+	return ""
+}
+
+// ensureChartRepos registers the chart repositories rook's charts depend on
+// in the isolated per-cluster helm configuration.
+//
+// rook's make adds the repository only when the dependency archive is
+// missing, but runs 'helm dependency build' — which resolves every dependency
+// against repositories.yaml, archive present or not — whenever Chart.lock is
+// not newer than Chart.yaml. Any git operation that rewrites Chart.yaml (the
+// lock is gitignored, so a pull cannot refresh it) makes that true, and the
+// build then dies on "no repository definition for <url>". A host helm
+// configuration hides this because some earlier build registered the
+// repository there for good; the isolated configuration starts empty every
+// time the cluster's state directory is recreated, which turns an upstream
+// corner case into a reliable failure. Seeding it here is what makes the
+// isolation transparent to rook's build.
+//
+// Registering is best-effort: it needs the network, and a build whose
+// Chart.lock is current never resolves a dependency at all. A failure here
+// would trade a working offline build for a fatal error.
+func ensureChartRepos(out io.Writer, rookDir string, env []string) {
+	have := registeredRepoURLs(env)
+	repos := chartRepos(rookDir)
+	names := make([]string, 0, len(repos))
+	for name := range repos {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		if have[strings.TrimRight(repos[name], "/")] {
+			continue
+		}
+		run.Fprintf(out, "==> registering helm repository %s (%s)\n", name, repos[name])
+		if err := run.CmdWithEnvTo(out, env, "helm", "repo", "add", name, repos[name], "--force-update"); err != nil {
+			run.Fprintf(out, "warning: helm repo add %s: %v\n", name, err)
+		}
+	}
+}
+
 // ensureChartDeps restores a chart's fetchable dependency archives before a
 // deploy from the source tree. The archives are gitignored build INPUTS of
 // the deploy (helm refuses to install a chart dir with missing deps): rook's
@@ -80,6 +181,7 @@ func ensureChartDeps(rookDir, chart string) error {
 	if err != nil {
 		return err
 	}
+	ensureChartRepos(os.Stdout, rookDir, env)
 	run.Printf("==> restoring helm chart dependencies for %s\n", chart)
 	if err := run.CmdWithEnv(env, "helm", "dependency", "build", chartDir); err != nil {
 		// A Chart.lock out of sync with Chart.yaml fails 'build'; resolve

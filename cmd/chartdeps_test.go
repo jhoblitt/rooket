@@ -8,6 +8,72 @@ import (
 	"testing"
 )
 
+func TestChartRepos(t *testing.T) {
+	rookDir := t.TempDir()
+	writeChartTree(t, rookDir, "rook-ceph", `apiVersion: v2
+name: rook-ceph
+dependencies:
+  - name: library
+    version: "0.0.1"
+    repository: "file://../library"
+  - name: ceph-csi-operator
+    version: 1.0.4
+    repository: https://ceph.github.io/ceph-csi-operator
+`)
+	writeChartTree(t, rookDir, "rook-ceph-cluster", `apiVersion: v2
+name: rook-ceph-cluster
+`)
+	got := chartRepos(rookDir)
+	want := map[string]string{"ceph-csi-operator": "https://ceph.github.io/ceph-csi-operator"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("chartRepos = %v, want %v (file:// dependencies need no repository)", got, want)
+	}
+
+	t.Run("no charts directory", func(t *testing.T) {
+		if got := chartRepos(t.TempDir()); len(got) != 0 {
+			t.Errorf("chartRepos = %v, want none", got)
+		}
+	})
+}
+
+func TestRegisteredRepoURLs(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "repositories.yaml")
+	if err := os.WriteFile(p, []byte(`apiVersion: ""
+generated: "0001-01-01T00:00:00Z"
+repositories:
+  - name: ceph-csi-operator
+    url: https://ceph.github.io/ceph-csi-operator/
+  - name: rook-release
+    url: https://charts.rook.io/release
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	env := []string{"HELM_CONFIG_HOME=/x", "HELM_REPOSITORY_CONFIG=" + p}
+	got := registeredRepoURLs(env)
+	// The trailing slash helm records must not make an already-registered
+	// repository look missing.
+	if !got["https://ceph.github.io/ceph-csi-operator"] || !got["https://charts.rook.io/release"] {
+		t.Errorf("registeredRepoURLs = %v, want both repositories", got)
+	}
+
+	t.Run("a configuration helm has not written yet", func(t *testing.T) {
+		got := registeredRepoURLs([]string{"HELM_REPOSITORY_CONFIG=" + filepath.Join(t.TempDir(), "repositories.yaml")})
+		if len(got) != 0 {
+			t.Errorf("registeredRepoURLs = %v, want none", got)
+		}
+	})
+}
+
+func TestEnvValue(t *testing.T) {
+	env := []string{"A=1", "HELM_REPOSITORY_CONFIG=/tmp/repositories.yaml", "B=2"}
+	if got := envValue(env, "HELM_REPOSITORY_CONFIG"); got != "/tmp/repositories.yaml" {
+		t.Errorf("envValue = %q, want the config path", got)
+	}
+	if got := envValue(env, "MISSING"); got != "" {
+		t.Errorf("envValue = %q, want empty", got)
+	}
+}
+
 func TestChartDeps(t *testing.T) {
 	t.Run("master style: alias, condition, mixed quoting", func(t *testing.T) {
 		p := writeChartYAML(t, `apiVersion: v2
