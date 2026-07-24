@@ -115,9 +115,12 @@ var _ = AfterEach(func() {
 	}{
 		{"pods -o wide", []string{"get", "pods", "-o", "wide"}},
 		{"cephcluster status", []string{"get", "cephcluster", "-o", "jsonpath={.items[0].status.phase} {.items[0].status.message}"}},
+		{"profile resources (object store, filesystem, nfs, bucket claim)",
+			[]string{"get", "cephobjectstores,cephfilesystems,cephnfses,objectbucketclaims"}},
 		{"pvc + storageclasses", []string{"get", "pvc,sc"}},
 		{"csi driver CRs", []string{"get", "drivers.csi.ceph.io"}},
 		{"events (recent)", []string{"get", "events", "--sort-by=.lastTimestamp"}},
+		{"ceph -s", []string{"exec", "deploy/rook-ceph-tools", "--", "ceph", "-s"}},
 		{"osd-prepare logs", []string{"logs", "--prefix", "-l", "app=rook-ceph-osd-prepare", "--tail=120"}},
 		{"osd-prepare describe", []string{"describe", "pods", "-l", "app=rook-ceph-osd-prepare"}},
 		{"operator log tail", []string{"logs", "-l", "app=rook-ceph-operator", "--tail=120"}},
