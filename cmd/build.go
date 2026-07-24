@@ -126,6 +126,7 @@ func buildMakePhase(out io.Writer, dir, name string) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
+	ensureChartRepos(out, dir, makeEnv)
 	run.Fprintf(out, "==> running make in %s\n", dir)
 	images, err := runMakeCapture(out, dir, makeEnv)
 	if err != nil {
