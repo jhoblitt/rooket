@@ -10,12 +10,20 @@ func TestPgsSettledEnough(t *testing.T) {
 	// healthy (data flowing) and one short — must count as settled.
 	const flaked = "265 pgs: 1 peering, 264 active+clean; 621 KiB data, 137 MiB used, 30 GiB / 30 GiB avail; 1.2 KiB/s rd, 2 op/s"
 
+	// The other line that failed CI, on a cluster that was fully healthy: all
+	// 265 PGs are active+clean, 6 of them additionally scrubbing.
+	const scrubbing = "265 pgs: 6 active+clean+scrubbing, 259 active+clean; 3.8 MiB data, 196 MiB used, 30 GiB / 30 GiB avail; 938 B/s rd, 1 op/s"
+
 	cases := []struct {
 		name string
 		in   string
 		want bool
 	}{
 		{"all clean", "265 pgs: 265 active+clean", true},
+		{"scrubbing PGs are clean, the CI failure", scrubbing, true},
+		{"deep scrubbing is clean too", "265 pgs: 3 active+clean+scrubbing+deep, 262 active+clean", true},
+		{"every PG scrubbing", "265 pgs: 265 active+clean+scrubbing", true},
+		{"scrubbing does not mask a real straggler", "265 pgs: 6 active+clean+scrubbing, 256 active+clean, 3 peering", false},
 		{"one peering, the CI flake", flaked, true},
 		{"two short on a ~265 cluster", "265 pgs: 2 peering, 263 active+clean", true},
 		{"three short exceeds ~1% tolerance", "265 pgs: 3 peering, 262 active+clean", false},
