@@ -12,6 +12,13 @@ import (
 
 var (
 	rePgsTotal = regexp.MustCompile(`(\d+)\s+pgs:`)
+	// Matched against every state group, not just the first: `ceph pg stat`
+	// lists one "<count> <state>" group per distinct state, and the states
+	// that EXTEND active+clean — +scrubbing, +scrubbing+deep, +snaptrim — get
+	// their own group, listed ahead of the plain one. Reading a single match
+	// bound to whichever came first, so a cluster with a scrub running
+	// reported only its scrubbing PGs as clean ("only 6/265") and the check
+	// failed for its whole window on a cluster that was entirely healthy.
 	rePgsClean = regexp.MustCompile(`(\d+)\s+active\+clean`)
 )
 
@@ -36,16 +43,19 @@ func pgSettleTolerance(total int) int {
 // human-readable reason when it is not, for the assertion message.
 func pgsSettledEnough(statOut string) (bool, string) {
 	tot := rePgsTotal.FindStringSubmatch(statOut)
-	cln := rePgsClean.FindStringSubmatch(statOut)
+	cln := rePgsClean.FindAllStringSubmatch(statOut, -1)
 	if tot == nil {
 		return false, "no pg total in:\n" + statOut
 	}
-	if cln == nil {
+	if len(cln) == 0 {
 		// No "active+clean" at all — nothing has settled yet.
 		return false, "no active+clean pgs in:\n" + statOut
 	}
 	total := mustAtoi(tot[1])
-	clean := mustAtoi(cln[1])
+	clean := 0
+	for _, g := range cln {
+		clean += mustAtoi(g[1])
+	}
 	if clean >= total {
 		return true, ""
 	}
