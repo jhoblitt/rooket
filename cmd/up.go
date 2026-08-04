@@ -77,6 +77,12 @@ Example:
 		if err != nil {
 			return err
 		}
+		release, err := LockCluster(name)
+		if err != nil {
+			return err
+		}
+		defer release()
+
 		upName = name
 		// Resolve the port for fail-fast flag-conflict checking; the create step
 		// re-resolves, repairs a stale recording, and persists the final choice.

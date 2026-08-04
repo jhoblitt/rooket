@@ -302,6 +302,9 @@ func TestPruneExecute(t *testing.T) {
 	})
 
 	t.Run("no disks skips teardown entirely but still removes every orphan", func(t *testing.T) {
+		// A real root: the orphan loop takes each cluster's lock beside the
+		// directory it is about to remove, so this cannot be a fake path.
+		root := t.TempDir()
 		teardownCalled := false
 		teardown := func(d []iscsiDisk) error {
 			teardownCalled = true
@@ -312,31 +315,32 @@ func TestPruneExecute(t *testing.T) {
 			removed = append(removed, p)
 			return nil
 		}
-		if err := pruneExecute("/root", []string{"a", "b"}, nil, teardown, remove, io.Discard); err != nil {
+		if err := pruneExecute(root, []string{"a", "b"}, nil, teardown, remove, io.Discard); err != nil {
 			t.Fatalf("pruneExecute: %v", err)
 		}
 		if teardownCalled {
 			t.Error("teardown called with no disks to tear down")
 		}
-		want := []string{filepath.Join("/root", "a"), filepath.Join("/root", "b")}
+		want := []string{filepath.Join(root, "a"), filepath.Join(root, "b")}
 		if !reflect.DeepEqual(removed, want) {
 			t.Errorf("removed = %v, want %v", removed, want)
 		}
 	})
 
 	t.Run("a removal failure warns but does not block the next orphan's removal", func(t *testing.T) {
+		root := t.TempDir()
 		var removed []string
 		remove := func(p string) error {
 			removed = append(removed, p)
-			if p == filepath.Join("/root", "a") {
+			if p == filepath.Join(root, "a") {
 				return errors.New("permission denied")
 			}
 			return nil
 		}
-		if err := pruneExecute("/root", []string{"a", "b"}, nil, func([]iscsiDisk) error { return nil }, remove, io.Discard); err != nil {
+		if err := pruneExecute(root, []string{"a", "b"}, nil, func([]iscsiDisk) error { return nil }, remove, io.Discard); err != nil {
 			t.Fatalf("pruneExecute: %v", err)
 		}
-		want := []string{filepath.Join("/root", "a"), filepath.Join("/root", "b")}
+		want := []string{filepath.Join(root, "a"), filepath.Join(root, "b")}
 		if !reflect.DeepEqual(removed, want) {
 			t.Errorf("removed = %v, want both attempted despite the first's failure: %v", want, removed)
 		}

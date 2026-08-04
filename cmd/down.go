@@ -72,6 +72,11 @@ Example:
 		}
 
 		downName = clusterName(downName)
+		release, err := LockCluster(downName)
+		if err != nil {
+			return err
+		}
+		defer release()
 
 		if downSkipCluster {
 			run.Printf("==> [1/2] cluster delete (skipped)\n")

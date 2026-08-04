@@ -170,6 +170,18 @@ func downAllRun(cmd *cobra.Command) error {
 			if len(engs) == 0 {
 				return nil
 			}
+			// Each cluster is taken and released on its own. A sweep that held
+			// every lock at once would need an ordering to stay deadlock-free,
+			// and these run concurrently. A cluster someone else is working on
+			// is skipped rather than failing the sweep — the point of --all is
+			// to clear whatever it can.
+			release, err := LockCluster(n)
+			if err != nil {
+				blockedByIdx[i] = true
+				run.Fprintf(w, "warning: skipping cluster %q: %v\n", n, err)
+				return nil
+			}
+			defer release()
 			run.Fprintf(w, "==> deleting cluster %q\n", n)
 			kc, _ := kubeconfigPath(n)
 			for _, eng := range engs {
