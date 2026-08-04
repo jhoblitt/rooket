@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 
 	"github.com/spf13/cobra"
 
@@ -32,7 +33,12 @@ var createCmd = &cobra.Command{
   1. Locate iSCSI block devices set up by 'rooket block setup' and bind-mount
      them — together with /run/udev, which ceph-volume needs to inventory the
      disks — into each worker node via the kind config.
-  2. Create the kind cluster (via the selected engine's kind provider).
+  2. Create the kind cluster (via the selected engine's kind provider). An
+     existing cluster whose nodes are stopped — the usual state after a host
+     reboot — is started again when its OSD device bindings still match the
+     disks resolved in step 1. If they no longer match, that cluster CANNOT be
+     resumed and is deleted and recreated, which wipes its OSD disks; every
+     other unusable state is reported so you can decide.
   3. Prepare every node: remount /sys read-write and install lvm2 and cryptsetup,
      which Rook needs to provision LVM-backed and encrypted OSDs.
   4. Start a local OCI registry container joined to the kind network, bound to
@@ -76,12 +82,23 @@ func createClusterRun(out io.Writer, name string, requestedPort int, portExplici
 	}
 	regName := registry.ContainerName(name)
 
-	// A recorded port can go stale: this cluster's registry is gone and
-	// something else (typically another rooket cluster's registry) now holds
-	// the port. With no registry container of our own to preserve, re-pick a
-	// free port — the steps below (re)wire containerd and the ConfigMap to
+	// A recorded port can go stale: something else (typically another rooket
+	// cluster's registry) now holds it. Our own RUNNING registry is the one
+	// thing that legitimately does, so anything else means the port must be
+	// re-picked — the steps below (re)wire containerd and the ConfigMap to
 	// whatever port ends up in use.
-	if !registry.Exists(out, containerEngine, regName) && !portFree(port) {
+	//
+	// A stopped registry of ours cannot be the holder, and cannot be started
+	// onto a port it no longer owns, so it has to go: leaving it there made the
+	// repair unreachable and turned every later run into the same fatal bind
+	// error. Its images are re-pushed by the next 'rooket build push'.
+	if !portFree(port) && !registryRunningWithPort(out, containerEngine, regName, port) {
+		if registry.Exists(out, containerEngine, regName) {
+			run.Fprintf(out, "registry %q is stopped and port %d is held by something else; removing it\n", regName, port)
+			if err := registry.Delete(out, containerEngine, regName); err != nil {
+				return fmt.Errorf("remove stale registry %q: %w", regName, err)
+			}
+		}
 		old := port
 		if port, err = freePort(5001); err != nil {
 			return err
@@ -116,7 +133,7 @@ func createClusterRun(out io.Writer, name string, requestedPort int, portExplici
 
 	// --- Step 2: kind cluster ---
 	// This also creates the "kind" network used by the registry.
-	run.Fprintf(out, "==> creating kind cluster\n")
+	run.Fprintf(out, "==> kind cluster\n")
 	clusterCfg := cluster.Config{
 		Name:             name,
 		Workers:          workers,
@@ -125,13 +142,27 @@ func createClusterRun(out io.Writer, name string, requestedPort int, portExplici
 		NodeImage:        nodeImage,
 		WorkerDisks:      workerDisks,
 	}
+	// PrepareNodes keys its per-node device allowlist by node name; the same map
+	// tells a resume whether the existing node containers are still bound to
+	// these devices.
+	ownDevsByNode := make(map[string][]string)
+	for i := 0; i < workers; i++ {
+		node := workerNodeName(name, i)
+		for _, d := range workerDisks[i] {
+			ownDevsByNode[node] = append(ownDevsByNode[node], d.HostPath)
+		}
+	}
 	exists, err := cluster.Exists(out, containerEngine, name)
 	if err != nil {
 		return fmt.Errorf("check cluster existence: %w", err)
 	}
+	usable := false
 	if exists {
-		run.Fprintf(out, "cluster %q already exists, skipping creation\n", name)
-	} else {
+		if usable, err = resumeCluster(out, name, ownDevsByNode); err != nil {
+			return err
+		}
+	}
+	if !usable {
 		if err := cluster.Create(out, clusterCfg); err != nil {
 			return fmt.Errorf("create cluster: %w", err)
 		}
@@ -152,13 +183,6 @@ func createClusterRun(out io.Writer, name string, requestedPort int, portExplici
 	// their own.
 	cacheReady := true
 	var cacheErr error
-	ownDevsByNode := make(map[string][]string)
-	for i := 0; i < workers; i++ {
-		node := workerNodeName(name, i)
-		for _, d := range workerDisks[i] {
-			ownDevsByNode[node] = append(ownDevsByNode[node], d.HostPath)
-		}
-	}
 	hEnv, err := helmEnv(name, "rooket")
 	if err != nil {
 		return err
@@ -238,6 +262,113 @@ Cluster %q is ready.
 
 `, name, port, containerEngine.String(), port, cacheSummary(cacheReady, cacheErr))
 	return nil
+}
+
+// resumeCluster makes an already-existing cluster usable again and reports
+// whether the caller can skip creating it.
+//
+// `kind get clusters` answers "do containers labelled with this cluster exist",
+// not "is the cluster up": a workstation reboot leaves every node Exited — no
+// engine restarts containers at boot, and podman's --restart=always covers only
+// the podman service restarting — while the cluster still lists. Taking that
+// for "ready" is what sent node prep exec'ing into dead containers.
+//
+// A cluster may only be kept while its OSD device bindings still hold. The kind
+// config binds each worker's disk by host path, but the iSCSI initiator hands
+// out /dev/sdX in login order, so a reboot can renumber them: a node created
+// against /dev/sdb comes back holding whatever /dev/sdb is now — another
+// cluster's LUN, or a host disk — inside a privileged container, which is
+// exactly what the per-node /dev mask exists to prevent.
+//
+// Drift on a STOPPED cluster is recovered by discarding it and building a fresh
+// one against the resolved paths. Everything else that merely looks wrong —
+// an inspect that fails, a cluster that lists with no containers, a resume that
+// does not come back — is reported, not recovered: those are indistinguishable
+// from a transient engine hiccup or a second rooket run mid-create, and the
+// recovery destroys the user's OSD data. 'rooket cluster delete' is the command
+// that throws a cluster away, and it is the one the error names.
+func resumeCluster(out io.Writer, name string, ownDevsByNode map[string][]string) (bool, error) {
+	nodes, err := cluster.Nodes(out, name)
+	if err != nil {
+		return false, fmt.Errorf("list cluster nodes: %w", err)
+	}
+	if len(nodes) == 0 {
+		return false, fmt.Errorf("cluster %q exists but has no node containers; %s", name, deleteHint(name))
+	}
+	states, err := cluster.Inspect(out, containerEngine, nodes)
+	if err != nil {
+		return false, fmt.Errorf("inspect cluster %q: %w", name, err)
+	}
+
+	// --disk-count 0 resolves no devices, so there is nothing to compare against
+	// and every bound disk would read as drift — which would cost the user a
+	// cluster they only meant to skip block setup for. But "cannot check" is not
+	// "nothing to check": starting a stopped cluster whose disks were never
+	// validated is the stale-bind hazard itself, so that combination is refused
+	// rather than either destroyed or resumed blind.
+	if len(ownDevsByNode) == 0 && !cluster.AllRunning(states) && cluster.BoundDevices(states) {
+		return false, fmt.Errorf("cluster %q is stopped and has OSD disks bound, but this run resolved "+
+			"none (--disk-count 0), so its device bindings cannot be checked; re-run with the "+
+			"--disk-count it was created with, or %s", name, deleteHint(name))
+	}
+	if len(ownDevsByNode) > 0 {
+		run.Fprintf(out, "checking OSD device bindings against current paths\n")
+		checks := cluster.CheckDevices(states, ownDevsByNode)
+		for _, c := range checks {
+			status := "ok"
+			if c.Drifted {
+				status = "DRIFTED"
+			}
+			run.Fprintf(out, "  %s %s -> %s %s\n", c.Node, devList(c.Bound), devList(c.Want), status)
+		}
+		if cluster.Drifted(checks) {
+			if !cluster.AllExited(states) {
+				return false, fmt.Errorf("cluster %q has OSD device bindings that no longer match the disks "+
+					"resolved for this run, and its nodes are not all stopped (%s), so rooket will not "+
+					"discard it on its own; %s", name, nodeStates(states), deleteHint(name))
+			}
+			run.Fprintf(out, "==> device paths changed since the cluster was created; deleting and recreating\n")
+			return false, deleteClusterAndZap(out, name, true)
+		}
+	}
+
+	if cluster.AllRunning(states) {
+		run.Fprintf(out, "cluster %q already exists and is running, skipping creation\n", name)
+		// Running node containers say nothing about the control plane inside
+		// them, and the steps after this one all talk to the apiserver.
+		return true, cluster.WaitAPIServer(out, name)
+	}
+
+	run.Fprintf(out, "cluster %q exists but is stopped\n", name)
+	run.Fprintf(out, "==> resuming the stopped cluster\n")
+	if err := cluster.Start(out, containerEngine, name, nodes); err != nil {
+		return false, fmt.Errorf("resume the stopped cluster %q: %w; %s", name, err, deleteHint(name))
+	}
+	return true, nil
+}
+
+// nodeStates renders the per-node engine states for an error that refuses to
+// act on a cluster rooket cannot explain, so the user sees which node is in
+// which state without a second command.
+func nodeStates(states []cluster.NodeState) string {
+	parts := make([]string, 0, len(states))
+	for _, s := range states {
+		parts = append(parts, fmt.Sprintf("%s=%s", s.Node, s.State))
+	}
+	return strings.Join(parts, " ")
+}
+
+func deleteHint(name string) string {
+	return fmt.Sprintf("run 'rooket cluster delete --name %s' to discard it (this wipes its OSD disks) and try again", name)
+}
+
+// devList renders a node's OSD devices for the drift report, naming the
+// control-plane's empty set rather than printing nothing.
+func devList(devs []string) string {
+	if len(devs) == 0 {
+		return "(none)"
+	}
+	return strings.Join(devs, ",")
 }
 
 func init() {

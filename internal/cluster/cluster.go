@@ -172,22 +172,17 @@ func Create(w io.Writer, cfg Config) error {
 	return run.CmdTo(w, "kind", args...)
 }
 
-// Delete deletes the named kind cluster. The kind provider comes from
-// KIND_EXPERIMENTAL_PROVIDER, which the root command exports from the engine.
-func Delete(name string) error {
-	return run.Cmd("kind", "delete", "cluster", "--name", name)
-}
-
-// DeleteWith deletes the named kind cluster under an explicit engine's kind
-// provider and kubeconfig file, overriding the ambient environment. 'down
-// --all' uses it to remove clusters owned by an engine other than the
-// session's resolved one.
-func DeleteWith(eng engine.Engine, name, kubeconfig string) error {
+// Delete deletes the named kind cluster under an explicit engine's kind
+// provider, writing the trace and child output to w — cluster create runs
+// concurrently with the build, so it must not write to os.Stdout. A non-empty
+// kubeconfig overrides the ambient one, which 'down --all' needs to reach
+// clusters owned by an engine other than the session's resolved one.
+func Delete(w io.Writer, eng engine.Engine, name, kubeconfig string) error {
 	env := []string{"KIND_EXPERIMENTAL_PROVIDER=" + eng.String()}
 	if kubeconfig != "" {
 		env = append(env, "KUBECONFIG="+kubeconfig)
 	}
-	return run.CmdWithEnv(env, "kind", "delete", "cluster", "--name", name)
+	return run.CmdWithEnvTo(w, env, "kind", "delete", "cluster", "--name", name)
 }
 
 // ZapISCSIDisks wipes this cluster's iSCSI OSD disks so the next bring-up sees
@@ -198,29 +193,38 @@ func DeleteWith(eng engine.Engine, name, kubeconfig string) error {
 // device would permanently inflate the image instead. It then refreshes the host
 // udev DB (the truncate doesn't notify the kernel, so lsblk/ceph-volume would
 // otherwise see a stale "ceph_bluestore" signature and skip the disk). Run AFTER
-// the kind cluster is deleted, when the disks are idle. Best-effort; targets the
-// image files in dataDir (the cluster's state directory). Output goes to w so a
-// caller zapping several clusters concurrently can buffer each cluster's lines.
-func ZapISCSIDisks(w io.Writer, eng engine.Engine, clusterName, dataDir string) {
+// the kind cluster is deleted, when the disks are idle. Targets the image files
+// in dataDir (the cluster's state directory). Output goes to w so a caller
+// zapping several clusters concurrently can buffer each cluster's lines.
+//
+// An image that could not be wiped is returned as an error, not just logged: a
+// caller that rebuilds the cluster afterwards would otherwise put fresh nodes on
+// a disk still carrying its old bluestore signature, and Rook skips a non-empty
+// device — leaving a cluster with silently missing OSDs. A failure between the
+// two truncates leaves that image zero-length, which is likewise not a state to
+// build on. The udev refresh below stays best-effort: it only affects whether
+// the host's cached view is stale, not whether the data is gone.
+func ZapISCSIDisks(w io.Writer, eng engine.Engine, clusterName, dataDir string) error {
 	imgs, _ := filepath.Glob(filepath.Join(dataDir, "*.img"))
 	if len(imgs) == 0 {
 		run.Fprintf(w, "no OSD disk images for cluster %q; skipping zap\n", clusterName)
-		return
+		return nil
 	}
 
 	run.Fprintf(w, "==> zapping OSD disks (re-sparsifying backing images)\n")
+	var errs []error
 	for _, img := range imgs {
 		fi, err := os.Stat(img)
 		if err != nil {
-			run.Fprintf(w, "warning: stat %s: %v\n", img, err)
+			errs = append(errs, fmt.Errorf("stat %s: %w", img, err))
 			continue
 		}
 		if err := os.Truncate(img, 0); err != nil {
-			run.Fprintf(w, "warning: truncate %s to 0: %v\n", img, err)
+			errs = append(errs, fmt.Errorf("truncate %s to 0: %w", img, err))
 			continue
 		}
 		if err := os.Truncate(img, fi.Size()); err != nil {
-			run.Fprintf(w, "warning: truncate %s to %d: %v\n", img, fi.Size(), err)
+			errs = append(errs, fmt.Errorf("truncate %s back to %d (image is now empty): %w", img, fi.Size(), err))
 			continue
 		}
 		run.Fprintf(w, "zapped %s\n", img)
@@ -233,7 +237,7 @@ func ZapISCSIDisks(w io.Writer, eng engine.Engine, clusterName, dataDir string) 
 	// iSCSI initiator's stale block-device cache (the truncate happened on the
 	// backstore file, behind the initiator) so the re-probe reads the now-zeroed
 	// device rather than cached bluestore blocks.
-	if cimg := kindNodeImageID(eng); cimg != "" {
+	if cimg := kindNodeImageID(w, eng); cimg != "" {
 		script := fmt.Sprintf(`for dev in /dev/disk/by-path/ip-127.0.0.1:3260-iscsi-iqn.*.local.rooket:%s-worker*-disk*-lun-0; do
   [ -e "$dev" ] || continue
   blockdev --flushbufs "$dev" 2>/dev/null || true
@@ -244,12 +248,13 @@ udevadm settle >/dev/null 2>&1 || true`, clusterName)
 			"-v", "/dev:/dev", "-v", "/run/udev:/run/udev",
 			"--entrypoint", "sh", cimg, "-c", script)
 	}
+	return errors.Join(errs...)
 }
 
 // kindNodeImageID returns the image ID of a locally-present kindest/node image,
 // used as a throwaway privileged container for disk zapping. Empty if none.
-func kindNodeImageID(eng engine.Engine) string {
-	out, err := run.Output(eng.String(), "images", "--format", "{{.ID}} {{.Repository}}")
+func kindNodeImageID(w io.Writer, eng engine.Engine) string {
+	out, err := run.OutputTo(w, eng.String(), "images", "--format", "{{.ID}} {{.Repository}}")
 	if err != nil {
 		return ""
 	}
