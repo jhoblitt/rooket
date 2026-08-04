@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"fmt"
+	"io"
 	"os"
 
 	"github.com/spf13/cobra"
@@ -37,37 +38,9 @@ must be torn down separately if desired.
 		deleteName = name
 		regName := registry.ContainerName(deleteName)
 
-		// --- Step 1: kind cluster (releases the OSD disks) ---
-		run.Printf("==> deleting kind cluster\n")
-		if err := cluster.Delete(deleteName); err != nil {
-			// kind delete is a no-op success on an absent cluster, so an error
-			// means something went wrong. The zap below truncates the OSD disk
-			// images; doing that while the cluster still holds them corrupts a
-			// live cluster. Only continue if the cluster is confirmed gone.
-			exists, exErr := cluster.Exists(os.Stdout, containerEngine, deleteName)
-			if exErr != nil {
-				return fmt.Errorf("delete cluster %q: %w; could not verify it was removed (%v), so not zapping its disks", deleteName, err, exErr)
-			}
-			if exists {
-				return fmt.Errorf("delete cluster %q: %w; cluster still present, not zapping its disks", deleteName, err)
-			}
-			run.Printf("warning: delete cluster returned an error but the cluster is gone: %v\n", err)
-		}
-		// kind delete strips the cluster's entries but leaves the (now empty)
-		// kubeconfig file behind; remove it so 'rooket k' reports "is it up?"
-		// instead of letting kubectl chase an empty config. The file is
-		// per-cluster, so nothing else lives in it.
-		if kc, err := kubeconfigPath(deleteName); err == nil {
-			_ = os.Remove(kc)
-		}
-
-		// --- Step 2: zap OSD disks now that the nodes have released them ---
-		if deleteZap {
-			if dir, err := stateDirPath(deleteName); err == nil {
-				cluster.ZapISCSIDisks(os.Stdout, containerEngine, deleteName, dir)
-			} else {
-				run.Printf("warning: zap OSD disks: %v\n", err)
-			}
+		// --- Steps 1 and 2: kind cluster (releasing the OSD disks), then zap ---
+		if err := deleteClusterAndZap(os.Stdout, deleteName, deleteZap); err != nil {
+			return err
 		}
 
 		// --- Step 3: registry container ---
@@ -79,6 +52,47 @@ must be torn down separately if desired.
 		run.Printf("cluster %q deleted\n", deleteName)
 		return nil
 	},
+}
+
+// deleteClusterAndZap deletes the kind cluster, drops its kubeconfig, and — only
+// once the cluster is confirmed gone — re-sparsifies its OSD disk images. Both
+// 'cluster delete' and the create path's drift recovery go through it, so the
+// rule that decides whether user data is destroyed has one implementation
+// instead of a copy per caller.
+func deleteClusterAndZap(out io.Writer, name string, zap bool) error {
+	run.Fprintf(out, "==> deleting kind cluster\n")
+	if err := cluster.Delete(out, containerEngine, name, ""); err != nil {
+		// kind delete is a no-op success on an absent cluster, so an error
+		// means something went wrong. The zap below truncates the OSD disk
+		// images; doing that while the cluster still holds them corrupts a
+		// live cluster. Only continue if the cluster is confirmed gone.
+		exists, exErr := cluster.Exists(out, containerEngine, name)
+		if exErr != nil {
+			return fmt.Errorf("delete cluster %q: %w; could not verify it was removed (%v), so not zapping its disks", name, err, exErr)
+		}
+		if exists {
+			return fmt.Errorf("delete cluster %q: %w; cluster still present, not zapping its disks", name, err)
+		}
+		run.Fprintf(out, "warning: delete cluster returned an error but the cluster is gone: %v\n", err)
+	}
+	// kind delete strips the cluster's entries but leaves the (now empty)
+	// kubeconfig file behind; remove it so 'rooket k' reports "is it up?"
+	// instead of letting kubectl chase an empty config. The file is
+	// per-cluster, so nothing else lives in it.
+	if kc, err := kubeconfigPath(name); err == nil {
+		_ = os.Remove(kc)
+	}
+	if !zap {
+		return nil
+	}
+	dir, err := stateDirPath(name)
+	if err != nil {
+		return fmt.Errorf("locate the state directory of cluster %q to zap its OSD disks: %w", name, err)
+	}
+	if err := cluster.ZapISCSIDisks(out, containerEngine, name, dir); err != nil {
+		return fmt.Errorf("zap the OSD disks of cluster %q: %w", name, err)
+	}
+	return nil
 }
 
 func init() {

@@ -5,7 +5,7 @@ package registry
 import (
 	"fmt"
 	"io"
-	"strings" // for Exists
+	"strings"
 
 	"github.com/jhoblitt/rooket/internal/engine"
 	"github.com/jhoblitt/rooket/internal/run"
@@ -47,7 +47,8 @@ func (c *Config) InClusterAddr() string {
 
 // Exists returns true if the registry container already exists (running or stopped).
 func Exists(out io.Writer, eng engine.Engine, name string) bool {
-	res, err := run.OutputTo(out, eng.String(), "ps", "-a", "--filter", "name=^"+name+"$", "--format", "{{.Names}}")
+	res, err := run.OutputTo(out, eng.String(), "ps", "-a",
+		"--filter", "name=^"+name+"$", "--format", "{{.Names}}")
 	if err != nil {
 		return false
 	}
@@ -65,8 +66,13 @@ func Exists(out io.Writer, eng engine.Engine, name string) bool {
 // name from the cluster nodes.
 func Create(out io.Writer, cfg Config) error {
 	if Exists(out, cfg.Engine, cfg.Name) {
-		run.Fprintf(out, "registry container %q already exists, skipping creation\n", cfg.Name)
-		return nil
+		// A container from an earlier session can be stopped: a host reboot
+		// leaves it Exited, since --restart=always covers only the engine
+		// restarting, not the machine booting. Start it — a no-op when it is
+		// already running — so a re-run resumes a working registry rather than
+		// skipping past a dead one and failing later at push time.
+		run.Fprintf(out, "registry container %q already exists; ensuring it is running\n", cfg.Name)
+		return run.CmdTo(out, cfg.Engine.String(), "start", cfg.Name)
 	}
 	args := []string{
 		"run", "-d",

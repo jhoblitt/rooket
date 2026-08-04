@@ -196,8 +196,24 @@ func Exists(out io.Writer, eng engine.Engine) bool {
 // everything from upstream.
 func Create(out io.Writer, cfg Config) error {
 	if Exists(out, cfg.Engine) {
-		run.Fprintf(out, "cache container %q already exists, skipping creation\n", ContainerName)
-		return nil
+		// Stopped is the common state after a host reboot (--restart=always
+		// covers only the engine restarting), and a skipped-over dead cache
+		// silently sends every node back to pulling from upstream. Starting an
+		// already-running container is a no-op.
+		run.Fprintf(out, "cache container %q already exists; ensuring it is running\n", ContainerName)
+		err := run.CmdTo(out, cfg.Engine.String(), "start", ContainerName)
+		if err == nil {
+			return nil
+		}
+		// The same race the create below absorbs, seen from the other side: a
+		// concurrent run recreating the cache for a changed config removes the
+		// container between the check above and this start. Fall through and
+		// create it rather than reporting the loss as a failure, which would
+		// strand this cluster with no cache upstreams for its whole life.
+		if Exists(out, cfg.Engine) {
+			return err
+		}
+		run.Fprintf(out, "cache container %q went away while starting it; creating it\n", ContainerName)
 	}
 	args := []string{
 		"run", "-d",

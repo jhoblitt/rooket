@@ -173,7 +173,7 @@ func downAllRun(cmd *cobra.Command) error {
 			run.Fprintf(w, "==> deleting cluster %q\n", n)
 			kc, _ := kubeconfigPath(n)
 			for _, eng := range engs {
-				if err := cluster.DeleteWith(eng, n, kc); err != nil {
+				if err := cluster.Delete(w, eng, n, kc); err != nil {
 					run.Fprintf(w, "warning: delete cluster %q under %s: %v\n", n, eng, err)
 				}
 				if err := registry.Delete(w, eng, registry.ContainerName(n)); err != nil {
@@ -192,8 +192,12 @@ func downAllRun(cmd *cobra.Command) error {
 			}
 			// Preserved images must still be zapped so the next up starts clean;
 			// images about to be deleted don't need it.
+			// A sweep reports and keeps going: the next 'up' on that clone hits
+			// the same failure with the cluster in front of it.
 			if !downDeleteDisks && hasState[n] {
-				cluster.ZapISCSIDisks(w, engs[0], n, filepath.Join(root, n))
+				if err := cluster.ZapISCSIDisks(w, engs[0], n, filepath.Join(root, n)); err != nil {
+					run.Fprintf(w, "warning: zap OSD disks of cluster %q: %v\n", n, err)
+				}
 			}
 			return nil
 		}

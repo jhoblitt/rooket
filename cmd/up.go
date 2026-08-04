@@ -49,6 +49,13 @@ var upCmd = &cobra.Command{
 Use --skip-block, --skip-build, or --skip-deploy to omit individual steps.
 Setting --disk-count 0 also skips the block-setup step automatically.
 
+Re-running up against an existing cluster resumes it, starting its nodes again
+if a reboot stopped them. A cluster whose OSD device paths were renumbered since
+it was created cannot be resumed and is deleted and rebuilt, which wipes its OSD
+disks (see 'rooket cluster create --help'); any other state it cannot resume —
+missing nodes, an unreachable apiserver, nodes that never come back — is reported
+for you to decide on.
+
 Example:
   rooket up --dir ~/github/rook
 `,
