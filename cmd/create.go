@@ -82,36 +82,9 @@ Run 'rooket block setup' before 'rooket cluster create' to prepare block devices
 // concurrently with other phases.
 func createClusterRun(out io.Writer, name string, requestedPort int, portExplicit bool,
 	workers, diskCount int, iqnDate, promVersion, promRelease, nodeImage string) error {
-	port, err := resolveRegistryPort(name, requestedPort, portExplicit)
-	if err != nil {
-		return err
-	}
 	regName := registry.ContainerName(name)
-
-	// A recorded port can go stale: something else (typically another rooket
-	// cluster's registry) now holds it. Our own RUNNING registry is the one
-	// thing that legitimately does, so anything else means the port must be
-	// re-picked — the steps below (re)wire containerd and the ConfigMap to
-	// whatever port ends up in use.
-	//
-	// A stopped registry of ours cannot be the holder, and cannot be started
-	// onto a port it no longer owns, so it has to go: leaving it there made the
-	// repair unreachable and turned every later run into the same fatal bind
-	// error. Its images are re-pushed by the next 'rooket build push'.
-	if !portFree(port) && !registryRunningWithPort(out, containerEngine, regName, port) {
-		if registry.Exists(out, containerEngine, regName) {
-			run.Fprintf(out, "registry %q is stopped and port %d is held by something else; removing it\n", regName, port)
-			if err := registry.Delete(out, containerEngine, regName); err != nil {
-				return fmt.Errorf("remove stale registry %q: %w", regName, err)
-			}
-		}
-		old := port
-		if port, err = freePort(5001); err != nil {
-			return err
-		}
-		run.Fprintf(out, "recorded registry port %d is now in use elsewhere; using %d instead\n", old, port)
-	}
-	if err := writeRegistryPort(name, port); err != nil {
+	port, err := reserveRegistryPort(out, name, regName, requestedPort, portExplicit)
+	if err != nil {
 		return err
 	}
 
@@ -268,6 +241,52 @@ Cluster %q is ready.
 
 `, name, port, containerEngine.String(), port, cacheSummary(cacheReady, cacheErr))
 	return nil
+}
+
+// reserveRegistryPort settles this cluster's registry host port and records it,
+// holding the host-wide allocation lock for the whole decision.
+//
+// Deciding and recording have to be one step. Two clusters coming up together
+// each hold their own cluster lock and neither excludes the other, so without
+// this both probe the same free port, both persist it, and the loser's
+// registry fails to bind — after it has already written that port as its own.
+//
+// A recorded port can also have gone stale: something else, typically another
+// cluster's registry, now holds it. Our own RUNNING registry is the one thing
+// that legitimately does, so anything else means re-picking; the steps after
+// this one wire containerd and the ConfigMap to whatever port ends up in use.
+// A stopped registry of ours cannot be the holder and cannot be started onto a
+// port it no longer owns, so it has to go — leaving it made the repair
+// unreachable and turned every later run into the same fatal bind error. Its
+// images are re-pushed by the next 'rooket build push'.
+func reserveRegistryPort(out io.Writer, name, regName string, requested int, explicit bool) (int, error) {
+	release, err := LockPorts()
+	if err != nil {
+		return 0, err
+	}
+	defer release()
+
+	port, err := resolveRegistryPort(name, requested, explicit)
+	if err != nil {
+		return 0, err
+	}
+	if !portFree(port) && !registryRunningWithPort(out, containerEngine, regName, port) {
+		if registry.Exists(out, containerEngine, regName) {
+			run.Fprintf(out, "registry %q is stopped and port %d is held by something else; removing it\n", regName, port)
+			if err := registry.Delete(out, containerEngine, regName); err != nil {
+				return 0, fmt.Errorf("remove stale registry %q: %w", regName, err)
+			}
+		}
+		old := port
+		if port, err = freePortFor(name, 5001); err != nil {
+			return 0, err
+		}
+		run.Fprintf(out, "recorded registry port %d is now in use elsewhere; using %d instead\n", old, port)
+	}
+	if err := writeRegistryPort(name, port); err != nil {
+		return 0, err
+	}
+	return port, nil
 }
 
 // resumeCluster makes an already-existing cluster usable again and reports

@@ -1,12 +1,14 @@
 package cmd
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
 	"syscall"
+	"time"
 )
 
 // held records the cluster locks this process already owns.
@@ -65,17 +67,16 @@ func lockClusterIn(root, name string) (release func(), err error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return nil, fmt.Errorf("create the rooket state directory: %w", err)
 	}
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o644)
+	// Not waited on: a cluster lock is held for a whole command, so waiting
+	// would silently park an interactive run behind one that may be minutes
+	// from finishing.
+	f, err := acquireFlock(path, 0)
 	if err != nil {
-		return nil, fmt.Errorf("open the lock for cluster %q: %w", name, err)
-	}
-	// Non-blocking: an interactive command must not silently park behind
-	// another run that may be minutes from finishing.
-	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
-		owner := readLockOwner(f)
-		f.Close()
-		return nil, fmt.Errorf("cluster %q is locked by another rooket%s; wait for it to finish, "+
-			"or work on a different cluster with --name", name, owner)
+		if errors.Is(err, errLockBusy) {
+			return nil, fmt.Errorf("cluster %q is locked by another rooket%s; wait for it to finish, "+
+				"or work on a different cluster with --name", name, lockOwnerAt(path))
+		}
+		return nil, fmt.Errorf("lock cluster %q: %w", name, err)
 	}
 	writeLockOwner(f)
 
@@ -121,12 +122,81 @@ func writeLockOwner(f *os.File) {
 	fmt.Fprintf(f, "%d %s\n", os.Getpid(), strings.Join(os.Args, " "))
 }
 
-// readLockOwner renders the holder recorded in a lock file we failed to take.
-// The read races the holder's own write, so anything unexpected yields no
-// attribution rather than a guess.
-func readLockOwner(f *os.File) string {
+// errLockBusy reports that another process holds the lock, as opposed to the
+// lock file being unusable — the caller phrases those very differently.
+var errLockBusy = errors.New("lock is held by another process")
+
+// portsLockWait bounds the wait for the registry-port allocation lock. Unlike a
+// cluster lock this one is held for a few filesystem reads and a handful of
+// bind probes, so waiting is right where refusing would be absurd: two clusters
+// starting together is the case the lock exists for, and failing one of them
+// would be the very collision it is meant to prevent.
+const portsLockWait = 30 * time.Second
+
+// LockPorts serializes registry host-port allocation across every cluster on
+// the host. Cluster locks cannot cover this: the clusters contending for a port
+// are different ones, each already holding its own lock.
+func LockPorts() (release func(), err error) {
+	root, err := stateDirRoot()
+	if err != nil {
+		return nil, err
+	}
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		return nil, fmt.Errorf("create the rooket state directory: %w", err)
+	}
+	// The leading dot is load-bearing: cluster locks are "<name>.lock" beside
+	// this one, and a cluster may legitimately be named "ports". A name must be
+	// a DNS label, so no cluster can ever produce a file starting with a dot.
+	path := filepath.Join(root, ".ports.lock")
+	f, err := acquireFlock(path, portsLockWait)
+	if err != nil {
+		if errors.Is(err, errLockBusy) {
+			return nil, fmt.Errorf("another rooket has been allocating a registry port for over %s%s; "+
+				"if it is wedged, kill it and retry", portsLockWait, lockOwnerAt(path))
+		}
+		return nil, fmt.Errorf("lock registry port allocation: %w", err)
+	}
+	writeLockOwner(f)
+	return func() { f.Close() }, nil
+}
+
+// acquireFlock opens path and takes an exclusive flock on it. wait of zero
+// tries once; otherwise it retries until wait elapses, since flock itself has
+// no timeout and a blocking one could never be interrupted.
+func acquireFlock(path string, wait time.Duration) (*os.File, error) {
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o644)
+	if err != nil {
+		return nil, err
+	}
+	deadline := time.Now().Add(wait)
+	for {
+		err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
+		if err == nil {
+			return f, nil
+		}
+		if !errors.Is(err, syscall.EWOULDBLOCK) {
+			f.Close()
+			return nil, err
+		}
+		if !time.Now().Before(deadline) {
+			f.Close()
+			return nil, errLockBusy
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+}
+
+// lockOwnerAt renders the holder recorded in a lock file we failed to take.
+// Reading needs no lock and races the holder's own write, so anything
+// unexpected yields no attribution rather than a guess.
+func lockOwnerAt(path string) string {
+	f, err := os.Open(path)
+	if err != nil {
+		return ""
+	}
+	defer f.Close()
 	buf := make([]byte, 512)
-	n, _ := f.ReadAt(buf, 0)
+	n, _ := f.Read(buf)
 	return formatLockOwner(string(buf[:n]))
 }
 
