@@ -241,18 +241,59 @@ func writeRegistryPort(name string, port int) error {
 	return os.WriteFile(filepath.Join(dir, "registry-port"), []byte(strconv.Itoa(port)+"\n"), 0o644)
 }
 
-// freePort returns the first free TCP port on 127.0.0.1 at or above start.
-// Probe-then-use is inherently racy — another process can grab the port
-// between the probe and the registry binding it — but the window is tiny and
-// a collision just fails the registry create with a clear bind error.
-func freePort(start int) (int, error) {
+// recordedPorts maps each registry port another cluster has recorded to the
+// cluster that recorded it, skipping the caller's own.
+//
+// A bind probe cannot see these. A cluster whose registry is merely stopped —
+// the normal state after a reboot — holds no port at all, so probing alone
+// hands its port to whoever asks next; that cluster's next run then finds its
+// port taken, discards its registry and re-picks, losing the images it had
+// pushed. Ports are cheap and that churn is not.
+func recordedPorts(exceptCluster string) map[int]string {
+	_, names, err := stateDirNames()
+	if err != nil {
+		return nil
+	}
+	taken := map[int]string{}
+	for _, n := range names {
+		if n == exceptCluster {
+			continue
+		}
+		if p := readRegistryPort(n); p != 0 {
+			taken[p] = n
+		}
+	}
+	return taken
+}
+
+// freePortFor returns the first TCP port on 127.0.0.1 at or above start that is
+// bindable and not spoken for by another cluster.
+//
+// Probing remains a guess about everything that is not rooket: a foreign
+// process can still take the port between this check and the registry binding
+// it. That window is tiny, and a loser gets a clear bind error plus the
+// re-pick on its next run, so it is left alone. What is not left alone is
+// rooket colliding with itself, which the recorded-port set and the allocation
+// lock together remove.
+func freePortFor(cluster string, start int) (int, error) {
+	taken := recordedPorts(cluster)
 	for p := start; p < start+1000; p++ {
-		if portFree(p) {
+		if _, ok := taken[p]; ok {
+			continue
+		}
+		if portProbe(p) {
 			return p, nil
 		}
 	}
-	return 0, fmt.Errorf("no free TCP port in [%d, %d)", start, start+1000)
+	return 0, fmt.Errorf("no free TCP port in [%d, %d) that is not already assigned to another cluster",
+		start, start+1000)
 }
+
+// portProbe answers whether a host port is bindable. Indirected so tests can
+// state the machine's port availability rather than inherit whatever happens to
+// be listening on the developer's workstation — including, routinely, a rooket
+// registry on 5001.
+var portProbe = portFree
 
 // portFree reports whether TCP port p on 127.0.0.1 can be bound.
 func portFree(p int) bool {
@@ -284,7 +325,7 @@ func resolveRegistryPort(name string, flagPort int, flagChanged bool) (int, erro
 	if persisted != 0 {
 		return persisted, nil
 	}
-	return freePort(5001)
+	return freePortFor(name, 5001)
 }
 
 // liveClusters returns the union of kind cluster names across every installed
