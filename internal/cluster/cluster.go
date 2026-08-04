@@ -668,7 +668,81 @@ func containerdScript(registryName string, hostPort int, cacheAddr string, cache
 // entry needed). The upgrade is skipped when promCRDsCurrent proves the
 // release is already deployed at the requested version with its CRDs
 // intact; otherwise 'helm upgrade --install' reconciles it.
+const (
+	// promCRDsChart is the upstream chart rooket installs the monitoring CRDs from.
+	promCRDsChart = "prometheus-operator-crds"
+	// DefaultPromCRDsRelease is the helm release name rooket installs that chart
+	// under.
+	DefaultPromCRDsRelease = promCRDsChart
+	// LegacyPromCRDsRelease is the name rooket used before it stopped copying
+	// the upstream chart's `helm install my-<chart>` example verbatim. Clusters
+	// created back then still own their CRDs under it.
+	LegacyPromCRDsRelease = "my-" + promCRDsChart
+)
+
+// resolvePromCRDsRelease returns the release name to install the CRDs under,
+// preferring one this cluster already has.
+//
+// The chart renders its CRDs as templates, so they carry helm's
+// meta.helm.sh/release-name ownership annotation and helm refuses to let a
+// second release adopt them — the same collision the namespace pin below
+// avoids, reached by a different route. A cluster created before the rename
+// would therefore fail every install with "invalid ownership metadata" until it
+// was destroyed.
+//
+// Adopting the release it already has costs nothing (the name is cosmetic and
+// never referenced elsewhere) and mutates nothing, where re-annotating live CRDs
+// to chase the new name risks the cluster's monitoring for the same result. New
+// clusters get the current name, so the legacy one disappears as clusters are
+// rebuilt. An explicitly chosen release name is always honored as given.
+func resolvePromCRDsRelease(w io.Writer, clusterName, releaseName string, extraEnv []string) string {
+	if releaseName != DefaultPromCRDsRelease ||
+		deployedChart(w, clusterName, releaseName, extraEnv) != "" ||
+		deployedChart(w, clusterName, LegacyPromCRDsRelease, extraEnv) == "" {
+		return releaseName
+	}
+	run.Fprintf(w, "adopting the existing %q release: this cluster predates the rename to %q\n",
+		LegacyPromCRDsRelease, DefaultPromCRDsRelease)
+	return LegacyPromCRDsRelease
+}
+
+// deployedChart returns the chart of the deployed helm release with exactly this
+// name, or "" if the cluster has no such release.
+func deployedChart(w io.Writer, clusterName, releaseName string, extraEnv []string) string {
+	out, err := run.OutputWithEnvTo(w, extraEnv, "helm",
+		"--kube-context", "kind-"+clusterName,
+		"-n", "rook-ceph",
+		"list", "-o", "json",
+		"--filter", "^"+regexp.QuoteMeta(releaseName)+"$",
+	)
+	if err != nil {
+		return ""
+	}
+	return parseDeployedChart(out, releaseName)
+}
+
+// parseDeployedChart picks the deployed release's chart out of `helm list -o
+// json`. The --filter is a regex helm applies loosely, so the name is re-checked
+// here rather than trusting the server to have returned only the one asked for.
+func parseDeployedChart(listJSON, releaseName string) string {
+	var releases []struct {
+		Name   string `json:"name"`
+		Chart  string `json:"chart"`
+		Status string `json:"status"`
+	}
+	if json.Unmarshal([]byte(listJSON), &releases) != nil {
+		return ""
+	}
+	for _, r := range releases {
+		if r.Name == releaseName && r.Status == "deployed" {
+			return r.Chart
+		}
+	}
+	return ""
+}
+
 func InstallPrometheusOperatorCRDs(w io.Writer, clusterName, releaseName, version string, extraEnv []string) error {
+	releaseName = resolvePromCRDsRelease(w, clusterName, releaseName, extraEnv)
 	if promCRDsCurrent(w, clusterName, releaseName, version, extraEnv) {
 		run.Fprintf(w, "prometheus-operator-crds %s already deployed with its CRDs present, skipping\n", version)
 		return nil
@@ -682,7 +756,7 @@ func InstallPrometheusOperatorCRDs(w io.Writer, clusterName, releaseName, versio
 		"-n", "rook-ceph",
 		"upgrade", "--install",
 		releaseName,
-		"prometheus-operator-crds",
+		promCRDsChart,
 		"--repo", "https://prometheus-community.github.io/helm-charts",
 		"--version", version,
 		"--create-namespace",
@@ -695,31 +769,7 @@ func InstallPrometheusOperatorCRDs(w io.Writer, clusterName, releaseName, versio
 // resources survived — the upgrade is the reconciler — so both halves must
 // hold before the install is skipped. Any probe failure means "not current".
 func promCRDsCurrent(w io.Writer, clusterName, releaseName, version string, extraEnv []string) bool {
-	out, err := run.OutputWithEnvTo(w, extraEnv, "helm",
-		"--kube-context", "kind-"+clusterName,
-		"-n", "rook-ceph",
-		"list", "-o", "json",
-		"--filter", "^"+regexp.QuoteMeta(releaseName)+"$",
-	)
-	if err != nil {
-		return false
-	}
-	var releases []struct {
-		Name   string `json:"name"`
-		Chart  string `json:"chart"`
-		Status string `json:"status"`
-	}
-	if json.Unmarshal([]byte(out), &releases) != nil {
-		return false
-	}
-	deployed := false
-	for _, r := range releases {
-		if r.Name == releaseName && r.Status == "deployed" &&
-			r.Chart == "prometheus-operator-crds-"+version {
-			deployed = true
-		}
-	}
-	if !deployed {
+	if deployedChart(w, clusterName, releaseName, extraEnv) != promCRDsChart+"-"+version {
 		return false
 	}
 

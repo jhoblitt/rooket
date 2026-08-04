@@ -64,3 +64,31 @@ spec:
 		}
 	})
 }
+
+// TestParseDeployedChart pins the release lookup that decides whether a cluster
+// predates the release rename — and so whether its CRDs are about to be
+// installed under a name their helm ownership annotation does not match.
+func TestParseDeployedChart(t *testing.T) {
+	const list = `[
+  {"name":"my-prometheus-operator-crds","namespace":"rook-ceph","revision":"1","status":"deployed","chart":"prometheus-operator-crds-29.0.0","app_version":"v0.91.0"}
+]`
+	if got := parseDeployedChart(list, "my-prometheus-operator-crds"); got != "prometheus-operator-crds-29.0.0" {
+		t.Errorf("chart = %q, want prometheus-operator-crds-29.0.0", got)
+	}
+	// helm's --filter is a regex it applies loosely, so a name that merely
+	// resembles the one asked for must not answer for it.
+	if got := parseDeployedChart(list, "prometheus-operator-crds"); got != "" {
+		t.Errorf("a different release answered the lookup: %q", got)
+	}
+	// Only a deployed release counts: a failed or pending one owns nothing and
+	// must not suppress the install.
+	const failed = `[{"name":"prometheus-operator-crds","status":"failed","chart":"prometheus-operator-crds-29.0.0"}]`
+	if got := parseDeployedChart(failed, "prometheus-operator-crds"); got != "" {
+		t.Errorf("a %s release must not count as deployed: %q", "failed", got)
+	}
+	for _, empty := range []string{"[]", "", "not json"} {
+		if got := parseDeployedChart(empty, "prometheus-operator-crds"); got != "" {
+			t.Errorf("parseDeployedChart(%q) = %q, want empty", empty, got)
+		}
+	}
+}

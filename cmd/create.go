@@ -380,6 +380,6 @@ func init() {
 	createCmd.Flags().IntVar(&createDiskCount, "disk-count", 1, "number of iSCSI disks per worker (0 to skip)")
 	createCmd.Flags().StringVar(&createISCSIQNDate, "iqn-date", "2003-01", "IQN date component matching 'rooket block setup' (YYYY-MM)")
 	createCmd.Flags().StringVar(&createPromCRDsVersion, "prometheus-operator-crds-version", "29.0.0", "version of the prometheus-operator-crds helm chart to install (exact versions enable the reinstall skip)")
-	createCmd.Flags().StringVar(&createPromCRDsRelease, "prometheus-operator-crds-release", "my-prometheus-operator-crds", "helm release name for prometheus-operator-crds")
+	createCmd.Flags().StringVar(&createPromCRDsRelease, "prometheus-operator-crds-release", cluster.DefaultPromCRDsRelease, "helm release name for prometheus-operator-crds")
 	createCmd.Flags().StringVar(&createNodeImage, "node-image", defaultNodeImage, "kindest/node image for 'kind create cluster --image' (pin tag@digest for a reproducible Kubernetes version)")
 }
