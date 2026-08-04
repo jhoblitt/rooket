@@ -54,6 +54,12 @@ Example:
 		if err != nil {
 			return err
 		}
+		release, err := LockCluster(deployName)
+		if err != nil {
+			return err
+		}
+		defer release()
+
 		if err := installRookCephOperator(dir, active); err != nil {
 			return err
 		}
@@ -90,6 +96,12 @@ Example:
 		if err != nil {
 			return err
 		}
+		release, err := LockCluster(deployName)
+		if err != nil {
+			return err
+		}
+		defer release()
+
 		if err := installRookCephOperator(dir, active); err != nil {
 			return err
 		}
@@ -112,6 +124,12 @@ Example:
 		if err != nil {
 			return err
 		}
+		release, err := LockCluster(deployName)
+		if err != nil {
+			return err
+		}
+		defer release()
+
 		if err := installRookCephCluster(dir, active); err != nil {
 			return err
 		}

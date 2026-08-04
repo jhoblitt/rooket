@@ -35,6 +35,12 @@ After loading, reference the image in your Rook manifests as:
 	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		name := clusterName(loadName)
+		release, err := LockCluster(name)
+		if err != nil {
+			return err
+		}
+		defer release()
+
 		port, err := resolveRegistryPort(name, loadRegistryPort, cmd.Flags().Changed("registry-port"))
 		if err != nil {
 			return err

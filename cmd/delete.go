@@ -35,6 +35,12 @@ must be torn down separately if desired.
 		if err != nil {
 			return err
 		}
+		release, err := LockCluster(name)
+		if err != nil {
+			return err
+		}
+		defer release()
+
 		deleteName = name
 		regName := registry.ContainerName(deleteName)
 

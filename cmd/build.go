@@ -63,6 +63,12 @@ Example:
 		}
 
 		name := clusterName(buildName)
+		release, err := LockCluster(name)
+		if err != nil {
+			return err
+		}
+		defer release()
+
 		port, perr := resolveRegistryPort(name, buildRegistryPort, cmd.Flags().Changed("registry-port"))
 		if perr != nil {
 			return perr
@@ -390,6 +396,12 @@ Example:
 		}
 
 		name := clusterName(buildPushName)
+		release, err := LockCluster(name)
+		if err != nil {
+			return err
+		}
+		defer release()
+
 		port, perr := resolveRegistryPort(name, buildPushRegistryPort, cmd.Flags().Changed("registry-port"))
 		if perr != nil {
 			return perr

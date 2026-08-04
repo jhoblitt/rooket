@@ -173,12 +173,22 @@ func pruneExecute(root string, orphans []string, disks []iscsiDisk, teardown fun
 		}
 	}
 	for _, o := range orphans {
+		// "Orphan" was decided by a scan that has since gone stale: a concurrent
+		// 'up' may be building this very cluster, in which case its state dir is
+		// not garbage. Taking the lock is what makes that decision current, and
+		// a held lock is the proof to leave it alone.
+		release, err := lockClusterIn(root, o)
+		if err != nil {
+			fmt.Fprintf(out, "warning: skipping %s: %v\n", o, err)
+			continue
+		}
 		p := filepath.Join(root, o)
 		if err := remove(p); err != nil {
 			fmt.Fprintf(out, "warning: remove %s: %v\n", p, err)
 		} else {
 			fmt.Fprintf(out, "removed %s\n", p)
 		}
+		release()
 	}
 	return nil
 }

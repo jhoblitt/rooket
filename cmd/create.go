@@ -63,6 +63,12 @@ Run 'rooket block setup' before 'rooket cluster create' to prepare block devices
 		if err != nil {
 			return err
 		}
+		release, err := LockCluster(name)
+		if err != nil {
+			return err
+		}
+		defer release()
+
 		createName = name
 		return createClusterRun(os.Stdout, name, createRegistryPort,
 			cmd.Flags().Changed("registry-port"), createWorkers, createDiskCount,
