@@ -41,9 +41,10 @@ var createCmd = &cobra.Command{
      other unusable state is reported so you can decide.
   3. Prepare every node: remount /sys read-write and install lvm2 and cryptsetup,
      which Rook needs to provision LVM-backed and encrypted OSDs.
-  4. Start a local OCI registry container joined to the kind network, bound to
-     localhost:<registry-port> on the host. The registry must be created after
-     the cluster so that the "kind" network exists.
+  4. Start a local OCI registry container (zot, the same image as the shared
+     cache) joined to the kind network, bound to localhost:<registry-port> on
+     the host. The registry must be created after the cluster so that the
+     "kind" network exists.
   5. Configure containerd on every node to mirror localhost:<registry-port>
      to the registry container (reachable by name on the kind network), and
      each proxied upstream registry to the shared cache.
@@ -185,7 +186,7 @@ func createClusterRun(out io.Writer, name string, requestedPort int, portExplici
 		},
 		func(w io.Writer) error { // Step 4: local OCI registry
 			run.Fprintf(w, "==> creating local OCI registry on the kind network\n")
-			if err := registry.Create(w, regCfg); err != nil {
+			if err := setupRegistry(w, name, regCfg); err != nil {
 				return fmt.Errorf("create registry: %w", err)
 			}
 			return nil

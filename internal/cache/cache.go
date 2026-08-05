@@ -12,6 +12,7 @@ import (
 
 	"github.com/jhoblitt/rooket/internal/engine"
 	"github.com/jhoblitt/rooket/internal/run"
+	"github.com/jhoblitt/rooket/internal/zot"
 )
 
 const (
@@ -27,24 +28,9 @@ const (
 	// whole cache on every recreation.
 	VolumeName = "rooket-cache-data"
 
-	// ZotImage is pinned: an unpinned cache would resync on every silent
-	// upstream rebuild.
-	ZotImage = "ghcr.io/project-zot/zot-linux-amd64:v2.1.17"
-
-	// InternalPort is the port zot listens on inside the container.
-	InternalPort = 5000
-
 	// HostPort binds the cache for debugging and for host-side pulls. Per-cluster
 	// registries are allocated from 5001 upward, so 5000 stays free for this.
 	HostPort = 5000
-
-	// ConfigPath is where the generated zot config is bind-mounted in the
-	// container.
-	ConfigPath = "/etc/zot/config.json"
-
-	// StoragePath is zot's root directory inside the container, backed by
-	// VolumeName.
-	StoragePath = "/var/lib/zot"
 )
 
 // Upstreams are the registries the cache proxies, covering everything a rook
@@ -80,7 +66,7 @@ type Config struct {
 
 // InClusterAddr returns the address cluster nodes use to reach the cache.
 func InClusterAddr() string {
-	return fmt.Sprintf("%s:%d", ContainerName, InternalPort)
+	return fmt.Sprintf("%s:%d", ContainerName, zot.InternalPort)
 }
 
 // upstreamURL maps a registry namespace to the URL zot pulls from. docker.io is
@@ -92,50 +78,6 @@ func upstreamURL(ns string) string {
 	return "https://" + ns
 }
 
-type zotStorage struct {
-	RootDirectory string `json:"rootDirectory"`
-	GC            bool   `json:"gc"`
-}
-
-type zotHTTP struct {
-	Address string   `json:"address"`
-	Port    string   `json:"port"`
-	Compat  []string `json:"compat,omitempty"`
-}
-
-type zotLog struct {
-	Level string `json:"level"`
-}
-
-type zotContent struct {
-	Prefix      string `json:"prefix"`
-	Destination string `json:"destination"`
-}
-
-type zotRegistry struct {
-	URLs      []string     `json:"urls"`
-	Content   []zotContent `json:"content"`
-	OnDemand  bool         `json:"onDemand"`
-	TLSVerify bool         `json:"tlsVerify"`
-}
-
-type zotSync struct {
-	Enable     bool          `json:"enable"`
-	Registries []zotRegistry `json:"registries"`
-}
-
-type zotExtensions struct {
-	Sync zotSync `json:"sync"`
-}
-
-type zotConfig struct {
-	DistSpecVersion string        `json:"distSpecVersion"`
-	Storage         zotStorage    `json:"storage"`
-	HTTP            zotHTTP       `json:"http"`
-	Log             zotLog        `json:"log"`
-	Extensions      zotExtensions `json:"extensions"`
-}
-
 // GenerateConfig renders the zot configuration proxying each upstream under a
 // repository prefix equal to its namespace, so that upstream "cephcsi/cephcsi"
 // on quay.io is served locally as "quay.io/cephcsi/cephcsi" — the path the
@@ -144,24 +86,24 @@ func GenerateConfig(upstreams []string) ([]byte, error) {
 	if len(upstreams) == 0 {
 		upstreams = Upstreams
 	}
-	regs := make([]zotRegistry, 0, len(upstreams))
+	regs := make([]zot.SyncRegistry, 0, len(upstreams))
 	for _, ns := range upstreams {
-		regs = append(regs, zotRegistry{
+		regs = append(regs, zot.SyncRegistry{
 			URLs:      []string{upstreamURL(ns)},
-			Content:   []zotContent{{Prefix: "**", Destination: "/" + ns}},
+			Content:   []zot.Content{{Prefix: "**", Destination: "/" + ns}},
 			OnDemand:  true,
 			TLSVerify: true,
 		})
 	}
-	cfg := zotConfig{
-		DistSpecVersion: "1.1.1",
-		Storage:         zotStorage{RootDirectory: StoragePath, GC: true},
+	cfg := zot.Config{
+		DistSpecVersion: zot.DistSpecVersion,
+		Storage:         zot.Storage{RootDirectory: zot.StoragePath, GC: true},
 		// zot stores OCI-native; docker2s2 lets it also serve the Docker
 		// schema-2 manifests much of the ecosystem still publishes.
-		HTTP: zotHTTP{Address: "0.0.0.0", Port: fmt.Sprint(InternalPort), Compat: []string{"docker2s2"}},
-		Log:  zotLog{Level: "info"},
-		Extensions: zotExtensions{
-			Sync: zotSync{Enable: true, Registries: regs},
+		HTTP: zot.HTTP{Address: "0.0.0.0", Port: fmt.Sprint(zot.InternalPort), Compat: []string{"docker2s2"}},
+		Log:  zot.Log{Level: "info"},
+		Extensions: &zot.Extensions{
+			Sync: zot.Sync{Enable: true, Registries: regs},
 		},
 	}
 	return json.MarshalIndent(cfg, "", "  ")
@@ -218,15 +160,15 @@ func Create(out io.Writer, cfg Config) error {
 	args := []string{
 		"run", "-d",
 		"--restart=always",
-		"-p", fmt.Sprintf("127.0.0.1:%d:%d", HostPort, InternalPort),
-		"-v", VolumeName + ":" + StoragePath,
-		"-v", cfg.HostConfigPath + ":" + ConfigPath + ":ro",
+		"-p", fmt.Sprintf("127.0.0.1:%d:%d", HostPort, zot.InternalPort),
+		"-v", VolumeName + ":" + zot.StoragePath,
+		"-v", cfg.HostConfigPath + ":" + zot.ConfigPath + ":ro",
 		"--name", ContainerName,
 	}
 	if cfg.Network != "" {
 		args = append(args, "--network="+cfg.Network)
 	}
-	args = append(args, ZotImage, "serve", ConfigPath)
+	args = append(args, zot.Image, "serve", zot.ConfigPath)
 	err := run.CmdTo(out, cfg.Engine.String(), args...)
 	if err != nil && Exists(out, cfg.Engine) {
 		run.Fprintf(out, "cache container %q was created concurrently; using it\n", ContainerName)

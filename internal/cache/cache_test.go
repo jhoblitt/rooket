@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+
+	"github.com/jhoblitt/rooket/internal/zot"
 )
 
 func TestGenerateConfig(t *testing.T) {
@@ -12,11 +14,14 @@ func TestGenerateConfig(t *testing.T) {
 		t.Fatalf("GenerateConfig: %v", err)
 	}
 
-	var cfg zotConfig
+	var cfg zot.Config
 	if err := json.Unmarshal(raw, &cfg); err != nil {
 		t.Fatalf("generated config is not valid JSON: %v\n%s", err, raw)
 	}
 
+	if cfg.Extensions == nil {
+		t.Fatal("config carries no extensions section; nothing would be proxied")
+	}
 	if !cfg.Extensions.Sync.Enable {
 		t.Error("sync extension must be enabled; without it nothing is proxied")
 	}
@@ -60,8 +65,8 @@ func TestGenerateConfig(t *testing.T) {
 	if !cfg.Storage.GC {
 		t.Error("gc must be on; the cache is shared by every cluster and grows unbounded otherwise")
 	}
-	if cfg.Storage.RootDirectory != StoragePath {
-		t.Errorf("rootDirectory = %q, want %q (the named volume mountpoint)", cfg.Storage.RootDirectory, StoragePath)
+	if cfg.Storage.RootDirectory != zot.StoragePath {
+		t.Errorf("rootDirectory = %q, want %q (the named volume mountpoint)", cfg.Storage.RootDirectory, zot.StoragePath)
 	}
 }
 
@@ -70,9 +75,12 @@ func TestGenerateConfigDefaultsToUpstreams(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GenerateConfig: %v", err)
 	}
-	var cfg zotConfig
+	var cfg zot.Config
 	if err := json.Unmarshal(raw, &cfg); err != nil {
 		t.Fatalf("invalid JSON: %v", err)
+	}
+	if cfg.Extensions == nil {
+		t.Fatal("config carries no extensions section; nothing would be proxied")
 	}
 	if len(cfg.Extensions.Sync.Registries) != len(Upstreams) {
 		t.Errorf("nil upstreams should fall back to the default list (%d), got %d",
