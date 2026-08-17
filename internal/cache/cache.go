@@ -124,9 +124,48 @@ func Exists(out io.Writer, eng engine.Engine) bool {
 	return false
 }
 
-// Create starts the cache container if it does not already exist. Like the
-// per-cluster registry it must be created after a kind cluster exists, so that
-// cfg.Network is present to attach to.
+// runArgs renders the engine arguments that create the cache container.
+//
+// The config mount carries ",z": the file is generated under the user's home,
+// whose SELinux type a confined container cannot read, and without a relabel
+// zot exits at startup on an enforcing host — leaving every node to pull from
+// upstream. The option is inert where SELinux is disabled and is understood by
+// both engines.
+func runArgs(cfg Config) []string {
+	args := []string{
+		"run", "-d",
+		"--restart=always",
+		"-p", fmt.Sprintf("127.0.0.1:%d:%d", HostPort, zot.InternalPort),
+		"-v", VolumeName + ":" + zot.StoragePath,
+		"-v", cfg.HostConfigPath + ":" + zot.ConfigPath + ":ro,z",
+		"--name", ContainerName,
+	}
+	if cfg.Network != "" {
+		args = append(args, "--network="+cfg.Network)
+	}
+	return append(args, zot.Image, "serve", zot.ConfigPath)
+}
+
+// containerImage returns the image reference the existing cache container was
+// created from.
+func containerImage(out io.Writer, eng engine.Engine) (string, error) {
+	res, err := run.OutputTo(out, eng.String(), "inspect", "-f", "{{.Config.Image}}", ContainerName)
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(res), nil
+}
+
+// Create starts the cache container if it does not already exist, replacing
+// one built from a different zot image. Like the per-cluster registry it must
+// be created after a kind cluster exists, so that cfg.Network is present to
+// attach to.
+//
+// The image check makes a moved pin reach a host that already has a cache;
+// nothing else here would ever replace that container. Its cost is that two
+// rooket versions used side by side flap it between their pins, which is the
+// same trade setupCache already documents for a changed config: a flap costs a
+// pull falling back upstream, never a failed bring-up.
 //
 // Unlike the per-cluster registry the cache is a host-wide singleton, so the
 // Exists check races: rooket supports one cluster per rook clone and they are
@@ -138,38 +177,41 @@ func Exists(out io.Writer, eng engine.Engine) bool {
 // everything from upstream.
 func Create(out io.Writer, cfg Config) error {
 	if Exists(out, cfg.Engine) {
-		// Stopped is the common state after a host reboot (--restart=always
-		// covers only the engine restarting), and a skipped-over dead cache
-		// silently sends every node back to pulling from upstream. Starting an
-		// already-running container is a no-op.
-		run.Fprintf(out, "cache container %q already exists; ensuring it is running\n", ContainerName)
-		err := run.CmdTo(out, cfg.Engine.String(), "start", ContainerName)
-		if err == nil {
-			return nil
+		img, imgErr := containerImage(out, cfg.Engine)
+		if imgErr == nil && img != zot.Image {
+			// A container from an older pin keeps running its own image
+			// forever otherwise: nothing else here would ever replace it, so
+			// a pin moved for a fix — or for an architecture this host can
+			// actually run — would never reach an existing cache.
+			run.Fprintf(out, "cache container %q runs %s; recreating it with %s (cached images are preserved in volume %s)\n",
+				ContainerName, img, zot.Image, VolumeName)
+			// A concurrent run may have removed it already, which is the
+			// outcome this wanted anyway.
+			if err := RemoveContainer(out, cfg.Engine); err != nil && Exists(out, cfg.Engine) {
+				return fmt.Errorf("recreate cache container: %w", err)
+			}
+		} else {
+			// Stopped is the common state after a host reboot (--restart=always
+			// covers only the engine restarting), and a skipped-over dead cache
+			// silently sends every node back to pulling from upstream. Starting an
+			// already-running container is a no-op.
+			run.Fprintf(out, "cache container %q already exists; ensuring it is running\n", ContainerName)
+			err := run.CmdTo(out, cfg.Engine.String(), "start", ContainerName)
+			if err == nil {
+				return nil
+			}
+			// The same race the create below absorbs, seen from the other side: a
+			// concurrent run recreating the cache for a changed config removes the
+			// container between the check above and this start. Fall through and
+			// create it rather than reporting the loss as a failure, which would
+			// strand this cluster with no cache upstreams for its whole life.
+			if Exists(out, cfg.Engine) {
+				return err
+			}
+			run.Fprintf(out, "cache container %q went away while starting it; creating it\n", ContainerName)
 		}
-		// The same race the create below absorbs, seen from the other side: a
-		// concurrent run recreating the cache for a changed config removes the
-		// container between the check above and this start. Fall through and
-		// create it rather than reporting the loss as a failure, which would
-		// strand this cluster with no cache upstreams for its whole life.
-		if Exists(out, cfg.Engine) {
-			return err
-		}
-		run.Fprintf(out, "cache container %q went away while starting it; creating it\n", ContainerName)
 	}
-	args := []string{
-		"run", "-d",
-		"--restart=always",
-		"-p", fmt.Sprintf("127.0.0.1:%d:%d", HostPort, zot.InternalPort),
-		"-v", VolumeName + ":" + zot.StoragePath,
-		"-v", cfg.HostConfigPath + ":" + zot.ConfigPath + ":ro",
-		"--name", ContainerName,
-	}
-	if cfg.Network != "" {
-		args = append(args, "--network="+cfg.Network)
-	}
-	args = append(args, zot.Image, "serve", zot.ConfigPath)
-	err := run.CmdTo(out, cfg.Engine.String(), args...)
+	err := run.CmdTo(out, cfg.Engine.String(), runArgs(cfg)...)
 	if err != nil && Exists(out, cfg.Engine) {
 		run.Fprintf(out, "cache container %q was created concurrently; using it\n", ContainerName)
 		return nil
