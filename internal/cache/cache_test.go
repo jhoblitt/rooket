@@ -2,11 +2,38 @@ package cache
 
 import (
 	"encoding/json"
+	"slices"
 	"strings"
 	"testing"
 
 	"github.com/jhoblitt/rooket/internal/zot"
 )
+
+func TestRunArgs(t *testing.T) {
+	cfg := Config{
+		Network:        "kind",
+		HostConfigPath: "/home/u/.config/rooket/cache-config.json",
+	}
+	args := runArgs(cfg)
+	joined := strings.Join(args, " ")
+
+	// The config is generated under the user's home, whose SELinux type a
+	// confined container cannot read. Without a relabel option zot exits at
+	// startup on any enforcing host, and every node silently falls back to
+	// pulling from upstream.
+	if !slices.Contains(args, cfg.HostConfigPath+":"+zot.ConfigPath+":ro,z") {
+		t.Errorf("config mount must carry the SELinux relabel option:\n%s", joined)
+	}
+	// The blobs live in a *named* volume: an anonymous one would be discarded
+	// on every recreation, which is exactly what an image or config change
+	// now triggers.
+	if !slices.Contains(args, VolumeName+":"+zot.StoragePath) {
+		t.Errorf("cache storage must be the named volume %s:\n%s", VolumeName, joined)
+	}
+	if !slices.Contains(args, zot.Image) {
+		t.Errorf("cache must run the shared zot pin %q:\n%s", zot.Image, joined)
+	}
+}
 
 func TestGenerateConfig(t *testing.T) {
 	raw, err := GenerateConfig([]string{"quay.io", "docker.io"})
