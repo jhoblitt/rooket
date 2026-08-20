@@ -346,7 +346,9 @@ func liveClusters() (live map[string][]engine.Engine, consulted, failed []engine
 		if _, err := exec.LookPath(eng.String()); err != nil {
 			continue
 		}
-		names, err := cluster.List(os.Stdout, eng)
+		// The trace goes to stderr so it cannot land inside list's table on
+		// stdout, which is the only machine-readable thing rooket prints.
+		names, err := cluster.List(os.Stderr, eng)
 		if err != nil {
 			failed = append(failed, eng)
 			continue

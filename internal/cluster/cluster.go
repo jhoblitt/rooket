@@ -112,7 +112,7 @@ func GenerateConfig(cfg Config) ([]byte, error) {
 // KIND_EXPERIMENTAL_PROVIDER) so callers like prune and list can query engines
 // other than the session's resolved one.
 func List(w io.Writer, eng engine.Engine) ([]string, error) {
-	out, err := run.OutputWithEnvTo(w,
+	out, err := run.OutputWithEnvEchoedTo(w,
 		[]string{"KIND_EXPERIMENTAL_PROVIDER=" + eng.String()},
 		"kind", "get", "clusters")
 	if err != nil {
