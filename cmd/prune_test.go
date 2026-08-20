@@ -229,8 +229,11 @@ func TestPrunePlan(t *testing.T) {
 		"untouched": {untouchedOrphanImg},
 	}
 
-	orphans, disks := prunePlan(stateNames, live, hasState, strandedFound)
+	orphans, parked, disks := prunePlan(t.TempDir(), stateNames, live, hasState, strandedFound, false)
 
+	if len(parked) != 0 {
+		t.Errorf("parked = %v, want none", parked)
+	}
 	if want := []string{"orphan", "untouched"}; !reflect.DeepEqual(orphans, want) {
 		t.Errorf("orphans = %v, want %v", orphans, want)
 	}
@@ -261,7 +264,7 @@ func TestPrunePlanUnionsOrphanByPathEvenWithNoReconstructableImages(t *testing.T
 		"orphan": {{targetIQN: "iqn.1999-01.local.rooket:orphan-worker0-disk0"}},
 	}
 
-	orphans, disks := prunePlan(stateNames, live, hasState, strandedFound)
+	orphans, _, disks := prunePlan(t.TempDir(), stateNames, live, hasState, strandedFound, false)
 	if want := []string{"orphan"}; !reflect.DeepEqual(orphans, want) {
 		t.Errorf("orphans = %v, want %v", orphans, want)
 	}
@@ -271,12 +274,68 @@ func TestPrunePlanUnionsOrphanByPathEvenWithNoReconstructableImages(t *testing.T
 }
 
 func TestPrunePlanNoFindings(t *testing.T) {
-	orphans, disks := prunePlan([]string{"solo"}, map[string][]engine.Engine{}, map[string]bool{"solo": true}, nil)
+	orphans, _, disks := prunePlan(t.TempDir(), []string{"solo"}, map[string][]engine.Engine{}, map[string]bool{"solo": true}, nil, false)
 	if want := []string{"solo"}; !reflect.DeepEqual(orphans, want) {
 		t.Errorf("orphans = %v, want %v", orphans, want)
 	}
 	if len(disks) != 0 {
 		t.Errorf("disks = %+v, want none", disks)
+	}
+}
+
+// A plain 'rooket down' deliberately leaves the state dir, its disk images,
+// and its iSCSI targets behind so the next 'up' reuses them. That parked
+// cluster is indistinguishable from garbage by liveness alone, so prune
+// judges it by its clone: while the clone it was created from still exists,
+// the cluster is parked, not abandoned, and neither it nor its targets may
+// be swept.
+func TestPrunePlanKeepsClustersWhoseCloneStillExists(t *testing.T) {
+	root := t.TempDir()
+	clone := t.TempDir()
+	mkState := func(name, clonePath string) {
+		dir := filepath.Join(root, name)
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if clonePath != "" {
+			writeFile(t, filepath.Join(dir, clonePathFile), clonePath+"\n")
+		}
+	}
+	mkState("parked", clone)
+	mkState("abandoned", filepath.Join(t.TempDir(), "deleted-clone"))
+	mkState("unknown", "")
+
+	parkedDisk := iscsiDisk{targetIQN: "iqn.2003-01.local.rooket:parked-worker0-disk0"}
+	abandonedDisk := iscsiDisk{targetIQN: "iqn.2003-01.local.rooket:abandoned-worker0-disk0"}
+	stateNames := []string{"abandoned", "parked", "unknown"}
+	hasState := map[string]bool{"abandoned": true, "parked": true, "unknown": true}
+	strandedFound := map[string][]iscsiDisk{
+		"parked":    {parkedDisk},
+		"abandoned": {abandonedDisk},
+	}
+
+	orphans, parked, disks := prunePlan(root, stateNames, map[string][]engine.Engine{}, hasState, strandedFound, false)
+
+	if want := []string{"abandoned", "unknown"}; !reflect.DeepEqual(orphans, want) {
+		t.Errorf("orphans = %v, want %v", orphans, want)
+	}
+	if want := []string{"parked"}; !reflect.DeepEqual(parked, want) {
+		t.Errorf("parked = %v, want %v", parked, want)
+	}
+	if diskSet(disks)[parkedDisk.targetIQN] {
+		t.Error("parked cluster's iSCSI target leaked into the teardown batch")
+	}
+
+	// --include-parked is the escape hatch: it puts them back in scope.
+	orphans, parked, disks = prunePlan(root, stateNames, map[string][]engine.Engine{}, hasState, strandedFound, true)
+	if want := []string{"abandoned", "parked", "unknown"}; !reflect.DeepEqual(orphans, want) {
+		t.Errorf("orphans with --include-parked = %v, want %v", orphans, want)
+	}
+	if len(parked) != 0 {
+		t.Errorf("parked with --include-parked = %v, want none", parked)
+	}
+	if !diskSet(disks)[parkedDisk.targetIQN] {
+		t.Error("--include-parked did not bring the parked cluster's target into the teardown batch")
 	}
 }
 

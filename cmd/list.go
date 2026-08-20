@@ -19,7 +19,10 @@ var listCmd = &cobra.Command{
 	Long: `list shows every cluster rooket knows about: kind clusters live under any
 installed engine, plus state directories under ~/.local/share/rooket. A row
 with no state dir is a kind cluster rooket did not create (or whose state was
-pruned); a row that is not live is teardown debris — 'rooket prune' removes it.
+pruned). A row that is not live still has its state — a plain 'rooket down'
+keeps the disk images and iSCSI targets so the next 'up' reuses them, so bring
+it back with 'rooket up' or reclaim it with 'rooket down --delete-disks'.
+'rooket prune' sweeps only the ones whose rook clone is gone.
 `,
 	Args: cobra.NoArgs,
 	RunE: func(cmd *cobra.Command, args []string) error {
