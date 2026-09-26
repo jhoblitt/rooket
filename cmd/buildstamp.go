@@ -213,12 +213,15 @@ type buildStamp struct {
 	RooketVersion string       `json:"rooketVersion"` // informational only
 }
 
+// buildStampFile names the build stamp inside a cluster's state directory.
+const buildStampFile = "build-stamp.json"
+
 func buildStampPath(name string) (string, error) {
 	dir, err := stateDirPath(name)
 	if err != nil {
 		return "", err
 	}
-	return filepath.Join(dir, "build-stamp.json"), nil
+	return filepath.Join(dir, buildStampFile), nil
 }
 
 // readBuildStamp returns the recorded stamp, or nil when there is none or it

@@ -17,19 +17,28 @@ import (
 )
 
 var (
-	pruneForce   bool
-	pruneDryRun  bool
-	pruneIQNDate string
+	pruneForce      bool
+	pruneDryRun     bool
+	pruneIQNDate    string
+	pruneInclParked bool
 )
 
 var pruneCmd = &cobra.Command{
 	Use:   "prune",
 	Short: "Remove state directories of clusters that no longer exist, and their iSCSI targets",
-	Long: `prune deletes ~/.local/share/rooket/<name> directories whose kind cluster is
-no longer running — e.g. a clone removed without 'rooket down' — and removes
-their iSCSI targets first, while the state directory's worker*-disk*.img
-filenames can still be used to reconstruct them. All targets are torn down in
-one privileged run, so the whole prune costs at most a single authentication.
+	Long: `prune deletes ~/.local/share/rooket/<name> directories left behind by a clone
+that is gone — removed without 'rooket down' — and removes their iSCSI targets
+first, while the state directory's worker*-disk*.img filenames can still be
+used to reconstruct them. All targets are torn down in one privileged run, so
+the whole prune costs at most a single authentication.
+
+A cluster whose rook clone still exists is parked, not abandoned: a plain
+'rooket down' keeps its disk images and iSCSI targets on purpose so the next
+'up' reuses them without root. prune reports those and leaves them alone;
+'rooket down --delete-disks' is how you reclaim one, or --include-parked
+sweeps them here too. A directory that records no clone at all — created
+before rooket recorded one, or by a --name run outside any rook tree — counts
+as abandoned.
 
 prune also sweeps iSCSI targets and backstores left behind by an earlier
 deletion of their state directory, read straight from the kernel's own
@@ -85,8 +94,14 @@ regardless, so this does not add a new restriction there.
 			return fmt.Errorf("scan %s: %w", iscsiByPathDir, err)
 		}
 
-		orphans, byPathDisks := prunePlan(stateNames, live, hasState, strandedFound)
+		orphans, parked, byPathDisks := prunePlan(root, stateNames, live, hasState, strandedFound, pruneInclParked)
 		stranded := strandableClusters(strandedFound, live, hasState)
+
+		for _, p := range parked {
+			run.Printf("keeping %s: its clone %s still exists, so it is parked by 'rooket down', not abandoned "+
+				"(remove it with 'rooket down --delete-disks', or sweep it here with --include-parked)\n",
+				filepath.Join(root, p), cloneDir(filepath.Join(root, p)))
+		}
 
 		if len(orphans) == 0 && len(stranded) == 0 {
 			run.Printf("nothing to prune\n")
@@ -193,10 +208,19 @@ func pruneExecute(root string, orphans []string, disks []iscsiDisk, teardown fun
 	return nil
 }
 
-// prunePlan decides which state-dir clusters are orphaned (no live kind
-// cluster) and which by-path-discovered disks the run's privileged teardown
-// batch must include for them, in addition to whatever the caller
-// reconstructs from each orphan's state dir via stateDirDisks.
+// prunePlan decides which state-dir clusters are orphaned and which
+// by-path-discovered disks the run's privileged teardown batch must include
+// for them, in addition to whatever the caller reconstructs from each
+// orphan's state dir via stateDirDisks. The clusters it declines to orphan
+// because they are merely parked are returned separately, so the caller can
+// say why they survived.
+//
+// Orphaned means more than "not live": a plain 'rooket down' leaves a state
+// dir with no live kind cluster on purpose, its disk images and iSCSI targets
+// preserved so the next 'up' reuses them without root. Sweeping that would
+// destroy the very thing down set out to keep, so a cluster whose rook clone
+// still exists is parked and left alone unless includeParked says otherwise;
+// see clonePathFile for how the clone is known.
 //
 // The by-path union matters because reconstruction alone can miss real
 // targets: a state dir whose worker*-disk*.img files were already removed
@@ -212,9 +236,13 @@ func pruneExecute(root string, orphans []string, disks []iscsiDisk, teardown fun
 // clusters that already have a state dir (are in stateNames); it does not
 // itself decide the no-state-dir "stranded" bucket. A live cluster's by-path
 // entries are never included here or there.
-func prunePlan(stateNames []string, live map[string][]engine.Engine, hasState map[string]bool, strandedFound map[string][]iscsiDisk) (orphans []string, disks []iscsiDisk) {
+func prunePlan(root string, stateNames []string, live map[string][]engine.Engine, hasState map[string]bool, strandedFound map[string][]iscsiDisk, includeParked bool) (orphans, parked []string, disks []iscsiDisk) {
 	for _, n := range stateNames {
 		if _, ok := live[n]; ok {
+			continue
+		}
+		if !includeParked && !cloneGone(filepath.Join(root, n)) {
+			parked = append(parked, n)
 			continue
 		}
 		orphans = append(orphans, n)
@@ -223,7 +251,7 @@ func prunePlan(stateNames []string, live map[string][]engine.Engine, hasState ma
 	for _, c := range strandableClusters(strandedFound, live, hasState) {
 		disks = append(disks, strandedFound[c]...)
 	}
-	return orphans, disks
+	return orphans, parked, disks
 }
 
 // strandedByPathRE matches a rooket iSCSI by-path symlink for LUN 0 and
@@ -319,5 +347,7 @@ func init() {
 	rootCmd.AddCommand(pruneCmd)
 	pruneCmd.Flags().BoolVar(&pruneDryRun, "dry-run", false, "list what would be removed without removing it")
 	pruneCmd.Flags().BoolVar(&pruneForce, "force", false, "remove without prompting")
+	pruneCmd.Flags().BoolVar(&pruneInclParked, "include-parked", false,
+		"also remove clusters whose rook clone still exists (parked by 'rooket down', not abandoned)")
 	pruneCmd.Flags().StringVar(&pruneIQNDate, "iqn-date", "2003-01", "date component for reconstructing an orphan's IQNs (YYYY-MM)")
 }

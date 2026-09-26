@@ -184,9 +184,27 @@ func OutputWithEnv(extraEnv []string, name string, args ...string) (string, erro
 	return OutputWithEnvTo(os.Stdout, extraEnv, name, args...)
 }
 
-// OutputWithEnvTo is OutputWithEnv with the trace line routed to w.
+// OutputWithEnvTo is OutputWithEnv with the trace line routed to w. The
+// environment is not echoed: callers pass whole config triplets (helm's, for
+// one), which would bury the command in the trace.
 func OutputWithEnvTo(w io.Writer, extraEnv []string, name string, args ...string) (string, error) {
-	tracef(w, name, args)
+	return outputWithEnvTo(w, extraEnv, false, name, args...)
+}
+
+// OutputWithEnvEchoedTo is OutputWithEnvTo with extraEnv rendered into the
+// trace line, for commands whose target is chosen by the environment rather
+// than by an argument — the kind provider being the case that matters. Without
+// it, querying two engines echoes the same command twice and reads as a bug.
+func OutputWithEnvEchoedTo(w io.Writer, extraEnv []string, name string, args ...string) (string, error) {
+	return outputWithEnvTo(w, extraEnv, true, name, args...)
+}
+
+func outputWithEnvTo(w io.Writer, extraEnv []string, echoEnv bool, name string, args ...string) (string, error) {
+	if echoEnv && len(extraEnv) > 0 {
+		tracef(w, strings.Join(extraEnv, " ")+" "+name, args)
+	} else {
+		tracef(w, name, args)
+	}
 	cmd := exec.Command(name, args...)
 	if len(extraEnv) > 0 {
 		cmd.Env = append(os.Environ(), extraEnv...)
