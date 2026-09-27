@@ -5,6 +5,7 @@ package e2e
 import (
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -154,6 +155,47 @@ data:
 				deletePath(supplied, path)
 			}
 			Expect(shown).To(Equal(supplied), "%s: preview does not match what helm received", c.chart)
+		}
+	})
+
+	It("routes a path profile's values only to the chart each file names", func() {
+		// One key, a different value per rook chart. If values were ever
+		// broadcast to every chart again, a release would receive the other
+		// chart's value, or ceph-csi-drivers would receive one. The key is
+		// unknown to both charts, so setting it changes no manifest.
+		dir := filepath.Join(GinkgoT().TempDir(), "e2e-path-profile")
+		Expect(os.MkdirAll(filepath.Join(dir, "values"), 0o755)).To(Succeed())
+		Expect(os.WriteFile(filepath.Join(dir, "profile.yaml"),
+			[]byte("description: e2e path profile\n"), 0o644)).To(Succeed())
+		Expect(os.WriteFile(filepath.Join(dir, "values", "rook-ceph.yaml"),
+			[]byte("rooketE2eMarker: operator\n"), 0o644)).To(Succeed())
+		Expect(os.WriteFile(filepath.Join(dir, "values", "rook-ceph-cluster.yaml"),
+			[]byte("rooketE2eMarker: cluster\n"), 0o644)).To(Succeed())
+
+		deployArgs := append([]string{"deploy", "--dir", rookDir, "--name", clusterName},
+			withOnlyArgs([]string{"rbd", dir})...)
+		out, err := rooketRun(15*time.Minute, deployArgs...)
+		Expect(err).NotTo(HaveOccurred(), "deploy failed:\n%s", tail(out, 40))
+
+		want := map[string]string{"rook-ceph": "operator", "rook-ceph-cluster": "cluster"}
+		// Only rook refs from v1.20 on install the ceph-csi-drivers release.
+		releases, err := rooketRun(2*time.Minute, "helm", "-n", "rook-ceph", "list", "-q")
+		Expect(err).NotTo(HaveOccurred())
+		if slices.Contains(strings.Fields(releases), "ceph-csi-drivers") {
+			want["ceph-csi-drivers"] = ""
+		}
+
+		for release, marker := range want {
+			raw, err := rooketRun(2*time.Minute, "helm", "-n", "rook-ceph",
+				"get", "values", release, "-o", "yaml")
+			Expect(err).NotTo(HaveOccurred())
+			vals, err := decodeValues(raw)
+			Expect(err).NotTo(HaveOccurred(), "%s: parse helm values:\n%s", release, raw)
+			if marker == "" {
+				Expect(vals).NotTo(HaveKey("rooketE2eMarker"), "%s received a path-profile value", release)
+			} else {
+				Expect(vals).To(HaveKeyWithValue("rooketE2eMarker", marker), "%s did not receive its own value", release)
+			}
 		}
 	})
 
