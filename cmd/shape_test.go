@@ -3,6 +3,7 @@ package cmd
 import (
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -134,5 +135,93 @@ func TestShapeConsumersDefineTheShapeFlags(t *testing.T) {
 				t.Errorf("%s defines no --%s flag", c.CommandPath(), flag)
 			}
 		}
+	}
+}
+
+// shapeFlagCase is a value a test passes one shape flag, and the refusal it
+// wants, or "" for a value the command accepts.
+type shapeFlagCase struct {
+	flag, value, want string
+}
+
+// rooket can neither build nor tear down a cluster of no workers, and a
+// negative disk count or a disk of no size describes no cluster at all.
+// Nothing here names a cluster, so a value a command lets through is refused
+// for that instead: the check runs before the command names, locks, or records
+// anything.
+func TestCommandsRefuseAShapeNoClusterCanHave(t *testing.T) {
+	workers := []shapeFlagCase{
+		{"workers", "0", "--workers must be more than 0, not 0"},
+		{"workers", "-1", "--workers must be more than 0, not -1"},
+		{"workers", "1", ""},
+	}
+	diskCount := []shapeFlagCase{
+		{"disk-count", "-1", "--disk-count must be 0 or more, not -1"},
+		{"disk-count", "0", ""},
+	}
+	diskSize := []shapeFlagCase{
+		{"disk-size", "0", "--disk-size must be more than 0, not 0"},
+		{"disk-size", "-1", "--disk-size must be more than 0, not -1"},
+		{"disk-size", "1", ""},
+	}
+	for _, tc := range []struct {
+		cmd   *cobra.Command
+		names []*string // the command's --name and --dir, cleared so nothing names a cluster
+		cases []shapeFlagCase
+	}{
+		{upCmd, []*string{&upName, &upRookDir}, slices.Concat(workers, diskCount, diskSize)},
+		{createCmd, []*string{&createName}, slices.Concat(workers, diskCount)},
+		{blockSetupCmd, []*string{&blockSetupName}, slices.Concat(workers, diskCount, diskSize)},
+		{deployCmd, []*string{&deployName, &deployDir}, slices.Concat(workers, diskCount, diskSize)},
+		{configCmd, []*string{&configName}, slices.Concat(workers, diskCount)},
+	} {
+		for _, c := range tc.cases {
+			t.Run(tc.cmd.CommandPath()+" --"+c.flag+"="+c.value, func(t *testing.T) {
+				root := selectNothing(t)
+				// Were the command to go ahead, it would find no kind, engine,
+				// or iSCSI tool.
+				t.Setenv("PATH", t.TempDir())
+				for _, p := range tc.names {
+					keep(t, p)
+					*p = ""
+				}
+				setFlag(t, tc.cmd, c.flag, c.value)
+
+				err := tc.cmd.RunE(tc.cmd, nil)
+				want := c.want
+				if want == "" {
+					want = "no cluster selected"
+				}
+				if err == nil || !strings.Contains(err.Error(), want) {
+					t.Fatalf("%s --%s=%s = %v, want %q", tc.cmd.CommandPath(), c.flag, c.value, err, want)
+				}
+				if kc := os.Getenv("KUBECONFIG"); kc != "untouched" {
+					t.Errorf("KUBECONFIG = %q, want it untouched", kc)
+				}
+				if files := stateFiles(t, root); len(files) != 0 {
+					t.Errorf("state root holds %v, want nothing: no lock taken, no state written", files)
+				}
+			})
+		}
+	}
+}
+
+// setFlag sets c's flag name to value as a command line would, and restores
+// the flag's value and Changed state when the test ends. It is for scalar
+// flags only: a slice flag's Set appends to what it holds rather than
+// replacing it, so the restore would not undo the parse.
+func setFlag(t *testing.T, c *cobra.Command, name, value string) {
+	t.Helper()
+	f := c.Flag(name)
+	if f == nil {
+		t.Fatalf("%s defines no --%s flag", c.CommandPath(), name)
+	}
+	prev, changed := f.Value.String(), f.Changed
+	t.Cleanup(func() {
+		_ = f.Value.Set(prev)
+		f.Changed = changed
+	})
+	if err := c.ParseFlags([]string{"--" + name + "=" + value}); err != nil {
+		t.Fatal(err)
 	}
 }

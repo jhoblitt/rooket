@@ -60,6 +60,9 @@ the registry and the cache, and must not exec into a node while step 3 does.
 Run 'rooket block setup' before 'rooket cluster create' to prepare block devices.
 `,
 	RunE: func(cmd *cobra.Command, args []string) error {
+		if err := checkShapeFlags(cmd, 1); err != nil {
+			return err
+		}
 		name, err := useCluster(createName)
 		if err != nil {
 			return err

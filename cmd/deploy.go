@@ -187,6 +187,9 @@ type rookSource struct {
 // see the same selection even if the configuration home's config.yaml
 // changes mid-deploy.
 func deploySetup(cmd *cobra.Command) (rookSource, []profiles.Profile, func(), error) {
+	if err := checkShapeFlags(cmd, 1); err != nil {
+		return rookSource{}, nil, nil, err
+	}
 	versionSet := cmd.Flags().Changed("rook-version")
 	name, err := useClusterOrDir(deployName, deployDir, versionSet)
 	if err != nil {

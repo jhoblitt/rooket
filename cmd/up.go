@@ -84,6 +84,9 @@ Example:
 		if err := checkUpWaitFlags(upWait, cmd.Flags().Changed("wait-timeout"), upWaitTimeout); err != nil {
 			return err
 		}
+		if err := checkShapeFlags(cmd, 1); err != nil {
+			return err
+		}
 		name, err := useClusterOrRookDir(upName, upRookDir, cmd.Flags().Changed("rook-version"))
 		if err != nil {
 			return err

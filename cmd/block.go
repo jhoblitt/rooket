@@ -62,6 +62,9 @@ passwordless sudo), otherwise falls back to a single pkexec prompt.
 }
 
 func blockSetupRun(cmd *cobra.Command, _ []string) error {
+	if err := checkShapeFlags(cmd, 1); err != nil {
+		return err
+	}
 	name, err := clusterName(blockSetupName)
 	if err != nil {
 		return err
