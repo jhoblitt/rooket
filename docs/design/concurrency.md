@@ -79,7 +79,16 @@ what a reviewer checks before signing off on a parallelized step:
    two clusters built from one clone write the same `make` output tag. And
    commands on one *cluster* never overlap at all: every command that mutates
    a cluster holds that cluster's lock (`LockCluster`) for its whole run, since
-   two runs against one cluster are a mistake, not a workflow.
+   two runs against one cluster are a mistake, not a workflow. The sweeps over
+   many clusters, `down --all` and `prune`, hold it the same way for each
+   cluster they touch (`lockSweep`): they try every affected cluster's lock
+   before removing anything of any of them, tear down only the clusters they
+   hold, and keep those locks through the batched privileged teardown and the
+   state-dir removals; a cluster another rooket holds is skipped and reported.
+   Holding many locks at once cannot deadlock, because a cluster lock is only
+   ever tried, never waited for: a run that finds one held gives up at once, so
+   no run ever waits on a cluster lock and no cycle of waits can pass through
+   one.
 
 ## Primitives
 
@@ -197,14 +206,26 @@ Teardown's dependency graph is tighter than bring-up's, and the invariants
 
 - **Across clusters (`down --all`) — parallel.** Different clusters share no
   kind cluster, registry, or disk, so every cluster's delete (kind delete →
-  registry delete → confirm-gone → zap preserved disks) runs concurrently,
-  each under its own cluster lock; a cluster another rooket holds is skipped
-  and left intact rather than waited for. With N clusters this collapses N
-  sequential deletes to roughly one delete's wallclock. The concurrent deletes
-  are the group; with `--delete-disks`, the batched iSCSI target teardown that
-  follows is a **barrier** (invariant 1): it must see every cluster confirmed
-  gone before it removes any target, and it is deliberately a single
-  privileged run so the whole sweep costs at most one prompt.
+  registry delete → confirm-gone → zap preserved disks) runs concurrently.
+  Before any delete starts, the sweep tries the lock of every cluster it will
+  touch and keeps the ones it gets until it is done with them (invariant 6); a
+  cluster another rooket holds is skipped and left intact rather than waited
+  for. With N clusters this collapses N sequential deletes to roughly one
+  delete's wallclock. The concurrent deletes are the group; with
+  `--delete-disks`, the batched iSCSI target teardown that follows is a
+  **barrier** (invariant 1): it must see every cluster confirmed gone before
+  it removes any target, it covers only the clusters the sweep holds, and it
+  is deliberately a single privileged run so the whole sweep costs at most one
+  prompt.
+
+- **`prune` — sequential.** prune tears down every orphaned and stranded
+  cluster's iSCSI targets in one batched privileged run, then, only once that
+  succeeds, removes the orphans' state dirs. Like `down --all`, it first tries
+  the lock of every cluster it will touch and keeps the ones it gets through
+  both steps (invariant 6): a cluster that looks abandoned may be an `up` that
+  has set up its targets but not yet created its kind cluster, and its lock is
+  the only sign of that. A cluster another rooket holds keeps its targets and
+  its state, and is reported.
 
 - **Within one cluster (`cluster delete` / plain `down`) — mostly sequential,
   by invariant.** The disk zap truncates the OSD images, which corrupts a live
