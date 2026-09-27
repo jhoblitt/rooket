@@ -8,6 +8,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/jhoblitt/rooket/internal/chartcache"
 	"github.com/jhoblitt/rooket/internal/clone"
 	"github.com/jhoblitt/rooket/internal/profiles"
 	"github.com/jhoblitt/rooket/internal/run"
@@ -31,6 +32,8 @@ var (
 	deployWith         []string
 	deployWithOnly     []string
 	deployWithOnlySet  bool
+	deployRookVersion  string
+	deployConfigDir    string
 )
 
 var deployCmd = &cobra.Command{
@@ -42,35 +45,38 @@ from the current git branch of that directory — the same logic used by
 'rooket build' — so the chart always references whatever was last pushed to
 the local registry.
 
+With --rook-version, deploy installs that released Rook version instead of a
+rook clone: its published charts from the Rook chart repository, running the
+images those charts name. The version is recorded for the cluster, so later
+commands use it without repeating the flag. Outside a rook clone, name the
+cluster with --name or $ROOKET_NAME.
+
 Run the 'operator' or 'cluster' subcommand to install only one of the charts.
 
 Example:
-  rooket deploy --dir ~/github/rook
+  rooket deploy --dir ~/github/rook                  # from a rook clone
+  rooket deploy --name rgw-go --rook-version v1.20.7 # released Rook, no clone
 `,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		dir, active, err := deploySetup(cmd)
-		if err != nil {
-			return err
-		}
-		release, err := LockCluster(deployName)
+		src, active, release, err := deploySetup(cmd)
 		if err != nil {
 			return err
 		}
 		defer release()
 
-		if err := installRookCephOperator(dir, active); err != nil {
+		if err := installRookCephOperator(src, active); err != nil {
 			return err
 		}
 		// rook-ceph-cluster's CRs (CephCluster, pools, object store, ...) need
 		// the operator running to reconcile them, so cluster waits on the
 		// operator install (invariant 1).
-		if err := installRookCephCluster(dir, active); err != nil {
+		if err := installRookCephCluster(src, active); err != nil {
 			return err
 		}
 		// Profile resources reference cluster-chart resources — e.g. a
 		// CephObjectStoreUser's object store, a StorageClass's PVC binds — so
 		// profiles waits on cluster (invariant 1).
-		if err := installProfilesChart(dir, active); err != nil {
+		if err := installProfilesChart(src.config, active); err != nil {
 			return err
 		}
 		switchKubectlNamespace("rook-ceph")
@@ -80,27 +86,28 @@ Example:
 
 var deployOperatorCmd = &cobra.Command{
 	Use:   "operator",
-	Short: "Deploy the rook-ceph operator helm chart using the image from the local registry",
+	Short: "Deploy the rook-ceph operator helm chart with a locally built or released image",
 	Long: `deploy operator runs 'helm upgrade --install' for the rook-ceph operator chart
 found in the rook source directory. The image tag is derived from the current
 git branch of that directory — the same logic used by 'rooket build' — so the
 chart always references whatever was last pushed to the local registry.
 
+With --rook-version, it installs that released Rook version's published
+operator chart from the Rook chart repository instead, running the image the
+chart names. The version is recorded for the cluster, so later commands use
+it without repeating the flag.
+
 Example:
   rooket deploy operator --dir ~/github/rook
 `,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		dir, active, err := deploySetup(cmd)
-		if err != nil {
-			return err
-		}
-		release, err := LockCluster(deployName)
+		src, active, release, err := deploySetup(cmd)
 		if err != nil {
 			return err
 		}
 		defer release()
 
-		if err := installRookCephOperator(dir, active); err != nil {
+		if err := installRookCephOperator(src, active); err != nil {
 			return err
 		}
 		switchKubectlNamespace("rook-ceph")
@@ -114,27 +121,28 @@ var deployClusterCmd = &cobra.Command{
 	Long: `deploy cluster runs 'helm upgrade --install' for the rook-ceph-cluster chart
 found in the rook source directory.
 
+With --rook-version, it installs that released Rook version's published
+rook-ceph-cluster chart from the Rook chart repository instead. The version is
+recorded for the cluster, so later commands use it without repeating the
+flag.
+
 Example:
   rooket deploy cluster --dir ~/github/rook
 `,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		dir, active, err := deploySetup(cmd)
-		if err != nil {
-			return err
-		}
-		release, err := LockCluster(deployName)
+		src, active, release, err := deploySetup(cmd)
 		if err != nil {
 			return err
 		}
 		defer release()
 
-		if err := installRookCephCluster(dir, active); err != nil {
+		if err := installRookCephCluster(src, active); err != nil {
 			return err
 		}
 		// Profile resources reference cluster-chart resources — e.g. a
 		// CephObjectStoreUser's object store, a StorageClass's PVC binds — so
 		// profiles waits on cluster (invariant 1).
-		if err := installProfilesChart(dir, active); err != nil {
+		if err := installProfilesChart(src.config, active); err != nil {
 			return err
 		}
 		switchKubectlNamespace("rook-ceph")
@@ -142,61 +150,137 @@ Example:
 	},
 }
 
+// rookSource is where a deploy's charts, configuration, and operator image
+// come from.
+type rookSource struct {
+	// charts holds deploy/charts/<chart>: a rook clone, or the chart cache
+	// entry of a released version.
+	charts string
+	// config is the configuration home values and templates compose from.
+	config clone.Dir
+	// released is the Rook version deployed from its published charts and
+	// images; empty for a clone, whose operator image rooket built.
+	released string
+}
+
 // deploySetup resolves everything a deploy needs: the cluster name (pointing
-// $KUBECONFIG at its kubeconfig), the kubectl context, the registry port, the
-// rook source directory, and the active profile set. It returns the source
-// directory and the resolved profiles.
+// $KUBECONFIG at its kubeconfig), the cluster lock, the kubectl context, the
+// registry port, the active profile set, and where its Rook and configuration
+// come from. It records that source for later commands when it differs from
+// the cluster's record, and returns it with the resolved profiles and the
+// release function for the lock it took — the caller must release it, on
+// every return path, once the deploy is done with it.
+//
+// The lock is taken here, right after the name resolves, rather than by the
+// RunE after deploySetup returns: it must already be held by the time the
+// record below is written, or a second deploy of the same cluster racing this
+// one could write a version this deploy never used. LockCluster's
+// re-entrancy (lock.go) means 'up', which takes this same lock before it ever
+// reaches deploySetup, pays nothing extra when it calls into deployCmd.RunE.
 //
 // The profile set is resolved here — once — rather than by each chart
 // installer, so every chart in this deploy and the profiles release itself
-// see the same selection even if .rooket/config.yaml changes mid-deploy.
-func deploySetup(cmd *cobra.Command) (string, []profiles.Profile, error) {
+// see the same selection even if the configuration home's config.yaml
+// changes mid-deploy.
+func deploySetup(cmd *cobra.Command) (rookSource, []profiles.Profile, func(), error) {
+	versionSet := cmd.Flags().Changed("rook-version")
+	if versionSet {
+		if err := releasedName(deployName); err != nil {
+			return rookSource{}, nil, nil, err
+		}
+	}
 	name, err := useCluster(deployName)
 	if err != nil {
-		return "", nil, err
+		return rookSource{}, nil, nil, err
 	}
 	deployName = name
+
+	release, err := LockCluster(name)
+	if err != nil {
+		return rookSource{}, nil, nil, err
+	}
+	ok := false
+	defer func() {
+		if !ok {
+			release()
+		}
+	}()
+
 	// 'rooket up' calls in with these flags unset, so they take the record its
 	// create step just wrote from the same values it forwarded.
 	if err := useRecordedShape(name, cmd.Flags().Changed, matchShape, &deployWorkers, &deployDiskCount, &deployIQNDate); err != nil {
-		return "", nil, err
+		return rookSource{}, nil, nil, err
 	}
 	if deployKubeContext == "" {
 		deployKubeContext = "kind-" + name
 	}
 	applyWithOnlyGuard(cmd.Flags().Changed("with-only"))
 	if deployHelmEnv, err = helmEnv(name, "rooket"); err != nil {
-		return "", nil, err
+		return rookSource{}, nil, nil, err
 	}
 	port, err := resolveRegistryPort(name, deployRegistryPort, cmd.Flags().Changed("registry-port"))
 	if err != nil {
-		return "", nil, err
+		return rookSource{}, nil, nil, err
 	}
 	deployRegistryPort = port
 
-	dir := deployDir
-	if dir == "" {
-		cwd, err := os.Getwd()
-		if err != nil {
-			return "", nil, fmt.Errorf("get working directory: %w", err)
-		}
-		dir = cwd
+	rec, changed, err := resolveSource(name, deployRookVersion, versionSet,
+		deployConfigDir, cmd.Flags().Changed("config-dir"))
+	if err != nil {
+		return rookSource{}, nil, nil, err
 	}
 
-	cloneDir := clone.Open(dir)
-	if err := cloneDir.Ensure(); err != nil {
-		return "", nil, err
+	src := rookSource{released: rec.RookVersion}
+	rookDir := deployDir
+	if src.released == "" {
+		if rookDir == "" {
+			if rookDir, err = os.Getwd(); err != nil {
+				return rookSource{}, nil, nil, fmt.Errorf("get working directory: %w", err)
+			}
+		}
+		src.charts = rookDir
+	} else {
+		if rookDir == "" {
+			if wd, err := os.Getwd(); err == nil {
+				rookDir = findRookRoot(wd)
+			}
+		} else if rec.ConfigDir == "" {
+			// Otherwise rookDir never reaches configHome below (rec.ConfigDir
+			// wins), and refusing it would refuse a --dir a --config-dir made
+			// irrelevant.
+			if err := checkConfigDir(rookDir); err != nil {
+				return rookSource{}, nil, nil, err
+			}
+		}
+		if src.charts, err = releasedCharts(src.released); err != nil {
+			return rookSource{}, nil, nil, err
+		}
 	}
-	names, err := activeProfileNames(cloneDir, deployWith, deployWithOnly, deployWithOnlySet)
+	src.config = configHome(rec, rookDir)
+	if err := src.config.Ensure(); err != nil {
+		return rookSource{}, nil, nil, err
+	}
+	names, err := activeProfileNames(src.config, deployWith, deployWithOnly, deployWithOnlySet)
 	if err != nil {
-		return "", nil, err
+		return rookSource{}, nil, nil, err
 	}
 	active, err := loadProfiles(names)
 	if err != nil {
-		return "", nil, err
+		return rookSource{}, nil, nil, err
+	}
+	// Recorded last, once the charts are in hand and the profiles load — a
+	// record naming a version that was never published, or one a refused
+	// deploy never used, would steer every later command — and only while
+	// the lock taken above is held, so a concurrent deploy of this same
+	// cluster can never overwrite it first.
+	if changed {
+		if err := writeSource(name, rec); err != nil {
+			return rookSource{}, nil, nil, err
+		}
 	}
 
-	return dir, active, nil
+	ok = true
+	return src, active, release, nil
 }
 
 // applyWithOnlyGuard sets deployWithOnlySet when deployCmd's own --with-only
@@ -211,37 +295,38 @@ func applyWithOnlyGuard(changed bool) {
 	}
 }
 
-func installRookCephOperator(dir string, active []profiles.Profile) error {
-	gitRef, err := gitHeadRef(dir)
-	if err != nil {
-		return fmt.Errorf("determine git ref in %s: %w", dir, err)
+func installRookCephOperator(src rookSource, active []profiles.Profile) error {
+	chartPath := filepath.Join(src.charts, "deploy", "charts", chartOperator)
+	var in values.OperatorInput
+	image := "the chart's own (released " + src.released + ")"
+	if src.released == "" {
+		gitRef, err := gitHeadRef(src.charts)
+		if err != nil {
+			return fmt.Errorf("determine git ref in %s: %w", src.charts, err)
+		}
+		registry := fmt.Sprintf("localhost:%d", deployRegistryPort)
+		in = values.OperatorInput{
+			ImageRepo: fmt.Sprintf("%s/%s/%s", registry, deployNamespace, deployImageName),
+			ImageTag:  gitRef, // already sanitized by gitHeadRef
+		}
+		in.Digest = digestOrEmpty(deployRegistryPort, deployNamespace+"/"+deployImageName, in.ImageTag)
+		image = in.ImageRepo + ":" + in.ImageTag
 	}
-
-	registry := fmt.Sprintf("localhost:%d", deployRegistryPort)
-	imageRepo := fmt.Sprintf("%s/%s/%s", registry, deployNamespace, deployImageName)
-	imageTag := gitRef // already sanitized by gitHeadRef
-
-	chartPath := filepath.Join(dir, "deploy", "charts", "rook-ceph")
 	// Shares the "make" purpose helm home (see helmEnv) with
-	// installRookCephCluster's ensureChartDeps call — the two must never run
+	// installRookCephCluster's restoreChartDeps call — the two must never run
 	// concurrently (invariant 2). They already can't: this whole operator
 	// install (including ceph-csi-drivers) completes before cluster starts.
-	if err := ensureChartDeps(dir, "rook-ceph"); err != nil {
+	if err := restoreChartDeps(src, chartOperator); err != nil {
 		return err
 	}
 
 	run.Printf("==> deploying rook-ceph operator\n")
 	run.Printf("    chart:      %s\n", chartPath)
-	run.Printf("    image:      %s:%s\n", imageRepo, imageTag)
+	run.Printf("    image:      %s\n", image)
 	run.Printf("    release:    %s\n", deployOperatorName)
 	run.Printf("    namespace:  rook-ceph\n")
 
-	base := values.OperatorBase(values.OperatorInput{
-		ImageRepo: imageRepo,
-		ImageTag:  imageTag,
-		Digest:    digestOrEmpty(deployRegistryPort, deployNamespace+"/"+deployImageName, imageTag),
-	})
-	valuesPath, err := writeComposed(chartOperator, base, dir, active)
+	valuesPath, err := writeComposed(chartOperator, values.OperatorBase(in), src.config, active)
 	if err != nil {
 		return err
 	}
@@ -260,7 +345,20 @@ func installRookCephOperator(dir string, active []profiles.Profile) error {
 	// ceph-csi-drivers needs the csi.ceph.io CRDs the operator chart's
 	// ceph-csi-operator subchart installs, so it waits on the operator
 	// (invariant 1); see the retry loop in installCephCsiDrivers.
-	return installCephCsiDrivers(dir, active)
+	return installCephCsiDrivers(src, active)
+}
+
+// restoreChartDeps restores the dependency archives of a clone's chart before
+// it is installed; see ensureChartDeps. A released chart needs none: it ships
+// its dependencies unpacked under charts/, where the restore would find no
+// archives and run helm inside the chart cache entry every cluster deploying
+// that version shares, only to fail on the file://../library dependency a
+// pulled chart has no sibling for.
+func restoreChartDeps(src rookSource, chart string) error {
+	if src.released != "" {
+		return nil
+	}
+	return ensureChartDeps(src.charts, chart)
 }
 
 func digestOrEmpty(port int, repo, tag string) string {
@@ -274,12 +372,11 @@ func digestOrEmpty(port int, repo, tag string) string {
 // writeComposed stacks every layer for chart and writes the result into the
 // cluster's state dir, where it survives a failed deploy for inspection.
 // active is the deploy's profile set, resolved once by deploySetup.
-func writeComposed(chart string, base map[string]any, rookDir string, active []profiles.Profile) (string, error) {
-	cloneDir := clone.Open(rookDir)
-	if err := cloneDir.Ensure(); err != nil {
+func writeComposed(chart string, base map[string]any, config clone.Dir, active []profiles.Profile) (string, error) {
+	if err := config.Ensure(); err != nil {
 		return "", err
 	}
-	c, err := composeChart(chart, base, cloneDir, active)
+	c, err := composeChart(chart, base, config, active)
 	if err != nil {
 		return "", err
 	}
@@ -312,8 +409,8 @@ func deployValuesDir(cluster string) (string, error) {
 // in the same move that took Driver creation out of rook, so the condition
 // name identifies the flow, and the dependency's version pin — released in
 // lockstep with the drivers chart — supplies the matching chart version.
-func installCephCsiDrivers(dir string, active []profiles.Profile) error {
-	chartYAML := filepath.Join(dir, "deploy", "charts", "rook-ceph", "Chart.yaml")
+func installCephCsiDrivers(src rookSource, active []profiles.Profile) error {
+	chartYAML := filepath.Join(src.charts, "deploy", "charts", chartOperator, "Chart.yaml")
 	version, condition, err := cephCsiOperatorDep(chartYAML)
 	if err != nil {
 		return err
@@ -327,7 +424,7 @@ func installCephCsiDrivers(dir string, active []profiles.Profile) error {
 	}
 
 	run.Printf("==> deploying ceph-csi-drivers %s (Driver CRs and driver RBAC the rook-ceph chart does not ship)\n", version)
-	valuesPath, err := writeComposed(chartCSI, values.CSIBase(), dir, active)
+	valuesPath, err := writeComposed(chartCSI, values.CSIBase(), src.config, active)
 	if err != nil {
 		return err
 	}
@@ -370,12 +467,12 @@ func cephCsiOperatorDep(chartYAML string) (version, condition string, err error)
 	return "", "", nil
 }
 
-func installRookCephCluster(dir string, active []profiles.Profile) error {
-	chartPath := filepath.Join(dir, "deploy", "charts", "rook-ceph-cluster")
+func installRookCephCluster(src rookSource, active []profiles.Profile) error {
+	chartPath := filepath.Join(src.charts, "deploy", "charts", chartCluster)
 	// Shares the "make" purpose helm home with installRookCephOperator's
-	// ensureChartDeps call — must stay sequential with it, never concurrent
+	// restoreChartDeps call — must stay sequential with it, never concurrent
 	// (invariant 2).
-	if err := ensureChartDeps(dir, "rook-ceph-cluster"); err != nil {
+	if err := restoreChartDeps(src, chartCluster); err != nil {
 		return err
 	}
 
@@ -393,11 +490,11 @@ func installRookCephCluster(dir string, active []profiles.Profile) error {
 			return err
 		}
 	}
-	base, err := clusterBase(dir, deployWorkers, nodes)
+	base, err := clusterBase(src.charts, deployWorkers, nodes)
 	if err != nil {
 		return err
 	}
-	valuesPath, err := writeComposed(chartCluster, base, dir, active)
+	valuesPath, err := writeComposed(chartCluster, base, src.config, active)
 	if err != nil {
 		return err
 	}
@@ -413,9 +510,9 @@ func installRookCephCluster(dir string, active []profiles.Profile) error {
 }
 
 // clusterBase builds the rook-ceph-cluster chart's generated layer for a
-// cluster of hosts workers. The chart's own defaults are read from the rook
-// clone at dir, because a cluster of few hosts gets the chart's pool lists
-// rewritten, whole, to fit.
+// cluster of hosts workers. The chart's own defaults are read from dir, a rook
+// clone or a chart cache entry, because a cluster of few hosts gets the
+// chart's pool lists rewritten, whole, to fit.
 func clusterBase(dir string, hosts int, nodes []values.StorageNode) (map[string]any, error) {
 	defaults, err := values.LoadFile(filepath.Join(dir, "deploy", "charts", chartCluster, "values.yaml"))
 	if err != nil {
@@ -478,7 +575,9 @@ func init() {
 	deployCmd.AddCommand(deployClusterCmd)
 
 	pf := deployCmd.PersistentFlags()
-	pf.StringVar(&deployDir, "dir", "", "path to the rook source directory (default: current directory)")
+	pf.StringVar(&deployDir, "dir", "", "path to the rook source directory (default: current directory); for a released Rook version it only locates the configuration home, its .rooket (default: the rook clone enclosing the current directory, if any)")
+	pf.StringVar(&deployRookVersion, "rook-version", "", "deploy this released Rook version from "+chartcache.Repo+" instead of a rook clone (default: the cluster's recorded version)")
+	pf.StringVar(&deployConfigDir, "config-dir", "", "configuration directory laid out like .rooket/ (default: $ROOKET_CONFIG_DIR, else the cluster's recorded one, else the rook clone's .rooket)")
 	pf.StringVar(&deployKubeContext, "context", "", "kubectl context to use (default: kind-<cluster-name>)")
 	pf.IntVar(&deployRegistryPort, "registry-port", 5001, "host port for the local OCI registry")
 	pf.StringVar(&deployNamespace, "namespace", "rook", "image namespace in the registry")
@@ -490,6 +589,6 @@ func init() {
 	pf.IntVar(&deployDiskCount, "disk-count", 1, "iSCSI disks per worker, 0 disables OSD device pinning; unset, the cluster's recorded value, which a set flag must match")
 	pf.IntVar(&deployDiskSizeGB, "disk-size", 10, "disk size in GiB (matches 'rooket block setup')")
 	pf.StringVar(&deployIQNDate, "iqn-date", "2003-01", "IQN date component (YYYY-MM); unset, the cluster's recorded value, which a set flag must match")
-	pf.StringArrayVar(&deployWith, "with", nil, "profile to enable, by name or by directory path (./dir), in addition to the clone's sticky list (repeatable)")
-	pf.StringArrayVar(&deployWithOnly, "with-only", nil, "profile to enable, by name or by directory path (./dir), replacing the clone's sticky list (repeatable)")
+	pf.StringArrayVar(&deployWith, "with", nil, "profile to enable, by name or by directory path (./dir), in addition to the configuration home's sticky list (repeatable)")
+	pf.StringArrayVar(&deployWithOnly, "with-only", nil, "profile to enable, by name or by directory path (./dir), replacing the configuration home's sticky list (repeatable)")
 }

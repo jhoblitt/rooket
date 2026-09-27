@@ -28,6 +28,10 @@ func At(dir string) Dir { return Dir{root: dir, named: true} }
 
 func (d Dir) Path() string { return d.root }
 
+// Named reports whether d is a directory the user chose with --config-dir,
+// as opposed to a rook clone's own .rooket.
+func (d Dir) Named() bool { return d.named }
+
 // Ensure creates the directory tree and a .gitignore of "*", but only for a
 // clone's own .rooket. Git suppresses a directory whose every path is
 // ignored, including the ignore file itself, so the rook checkout stays

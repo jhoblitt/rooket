@@ -160,6 +160,31 @@ func heldFile(name string) (*os.File, bool) {
 	return f, ok
 }
 
+// lockClusterExternally simulates a second process already holding cluster
+// name's lock, for a test in the same process: it takes the flock through its
+// own open file description, one lockClusterIn never sees, so this process's
+// own held map stays empty and a later LockCluster(name) contends against the
+// kernel for real instead of taking the reentrant no-op path.
+func lockClusterExternally(t *testing.T, name string) {
+	t.Helper()
+	root, err := stateDirRoot()
+	if err != nil {
+		t.Fatalf("stateDirRoot: %v", err)
+	}
+	path, err := clusterLockPath(root, name)
+	if err != nil {
+		t.Fatalf("clusterLockPath: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatalf("create state dir: %v", err)
+	}
+	f, err := acquireFlock(path, 0)
+	if err != nil {
+		t.Fatalf("acquireFlock: %v", err)
+	}
+	t.Cleanup(func() { f.Close() })
+}
+
 // pruneExecute is handed the state root it operates on, and its unit tests pass
 // a fake one with an injected remove func. A lock that resolved the ambient
 // $HOME instead would both guard the wrong directory and, in those tests, write
