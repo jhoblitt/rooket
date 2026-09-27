@@ -68,7 +68,7 @@ jobs:
 
   # Fast signal in parallel with the e2e job: a compile error, vet finding, or
   # unit-test failure reds out in ~1 minute instead of partway into a
-  # ~12-minute e2e run.
+  # 15-20-minute e2e run.
   unit:
     name: unit tests + vet
     runs-on: ubuntu-latest
@@ -240,8 +240,18 @@ jobs:
       # name from its cwd, which must then never sit inside the rook checkout.
       ROOKET_NAME: rook
     steps:
+      # Deleting the preinstalled toolchains takes 1-5 minutes, so do it only
+      # when the runner is short. The worst case needs about 60G: three 10GiB
+      # sparse OSD images written full, plus rook's build and the cluster's
+      # images.
       - name: Free up runner disk
         run: |
+          df -h /
+          avail_gb="$(df --output=avail -BG / | tail -n1 | tr -dc '0-9')"
+          if [ "$avail_gb" -ge 60 ]; then
+            echo "${avail_gb}G free; skipping cleanup"
+            exit 0
+          fi
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
             /opt/hostedtoolcache/CodeQL /usr/local/.ghcup /usr/lib/jvm \
             /usr/share/swift /usr/local/share/powershell || true
@@ -305,13 +315,17 @@ jobs:
       - name: Set up iSCSI OSD disks
         run: ./rooket block setup --workers "$WORKERS" --disk-count 1
 
+      # The suite routes every command's output through GinkgoWriter, which
+      # Ginkgo discards for a passing spec and holds back until the end of a
+      # failing one; -ginkgo.v streams it live instead.
       - name: Run e2e suite
         run: |
           ROOK_DIR="${{ github.workspace }}/rook" \
           ROOKET_BIN="${{ github.workspace }}/rooket" \
           ROOKET_WORKERS="$WORKERS" \
           ROOKET_SKIP_BLOCK=true \
-            ./e2e.test -test.v -test.timeout 100m
+            ./e2e.test -test.v -test.timeout 100m \
+              -ginkgo.v -ginkgo.poll-progress-after=10m -ginkgo.poll-progress-interval=5m
 
       # The cache only ever warns on failure, so a green e2e says nothing about
       # whether it worked. Assert it actually served the cluster, and that the
