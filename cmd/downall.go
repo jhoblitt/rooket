@@ -152,8 +152,9 @@ func downAllRun(cmd *cobra.Command) error {
 		}
 	}
 
-	// blocked marks clusters that survived a failed delete: their disks may still
-	// be in use, so nothing downstream may zap, teardown, or remove their state.
+	// blocked marks clusters that survived a failed delete, or that another
+	// rooket holds: their disks may still be in use, so nothing downstream may
+	// zap, teardown, or remove their state.
 	//
 	// The clusters share no kind cluster, registry, or disk, so they are deleted
 	// concurrently — N deletes cost roughly one delete's wallclock, not N — with
@@ -245,12 +246,28 @@ func downAllRun(cmd *cobra.Command) error {
 			if !hasState[n] || blocked[n] {
 				continue
 			}
+			// Taken so that a cluster another rooket is working on keeps its
+			// state, and so that the lock file can go with it: only its holder
+			// may delete one. A directory whose name LockCluster refuses has
+			// no lock anyone could hold, and goes unlocked.
+			release := func() {}
+			if validateClusterName(n) == nil {
+				locked, err := LockCluster(n)
+				if err != nil {
+					blocked[n] = true
+					run.Printf("warning: keeping the state dir of cluster %q: %v\n", n, err)
+					continue
+				}
+				release = locked
+			}
 			dir := filepath.Join(root, n)
 			if err := os.RemoveAll(dir); err != nil {
 				run.Printf("warning: remove state dir %s: %v\n", dir, err)
 			} else {
 				run.Printf("removed state dir %s\n", dir)
+				removeClusterLockOnRelease(n)
 			}
+			release()
 		}
 	} else if downDeleteDisks {
 		run.Printf("block teardown skipped by --skip-block; disk images and state dirs preserved\n")

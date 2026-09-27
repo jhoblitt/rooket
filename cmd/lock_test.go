@@ -2,11 +2,13 @@ package cmd
 
 import (
 	"bufio"
+	"errors"
 	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 )
 
@@ -139,6 +141,97 @@ func TestClusterLockFileSitsOutsideTheStateDir(t *testing.T) {
 	}
 }
 
+// A full teardown deletes its cluster's lock file, and another run may have
+// opened that file just before. The flock it then takes is on an inode no path
+// names, while a third run creates a fresh file at the path and locks that one.
+// A locker has to notice, and lock the file the path names now.
+func TestAcquireFlockLocksTheFileThePathNamesNow(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "c.lock")
+	keep(t, &betweenOpenAndFlock)
+	opens := 0
+	betweenOpenAndFlock = func(p string) {
+		opens++
+		if opens > 1 {
+			return
+		}
+		// Between this open and its flock, the holder deletes the file and
+		// another run creates one in its place.
+		if err := os.Remove(p); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, nil, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	f, err := acquireFlock(path, 0)
+	if err != nil {
+		t.Fatalf("acquireFlock: %v", err)
+	}
+	defer f.Close()
+	locked, err := f.Stat()
+	if err != nil {
+		t.Fatal(err)
+	}
+	current, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !os.SameFile(locked, current) {
+		t.Fatalf("acquireFlock locked a file the path no longer names")
+	}
+	other, err := os.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer other.Close()
+	if err := syscall.Flock(int(other.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); !errors.Is(err, syscall.EWOULDBLOCK) {
+		t.Errorf("flock of the file at the path = %v, want EWOULDBLOCK: it should already be held", err)
+	}
+}
+
+// A lock file is deleted only as its holder lets go, so a nested release —
+// which lets nothing go — must not delete it.
+func TestClusterLockFileRemovedByTheOutermostRelease(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	const name = "lock-removed"
+	root, err := stateDirRoot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	path, err := clusterLockPath(root, name)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	outer, err := LockCluster(name)
+	if err != nil {
+		t.Fatalf("outer lock: %v", err)
+	}
+	inner, err := LockCluster(name)
+	if err != nil {
+		t.Fatalf("nested lock: %v", err)
+	}
+	removeClusterLockOnRelease(name)
+	inner()
+	if _, err := os.Stat(path); err != nil {
+		t.Errorf("a nested release deleted the lock file the outer holder still holds: %v", err)
+	}
+	outer()
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Errorf("lock file survived the release that was to remove it (stat: %v)", err)
+	}
+
+	again, err := LockCluster(name)
+	if err != nil {
+		t.Fatalf("lock after the file was removed: %v", err)
+	}
+	again()
+	if _, err := os.Stat(path); err != nil {
+		t.Errorf("a plain release removed the lock file: %v", err)
+	}
+}
+
 func TestFormatLockOwner(t *testing.T) {
 	if got := formatLockOwner("4321 rooket up --workers 3\n"); got != " (pid 4321: rooket up --workers 3)" {
 		t.Errorf("formatLockOwner = %q", got)
@@ -156,8 +249,11 @@ func TestFormatLockOwner(t *testing.T) {
 func heldFile(name string) (*os.File, bool) {
 	heldMu.Lock()
 	defer heldMu.Unlock()
-	f, ok := held[name]
-	return f, ok
+	l, ok := held[name]
+	if !ok {
+		return nil, false
+	}
+	return l.f, true
 }
 
 // lockClusterExternally simulates a second process already holding cluster
@@ -194,14 +290,24 @@ func TestPruneExecuteLocksTheRootItWasGiven(t *testing.T) {
 	t.Setenv("HOME", realHome)
 	root := t.TempDir()
 
+	// Read while the orphan is removed: that is when the lock is held, and
+	// the release that follows deletes its file.
+	var lockedAt string
+	remove := func(string) error {
+		heldMu.Lock()
+		defer heldMu.Unlock()
+		if l, ok := held["orphan"]; ok {
+			lockedAt = l.path
+		}
+		return nil
+	}
 	if err := pruneExecute(root, []string{"orphan"}, nil,
-		func([]iscsiDisk) error { return nil },
-		func(string) error { return nil }, io.Discard); err != nil {
+		func([]iscsiDisk) error { return nil }, remove, io.Discard); err != nil {
 		t.Fatalf("pruneExecute: %v", err)
 	}
 
-	if _, err := os.Stat(filepath.Join(root, "orphan.lock")); err != nil {
-		t.Errorf("expected the lock in the root prune was given: %v", err)
+	if want := filepath.Join(root, "orphan.lock"); lockedAt != want {
+		t.Errorf("prune removed the orphan holding the lock at %q, want %q in the root it was given", lockedAt, want)
 	}
 	if entries, _ := os.ReadDir(filepath.Join(realHome, ".local", "share", "rooket")); len(entries) != 0 {
 		t.Errorf("prune wrote %d entries into the ambient state root", len(entries))

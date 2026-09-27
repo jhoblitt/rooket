@@ -93,6 +93,8 @@ Example:
 		// this check and the report that it does not exist.
 		if _, recorded := readShape(downName); !recorded && !clusterLeftovers(downName, lio.DefaultRoot, downIQNDate) {
 			run.Printf("cluster %q not found: no kind cluster, registry, state directory, or iSCSI targets; nothing to tear down\n", downName)
+			// Nothing is left for its lock file to guard.
+			removeClusterLockOnRelease(downName)
 			if downDeleteCache {
 				return removeSharedCache()
 			}
@@ -134,6 +136,7 @@ Example:
 						run.Printf("warning: remove state dir %s: %v\n", dir, err)
 					} else {
 						run.Printf("removed state dir %s\n", dir)
+						removeClusterLockOnRelease(downName)
 					}
 				}
 			}

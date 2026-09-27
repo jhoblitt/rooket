@@ -174,7 +174,122 @@ func TestDownOfAnUnknownClusterSaysSoOnce(t *testing.T) {
 					t.Errorf("down of an unknown cluster ran %s:\n%s", cmd, got)
 				}
 			}
+			if _, err := os.Stat(clusterLockFile(t, "w2-unknown")); !os.IsNotExist(err) {
+				t.Errorf("down of an unknown cluster left the lock file it took (stat: %v)", err)
+			}
 		})
+	}
+}
+
+// clusterLockFile returns where a cluster's lock file lives.
+func clusterLockFile(t *testing.T, name string) string {
+	t.Helper()
+	root, err := stateDirRoot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	path, err := clusterLockPath(root, name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+// The full teardown leaves nothing of the cluster behind, its lock file
+// included; a plain down keeps the cluster's state, and the lock file with it.
+func TestDownRemovesTheLockFileOnlyWithTheState(t *testing.T) {
+	for _, c := range []struct {
+		args []string
+		kept bool
+	}{
+		{args: nil, kept: true},
+		{args: []string{"--delete-disks"}, kept: false},
+	} {
+		t.Run(fmt.Sprintf("%v", c.args), func(t *testing.T) {
+			t.Setenv("HOME", t.TempDir())
+			stubDownHost(t, downHost{})
+			const name = "w2-lockfile"
+			if err := writeShape(name, clusterShape{Workers: 1, DiskCount: 1, IQNDate: "2003-01"}); err != nil {
+				t.Fatal(err)
+			}
+
+			if _, err := runDown(t, append([]string{"--name", name}, c.args...)...); err != nil {
+				t.Fatalf("down: %v", err)
+			}
+			_, err := os.Stat(clusterLockFile(t, name))
+			if c.kept && err != nil {
+				t.Errorf("down %v removed the lock file of a cluster whose state it kept: %v", c.args, err)
+			}
+			if !c.kept && !os.IsNotExist(err) {
+				t.Errorf("down %v left the lock file of the cluster it removed (stat: %v)", c.args, err)
+			}
+		})
+	}
+}
+
+// down --all --delete-disks removes the lock file of every cluster whose state
+// it removes. A cluster another rooket holds keeps both, and the sweep says so.
+func TestDownAllDeleteDisksRemovesTheLockFiles(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	stubDownHost(t, downHost{})
+	gone, busy := []string{"w2-all-a", "w2-all-b"}, "w2-all-busy"
+	for _, n := range append(slices.Clone(gone), busy) {
+		if _, err := ensureStateDir(n); err != nil {
+			t.Fatal(err)
+		}
+		release, err := LockCluster(n)
+		if err != nil {
+			t.Fatal(err)
+		}
+		release()
+	}
+	lockClusterExternally(t, busy)
+
+	_, err := runDown(t, "--all", "--delete-disks", "--force")
+	if err == nil || !strings.Contains(err.Error(), busy) {
+		t.Errorf("down --all = %v, want the held cluster %q reported", err, busy)
+	}
+	for _, n := range gone {
+		dir, _ := stateDirPath(n)
+		if _, err := os.Stat(dir); !os.IsNotExist(err) {
+			t.Errorf("%s: state dir survived (stat: %v)", n, err)
+		}
+		if _, err := os.Stat(clusterLockFile(t, n)); !os.IsNotExist(err) {
+			t.Errorf("%s: lock file survived its cluster (stat: %v)", n, err)
+		}
+	}
+	dir, _ := stateDirPath(busy)
+	if _, err := os.Stat(dir); err != nil {
+		t.Errorf("the state dir of a cluster another rooket holds was removed: %v", err)
+	}
+	if _, err := os.Stat(clusterLockFile(t, busy)); err != nil {
+		t.Errorf("the lock file another rooket holds was removed: %v", err)
+	}
+}
+
+// A state dir whose name cannot be a cluster's — made by hand, say — has no
+// lock anyone could hold, so down --all --delete-disks removes it unlocked and
+// the sweep succeeds.
+func TestDownAllDeleteDisksRemovesAStateDirNoClusterCouldOwn(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	stubDownHost(t, downHost{})
+	root, err := stateDirRoot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	const name = "Hand_Made"
+	if validateClusterName(name) == nil {
+		t.Fatalf("%q is a valid cluster name", name)
+	}
+	if err := os.MkdirAll(filepath.Join(root, name), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := runDown(t, "--all", "--delete-disks", "--force"); err != nil {
+		t.Errorf("down --all = %v, want success", err)
+	}
+	if entries, _ := os.ReadDir(root); len(entries) != 0 {
+		t.Errorf("state root holds %v, want %s removed and nothing left", entries, name)
 	}
 }
 
