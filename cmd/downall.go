@@ -152,10 +152,49 @@ func downAllRun(cmd *cobra.Command) error {
 		}
 	}
 
-	// blocked marks clusters that survived a failed delete, or that another
-	// rooket holds: their disks may still be in use, so nothing downstream may
+	// blocked marks clusters that another rooket holds, or that survived a
+	// failed delete: their disks may still be in use, so nothing downstream may
 	// zap, teardown, or remove their state.
+	blocked := map[string]bool{}
+
+	// Every cluster the sweep will touch is locked before anything of any of
+	// them is removed, and stays locked until the sweep is done with it: the
+	// lock is the only sign that another rooket is using a cluster, and it says
+	// so only while this one holds it. A cluster with no kind cluster may be an
+	// up that has not created it yet, and one released after its delete could
+	// be taken by an up before the batched teardown below reached its targets.
+	// A cluster someone else is working on is skipped rather than failing the
+	// sweep — the point of --all is to clear whatever it can.
 	//
+	// Holding them all at once cannot deadlock: rooket only ever tries a
+	// cluster lock (see LockCluster), so no one holding one waits for another.
+	tearDownDisks := downDeleteDisks && !downSkipBlock
+	var releases []func()
+	releaseAll := func() {
+		for _, release := range releases {
+			release()
+		}
+		releases = nil
+	}
+	defer releaseAll()
+	for _, n := range names {
+		if len(live[n]) == 0 {
+			// A cluster with only a state dir is touched only by the disk
+			// teardown, and one whose name LockCluster refuses has no lock
+			// anyone could hold, so it goes unlocked.
+			if !tearDownDisks || validateClusterName(n) != nil {
+				continue
+			}
+		}
+		release, err := LockCluster(n)
+		if err != nil {
+			blocked[n] = true
+			run.Printf("warning: skipping cluster %q: %v\n", n, err)
+			continue
+		}
+		releases = append(releases, release)
+	}
+
 	// The clusters share no kind cluster, registry, or disk, so they are deleted
 	// concurrently — N deletes cost roughly one delete's wallclock, not N — with
 	// each cluster's blocked-ness recorded into its own slot and merged after the
@@ -168,21 +207,9 @@ func downAllRun(cmd *cobra.Command) error {
 	for i, n := range names {
 		delFns[i] = func(w io.Writer) error {
 			engs := live[n]
-			if len(engs) == 0 {
+			if len(engs) == 0 || blocked[n] {
 				return nil
 			}
-			// Each cluster is taken and released on its own. A sweep that held
-			// every lock at once would need an ordering to stay deadlock-free,
-			// and these run concurrently. A cluster someone else is working on
-			// is skipped rather than failing the sweep — the point of --all is
-			// to clear whatever it can.
-			release, err := LockCluster(n)
-			if err != nil {
-				blockedByIdx[i] = true
-				run.Fprintf(w, "warning: skipping cluster %q: %v\n", n, err)
-				return nil
-			}
-			defer release()
 			run.Fprintf(w, "==> deleting cluster %q\n", n)
 			kc, _ := kubeconfigPath(n)
 			for _, eng := range engs {
@@ -218,14 +245,13 @@ func downAllRun(cmd *cobra.Command) error {
 	if err := runConcurrent(os.Stdout, delFns...); err != nil {
 		return err
 	}
-	blocked := map[string]bool{}
 	for i, n := range names {
 		if blockedByIdx[i] {
 			blocked[n] = true
 		}
 	}
 
-	if downDeleteDisks && !downSkipBlock {
+	if tearDownDisks {
 		var disks []iscsiDisk
 		for _, n := range names {
 			// --all rejects --workers/--disk-count, so there are no per-cluster
@@ -246,20 +272,6 @@ func downAllRun(cmd *cobra.Command) error {
 			if !hasState[n] || blocked[n] {
 				continue
 			}
-			// Taken so that a cluster another rooket is working on keeps its
-			// state, and so that the lock file can go with it: only its holder
-			// may delete one. A directory whose name LockCluster refuses has
-			// no lock anyone could hold, and goes unlocked.
-			release := func() {}
-			if validateClusterName(n) == nil {
-				locked, err := LockCluster(n)
-				if err != nil {
-					blocked[n] = true
-					run.Printf("warning: keeping the state dir of cluster %q: %v\n", n, err)
-					continue
-				}
-				release = locked
-			}
 			dir := filepath.Join(root, n)
 			if err := os.RemoveAll(dir); err != nil {
 				run.Printf("warning: remove state dir %s: %v\n", dir, err)
@@ -267,11 +279,11 @@ func downAllRun(cmd *cobra.Command) error {
 				run.Printf("removed state dir %s\n", dir)
 				removeClusterLockOnRelease(n)
 			}
-			release()
 		}
 	} else if downDeleteDisks {
 		run.Printf("block teardown skipped by --skip-block; disk images and state dirs preserved\n")
 	}
+	releaseAll()
 
 	// Safe to run even with clusters left behind: the cache is a soft
 	// dependency, so a node that outlives it falls back to pulling upstream.

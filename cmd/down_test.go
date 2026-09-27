@@ -1,11 +1,13 @@
 package cmd
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
 	"strings"
+	"syscall"
 	"testing"
 
 	"github.com/jhoblitt/rooket/internal/engine"
@@ -29,8 +31,8 @@ type downHost struct {
 // stubDownHost puts stubs for every command a down run can reach on PATH, and
 // nothing else, so no real kind, container engine, or iSCSI tool can run — as
 // root or through sudo. Each stub appends its invocation to the returned log.
-// targetcli fails every delete, as the real one does for an object that does
-// not exist.
+// kind stops listing a cluster once it has been asked to delete it. targetcli
+// fails every delete, as the real one does for an object that does not exist.
 func stubDownHost(t *testing.T, h downHost) string {
 	t.Helper()
 	dir := t.TempDir()
@@ -42,7 +44,11 @@ func stubDownHost(t *testing.T, h downHost) string {
 		}
 		return "printf '%s\\n' '" + strings.Join(lines, "' '") + "'"
 	}
-	kindList := printLines(h.live)
+	// Only shell builtins are on PATH, so a deletion is a marker file rather
+	// than an edit of a list.
+	deleted := filepath.Join(dir, "deleted-")
+	kindList := fmt.Sprintf(`for n in %s; do [ -e %q"$n" ] || printf '%%s\n' "$n"; done`,
+		strings.Join(h.live, " "), deleted)
 	if h.kindFails {
 		kindList = "exit 1"
 	}
@@ -51,7 +57,8 @@ func stubDownHost(t *testing.T, h downHost) string {
 		psList = "exit 1"
 	}
 	stubs := map[string]string{
-		"kind":      fmt.Sprintf("case \"$*\" in\n\"get clusters\") %s ;;\nesac", kindList),
+		"kind": fmt.Sprintf("case \"$*\" in\n\"get clusters\") %s ;;\n\"delete cluster --name \"*) : > %q\"$4\" ;;\nesac",
+			kindList, deleted),
 		"podman":    fmt.Sprintf("case \"$1\" in\nps) %s ;;\nesac", psList),
 		"targetcli": "case \"$*\" in\n*\" delete \"*) echo 'No such path' >&2; exit 1 ;;\nesac",
 		// Drops -n and runs what it was handed, when that is a path: itemized
@@ -264,6 +271,122 @@ func TestDownAllDeleteDisksRemovesTheLockFiles(t *testing.T) {
 	}
 	if _, err := os.Stat(clusterLockFile(t, busy)); err != nil {
 		t.Errorf("the lock file another rooket holds was removed: %v", err)
+	}
+}
+
+// lockProbeEnv makes a re-exec of this test binary report whether the lock of
+// the cluster owning the target IQN it names is held, appending the answer to
+// the file lockProbeLogEnv names. The stub targetcli of probeLocksAtTargetDelete
+// runs it, so the answer is the lock's state at the moment a target goes.
+const (
+	lockProbeEnv    = "ROOKET_TEST_LOCK_PROBE"
+	lockProbeLogEnv = "ROOKET_TEST_LOCK_PROBE_LOG"
+)
+
+// probeLocksAtTargetDelete replaces the stub targetcli beside logPath with one
+// that, before each target delete, re-runs the named test as a lock probe (see
+// lockProbeEnv). The probe is a separate process because a flock is owned by
+// an open file description: only another process sees the sweep's lock.
+func probeLocksAtTargetDelete(t *testing.T, logPath, test string) {
+	t.Helper()
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	script := fmt.Sprintf(`#!/bin/sh
+printf '%%s %%s\n' "${0##*/}" "$*" >> %[1]q
+case "$*" in
+"/iscsi delete "*) %[2]s="$3" %[3]s=%[1]q %[4]q -test.run='^%[5]s$' >/dev/null 2>&1 ;;
+esac
+case "$*" in
+*" delete "*) echo 'No such path' >&2; exit 1 ;;
+esac
+exit 0
+`, logPath, lockProbeEnv, lockProbeLogEnv, exe, test)
+	if err := os.WriteFile(filepath.Join(filepath.Dir(logPath), "targetcli"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// probeClusterLock is the lock probe's side: it records whether some process
+// holds the lock of the cluster owning iqn. It only tries the flock and lets go
+// at once, so it cannot itself keep anyone out.
+func probeClusterLock(t *testing.T, iqn, logPath string) {
+	_, name, ok := parseRooketIQN(iqn)
+	if !ok {
+		t.Fatalf("%q is not one of rooket's target IQNs", iqn)
+	}
+	state := "free"
+	if f, err := os.Open(clusterLockFile(t, name)); err == nil {
+		if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); errors.Is(err, syscall.EWOULDBLOCK) {
+			state = "held"
+		}
+		f.Close()
+	}
+	out, err := os.OpenFile(logPath, os.O_APPEND|os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer out.Close()
+	fmt.Fprintf(out, "lock %s %s\n", name, state)
+}
+
+// down --all --delete-disks removes a cluster's iSCSI targets, disk images, and
+// state only while it holds that cluster's lock. A cluster another rooket holds
+// — an up that has not created its kind cluster yet, say — keeps all of them,
+// and the sweep reports it and fails.
+func TestDownAllTearsDownOnlyTheClustersItHolds(t *testing.T) {
+	if iqn := os.Getenv(lockProbeEnv); iqn != "" {
+		probeClusterLock(t, iqn, os.Getenv(lockProbeLogEnv))
+		return
+	}
+	t.Setenv("HOME", t.TempDir())
+	const live, parked, busy = "w2-held-live", "w2-held-parked", "w2-held-busy"
+	log := stubDownHost(t, downHost{live: []string{live}})
+	probeLocksAtTargetDelete(t, log, t.Name())
+	images := map[string]string{}
+	for _, n := range []string{live, parked, busy} {
+		dir, err := ensureStateDir(n)
+		if err != nil {
+			t.Fatal(err)
+		}
+		images[n] = filepath.Join(dir, "worker0-disk0.img")
+		if err := os.WriteFile(images[n], nil, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	lockClusterExternally(t, busy)
+
+	_, err := runDown(t, "--all", "--delete-disks", "--force")
+	if err == nil || !strings.Contains(err.Error(), busy) || strings.Contains(err.Error(), live) || strings.Contains(err.Error(), parked) {
+		t.Errorf("down --all = %v, want it to fail naming only the held cluster %q", err, busy)
+	}
+	got := calls(t, log)
+	want := append(workerTargets(live, 0), workerTargets(parked, 0)...)
+	slices.Sort(want)
+	if deleted := deletedTargets(got); !slices.Equal(deleted, want) {
+		t.Errorf("deleted targets %v, want only the unheld clusters' %v", deleted, want)
+	}
+	probes := 0
+	for line := range strings.SplitSeq(got, "\n") {
+		if rest, ok := strings.CutPrefix(line, "lock "); ok {
+			probes++
+			if !strings.HasSuffix(rest, " held") {
+				t.Errorf("a target was deleted while its cluster's lock was not held: %s", line)
+			}
+		}
+	}
+	if probes != len(want) {
+		t.Errorf("the lock was probed at %d target delete(s), want %d:\n%s", probes, len(want), got)
+	}
+	for _, n := range []string{live, parked} {
+		dir, _ := stateDirPath(n)
+		if _, err := os.Stat(dir); !os.IsNotExist(err) {
+			t.Errorf("%s: state dir survived (stat: %v)", n, err)
+		}
+	}
+	if _, err := os.Stat(images[busy]); err != nil {
+		t.Errorf("the disk image of a cluster another rooket holds was removed: %v", err)
 	}
 }
 
