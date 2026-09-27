@@ -111,7 +111,7 @@ func TestRequireHostNetwork(t *testing.T) {
 		{name: "not JSON", list: "error: the server doesn't have a resource type", wantErr: "parse"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			err := requireHostNetwork(tc.list)
+			err := requireHostNetwork("c", tc.list)
 			if tc.wantErr == "" {
 				if err != nil {
 					t.Fatalf("requireHostNetwork() = %v, want nil", err)
@@ -228,23 +228,24 @@ func TestExportCephConfigRefusesAClusterThatIsNotHostNetworked(t *testing.T) {
 			calls := stubKubectl(t, answers)
 			out := filepath.Join(t.TempDir(), "ceph")
 
-			_, err := exportCephConfig(out, &bytes.Buffer{})
+			_, err := exportCephConfig("c", out, &bytes.Buffer{})
 			if err == nil {
 				t.Fatal("exportCephConfig() succeeded, want a refusal naming the host-network profile")
 			}
 			// Rook does not support changing a running cluster's network, so
-			// the advice is to recreate it host-networked and keep it so; the
+			// the advice is to recreate it host-networked and keep it so, naming
+			// the cluster, since a bare down could pick another one; the
 			// profile is added to the sticky list rather than replacing it,
 			// and a cluster with no configuration home can get one from
 			// --config-dir.
 			msg := err.Error()
-			for _, want := range []string{"rooket down", "rooket up --with host-network",
+			for _, want := range []string{"rooket down --name c", "rooket up --name c --with host-network",
 				"add host-network to the profiles list", "config.yaml", "--config-dir"} {
 				if !strings.Contains(msg, want) {
 					t.Errorf("exportCephConfig() = %v, want the refusal to say %q", err, want)
 				}
 			}
-			if down, up := strings.Index(msg, "rooket down"), strings.Index(msg, "rooket up --with host-network"); down > up {
+			if down, up := strings.Index(msg, "rooket down --name c"), strings.Index(msg, "rooket up --name c --with host-network"); down > up {
 				t.Errorf("exportCephConfig() = %v, want the cluster taken down before it is brought up host-networked", err)
 			}
 			for _, bad := range []string{"profiles: [", "for one run"} {
@@ -267,7 +268,7 @@ func TestExportCephConfigWritesConfAndKeyring(t *testing.T) {
 	out := filepath.Join(t.TempDir(), "missing", "ceph")
 	var warn bytes.Buffer
 
-	conf, err := exportCephConfig(out, &warn)
+	conf, err := exportCephConfig("c", out, &warn)
 	if err != nil {
 		t.Fatalf("exportCephConfig: %v", err)
 	}
@@ -298,7 +299,7 @@ func TestExportCephConfigNamesTheKeyringByAbsolutePath(t *testing.T) {
 	dir := t.TempDir()
 	t.Chdir(dir)
 
-	path, err := exportCephConfig("rel", &bytes.Buffer{})
+	path, err := exportCephConfig("c", "rel", &bytes.Buffer{})
 	if err != nil {
 		t.Fatalf("exportCephConfig: %v", err)
 	}
@@ -328,7 +329,7 @@ func TestExportCephConfigReplacesAWiderKeyring(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if _, err := exportCephConfig(out, &bytes.Buffer{}); err != nil {
+	if _, err := exportCephConfig("c", out, &bytes.Buffer{}); err != nil {
 		t.Fatalf("exportCephConfig: %v", err)
 	}
 	assertFile(t, keyring, 0o600, adminKeyring(cephKey(1))+"\n")
@@ -359,7 +360,7 @@ func TestExportCephConfigWarnsOnANonAESKey(t *testing.T) {
 			out := t.TempDir()
 			var warn bytes.Buffer
 
-			if _, err := exportCephConfig(out, &warn); err != nil {
+			if _, err := exportCephConfig("c", out, &warn); err != nil {
 				t.Fatalf("exportCephConfig: %v", err)
 			}
 			for _, want := range tc.want {
@@ -393,7 +394,7 @@ func TestExportCephConfigRefusesAnOutTheConfCannotCarry(t *testing.T) {
 			calls := stubKubectl(t, hostNetworked(1))
 			out := filepath.Join(t.TempDir(), "we"+c+"ird")
 
-			_, err := exportCephConfig(out, &bytes.Buffer{})
+			_, err := exportCephConfig("c", out, &bytes.Buffer{})
 			if err == nil || !strings.Contains(err.Error(), "--out") {
 				t.Fatalf("exportCephConfig(%q) = %v, want an error about --out", out, err)
 			}
@@ -417,7 +418,7 @@ func TestExportCephConfigWritesNothingWhenAQueryFails(t *testing.T) {
 			stubKubectl(t, answers)
 			out := filepath.Join(t.TempDir(), "ceph")
 
-			if _, err := exportCephConfig(out, &bytes.Buffer{}); err == nil {
+			if _, err := exportCephConfig("c", out, &bytes.Buffer{}); err == nil {
 				t.Fatal("exportCephConfig succeeded with a failing query")
 			}
 			if _, err := os.Stat(out); !os.IsNotExist(err) {
@@ -440,7 +441,7 @@ func TestExportCephConfigNamesAQueryItsBudgetCutOff(t *testing.T) {
 	}
 	out := filepath.Join(t.TempDir(), "ceph")
 
-	_, err := exportCephConfig(out, &bytes.Buffer{})
+	_, err := exportCephConfig("c", out, &bytes.Buffer{})
 	want := fmt.Sprintf("read the mon addresses: timed out: its %s budget ran out", cephConfigQueryBudget)
 	if err == nil || err.Error() != want {
 		t.Fatalf("exportCephConfig() = %v, want %q", err, want)
@@ -455,7 +456,7 @@ func TestExportCephConfigNamesAQueryItsBudgetCutOff(t *testing.T) {
 func TestExportCephConfigBoundsWhatRunsInTheToolbox(t *testing.T) {
 	calls := stubKubectl(t, hostNetworked(1))
 
-	if _, err := exportCephConfig(t.TempDir(), &bytes.Buffer{}); err != nil {
+	if _, err := exportCephConfig("c", t.TempDir(), &bytes.Buffer{}); err != nil {
 		t.Fatalf("exportCephConfig: %v", err)
 	}
 	ran := 0

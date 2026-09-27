@@ -49,10 +49,10 @@ ceph-config refuses a cluster that is not host-networked. Rook does not
 support changing a running cluster's network, so recreate such a cluster with
 the host-network profile:
 
-  rooket down
-  rooket up --with host-network
+  rooket down --name <name>
+  rooket up --name <name> --with host-network
 
-and add host-network to the profiles list in the configuration home's
+naming the same cluster, and add host-network to the profiles list in the configuration home's
 config.yaml (a clone's .rooket, or --config-dir) from that first up on, so a
 later up keeps it rather than moving the running cluster off host networking.
 
@@ -75,7 +75,7 @@ is not: an AES256KRB5 key, for one, cannot be parsed by librados older than
 		if _, err := requireKubeconfig(name); err != nil {
 			return err
 		}
-		conf, err := exportCephConfig(cephConfigOut, cmd.ErrOrStderr())
+		conf, err := exportCephConfig(name, cephConfigOut, cmd.ErrOrStderr())
 		if err != nil {
 			return err
 		}
@@ -106,11 +106,11 @@ func outPaths(out string) (string, string, error) {
 	return out, keyringPath, nil
 }
 
-// exportCephConfig writes ceph.conf and the client.admin keyring into out,
-// creating it, and returns the conf's absolute path. Everything is read from
-// the cluster before anything is written, so a failed read leaves out
-// untouched.
-func exportCephConfig(out string, warn io.Writer) (string, error) {
+// exportCephConfig writes cluster name's ceph.conf and client.admin keyring
+// into out, creating it, and returns the conf's absolute path. Everything is
+// read from the cluster before anything is written, so a failed read leaves
+// out untouched.
+func exportCephConfig(name, out string, warn io.Writer) (string, error) {
 	out, keyringPath, err := outPaths(out)
 	if err != nil {
 		return "", err
@@ -119,7 +119,7 @@ func exportCephConfig(out string, warn io.Writer) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("read the CephCluster: %w", err)
 	}
-	if err := requireHostNetwork(clusters); err != nil {
+	if err := requireHostNetwork(name, clusters); err != nil {
 		return "", err
 	}
 	dump, err := cephConfigQuery(toolboxCeph("mon", "dump", "-f", "json")...)
@@ -169,8 +169,9 @@ func cephConfigQuery(args ...string) (string, error) {
 // cannot reach them, so a conf naming them could never connect. It takes
 // `kubectl get cephcluster -o json` and decides on the first CephCluster, the
 // one rooket deploys, as Rook's NetworkSpec.IsHost reads a spec: provider
-// "host", or the legacy hostNetwork with no provider.
-func requireHostNetwork(list string) error {
+// "host", or the legacy hostNetwork with no provider. The refusal names the
+// cluster in its advice, because a bare `rooket down` could select another.
+func requireHostNetwork(name, list string) error {
 	var l cephClusterList
 	if err := json.Unmarshal([]byte(list), &l); err != nil {
 		return fmt.Errorf("parse the CephCluster list: %w", err)
@@ -188,9 +189,9 @@ func requireHostNetwork(list string) error {
 	}
 	return fmt.Errorf("the cluster is not host-networked (its CephCluster's network.provider is %s, not \"host\"), "+
 		"so its mons listen on pod IPs the host cannot reach. Rook does not support changing a running cluster's "+
-		"network, so recreate it with the host-network profile: rooket down, then rooket up --with host-network, "+
-		"and add host-network to the profiles list in the configuration home's config.yaml (a clone's .rooket, "+
-		"or --config-dir) so later ups keep it", got)
+		"network, so recreate it with the host-network profile: rooket down --name %[2]s, then "+
+		"rooket up --name %[2]s --with host-network, and add host-network to the profiles list in the "+
+		"configuration home's config.yaml (a clone's .rooket, or --config-dir) so later ups keep it", got, name)
 }
 
 // monDump is the part of `ceph mon dump -f json` ceph-config reads.
