@@ -490,6 +490,6 @@ func init() {
 	pf.IntVar(&deployDiskCount, "disk-count", 1, "iSCSI disks per worker, 0 disables OSD device pinning; unset, the cluster's recorded value, which a set flag must match")
 	pf.IntVar(&deployDiskSizeGB, "disk-size", 10, "disk size in GiB (matches 'rooket block setup')")
 	pf.StringVar(&deployIQNDate, "iqn-date", "2003-01", "IQN date component (YYYY-MM); unset, the cluster's recorded value, which a set flag must match")
-	pf.StringArrayVar(&deployWith, "with", nil, "profile to enable, in addition to the clone's sticky list (repeatable)")
-	pf.StringArrayVar(&deployWithOnly, "with-only", nil, "profile to enable, replacing the clone's sticky list (repeatable)")
+	pf.StringArrayVar(&deployWith, "with", nil, "profile to enable, by name or by directory path (./dir), in addition to the clone's sticky list (repeatable)")
+	pf.StringArrayVar(&deployWithOnly, "with-only", nil, "profile to enable, by name or by directory path (./dir), replacing the clone's sticky list (repeatable)")
 }

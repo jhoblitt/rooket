@@ -406,7 +406,7 @@ func init() {
 	upCmd.Flags().BoolVar(&upSkipDeploy, "skip-deploy", false, "skip 'deploy'")
 	upCmd.Flags().BoolVar(&upForceBuild, "force-build", false, "run make even when the rook tree is unchanged since the last push")
 	upCmd.Flags().StringVar(&upNodeImage, "node-image", defaultNodeImage, "kindest/node image for the cluster, pre-pulled before create (pin tag@digest for a reproducible Kubernetes version)")
-	upCmd.Flags().StringArrayVar(&upWith, "with", nil, "profile to enable, in addition to the clone's sticky list (repeatable)")
-	upCmd.Flags().StringArrayVar(&upWithOnly, "with-only", nil, "profile to enable, replacing the clone's sticky list (repeatable)")
+	upCmd.Flags().StringArrayVar(&upWith, "with", nil, "profile to enable, by name or by directory path (./dir), in addition to the clone's sticky list (repeatable)")
+	upCmd.Flags().StringArrayVar(&upWithOnly, "with-only", nil, "profile to enable, by name or by directory path (./dir), replacing the clone's sticky list (repeatable)")
 	upCmd.MarkFlagsMutuallyExclusive("skip-build", "force-build")
 }

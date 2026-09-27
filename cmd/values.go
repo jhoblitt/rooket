@@ -35,7 +35,7 @@ var valuesShowCmd = &cobra.Command{
 		if err != nil {
 			return err
 		}
-		charts := []string{chartOperator, chartCluster, chartCSI}
+		charts := allCharts
 		if len(args) == 1 {
 			c, err := chartName(args[0])
 			if err != nil {
@@ -133,8 +133,8 @@ func init() {
 	pf.StringVar(&valuesDir, "dir", "", "path to the rook source directory (default: current directory)")
 	// Bound to deploy's variables so the profile selection a user previews here
 	// is the same one composeChart resolves during a deploy.
-	pf.StringArrayVar(&deployWith, "with", nil, "profile to enable, in addition to the clone's sticky list (repeatable)")
-	pf.StringArrayVar(&deployWithOnly, "with-only", nil, "profile to enable, replacing the clone's sticky list (repeatable)")
+	pf.StringArrayVar(&deployWith, "with", nil, "profile to enable, by name or by directory path (./dir), in addition to the clone's sticky list (repeatable)")
+	pf.StringArrayVar(&deployWithOnly, "with-only", nil, "profile to enable, by name or by directory path (./dir), replacing the clone's sticky list (repeatable)")
 
 	valuesShowCmd.Flags().BoolVar(&valuesShowLayers, "layers", false, "annotate each key with the layer that set it")
 }
