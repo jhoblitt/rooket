@@ -91,13 +91,14 @@ const (
 // have: --workers below minWorkers, a negative --disk-count, or a --disk-size
 // below 1 GiB. A command runs it before it names or locks its cluster, so a
 // refused run leaves nothing behind. An unset flag holds a valid default or
-// takes the cluster's recorded value, and is not checked.
+// takes the cluster's recorded value, and is not checked; nor is a deprecated
+// one, which nothing reads.
 func checkShapeFlags(cmd *cobra.Command, minWorkers int) error {
 	for _, f := range []struct {
 		name  string
 		floor int
 	}{{"workers", minWorkers}, {"disk-count", 0}, {"disk-size", 1}} {
-		if !cmd.Flags().Changed(f.name) {
+		if fl := cmd.Flags().Lookup(f.name); fl == nil || !fl.Changed || fl.Deprecated != "" {
 			continue
 		}
 		v, err := cmd.Flags().GetInt(f.name)

@@ -171,6 +171,12 @@ func TestCommandsRefuseAShapeNoClusterCanHave(t *testing.T) {
 		{"disk-size", "-1", "--disk-size must be more than 0, not -1"},
 		{"disk-size", "1", ""},
 	}
+	// deploy's --disk-size is deprecated and read by nothing, so no value of
+	// it is wrong.
+	unreadDiskSize := []shapeFlagCase{
+		{"disk-size", "0", ""},
+		{"disk-size", "-1", ""},
+	}
 	for _, tc := range []struct {
 		cmd   *cobra.Command
 		names []*string // the command's --name and --dir, cleared so nothing names a cluster
@@ -179,7 +185,7 @@ func TestCommandsRefuseAShapeNoClusterCanHave(t *testing.T) {
 		{upCmd, []*string{&upName, &upRookDir}, slices.Concat(workers, diskCount, diskSize)},
 		{createCmd, []*string{&createName}, slices.Concat(workers, diskCount)},
 		{blockSetupCmd, []*string{&blockSetupName}, slices.Concat(workers, diskCount, diskSize)},
-		{deployCmd, []*string{&deployName, &deployDir}, slices.Concat(workers, diskCount, diskSize)},
+		{deployCmd, []*string{&deployName, &deployDir}, slices.Concat(workers, diskCount, unreadDiskSize)},
 		{configCmd, []*string{&configName}, slices.Concat(workers, diskCount)},
 		{downCmd, []*string{&downName}, slices.Concat(teardownWorkers, diskCount)},
 		{blockTeardownCmd, []*string{&blockTeardownName}, slices.Concat(teardownWorkers, diskCount)},

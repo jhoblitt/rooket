@@ -203,7 +203,6 @@ Example:
 			deployName = upName
 			deployWorkers = upWorkers
 			deployDiskCount = upDiskCount
-			deployDiskSizeGB = upDiskSizeGB
 			deployIQNDate = upIQNDate
 			applyUpValueFlags(cmd.Flags().Changed("with-only"))
 			if err := deployCmd.RunE(deployCmd, nil); err != nil {
