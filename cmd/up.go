@@ -245,6 +245,24 @@ func upCreateAndBuild(createRun, infra func(io.Writer) error, infraOverlapSafe b
 		startMake = reason != "" && repush == nil
 		makeReason = reason
 	}
+	// An early make holds the clone's build-cache lock through its push, as
+	// buildRun does. A cached build of this tree is served by the post-join
+	// gate instead, which takes the lock itself, so it is released here.
+	var cache *buildCache
+	if startMake {
+		c, release, err := lockBuildCache(os.Stdout, rookDir)
+		if err != nil {
+			return err
+		}
+		idOf := func(ref string) string { return localImageID(io.Discard, ref) }
+		if !upForceBuild && fpErr == nil && c.lookup(fp, idOf) != nil {
+			release()
+			startMake = false
+		} else {
+			defer release()
+			cache = c
+		}
+	}
 	if gitErr != nil && startMake {
 		run.Printf("warning: could not determine git branch (%v); using \"latest\"\n", gitErr)
 	}
@@ -329,7 +347,8 @@ func upCreateAndBuild(createRun, infra func(io.Writer) error, infraOverlapSafe b
 	buildStarted := time.Now()
 	buildErr := func() error {
 		if startMake {
-			return buildPushPhase(os.Stdout, images, upRegistryPort, buildNamespace, "",
+			imgs, stampable := pinBuild(os.Stdout, cache, rookDir, fp, fpErr, images)
+			return buildPushPhase(os.Stdout, imgs, stampable, upRegistryPort, buildNamespace, "",
 				gitRef, upName, rookDir, fp, fpErr)
 		}
 		// The full gate, against the final port and live registry.

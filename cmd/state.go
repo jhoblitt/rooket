@@ -93,7 +93,9 @@ func stateDirNames() (string, []string, error) {
 	}
 	var names []string
 	for _, e := range entries {
-		if e.IsDir() {
+		// A dot-led directory is rooket's own host-wide state, such as the
+		// build cache; no cluster name, being a DNS label, can produce one.
+		if e.IsDir() && !strings.HasPrefix(e.Name(), ".") {
 			names = append(names, e.Name())
 		}
 	}

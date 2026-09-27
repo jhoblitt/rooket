@@ -270,6 +270,23 @@ spec:
 			g.Expect(id).NotTo(BeEmpty(), "operator pod has no imageID yet")
 			g.Expect(id).NotTo(Equal(digestBefore), "operator still runs the pre-change image")
 		}, 5*time.Minute, 15*time.Second).Should(Succeed())
+
+		By("reverting the change reuses the earlier build instead of running make")
+		Expect(os.WriteFile(mainGo, orig, 0o644)).To(Succeed())
+		out, err = rooketRun(15*time.Minute, args...)
+		Expect(err).NotTo(HaveOccurred(), "re-up after revert failed:\n%s", tail(out, 40))
+		Expect(out).To(ContainSubstring("reusing the build of this rook tree"),
+			"reverted tree was not served from the build cache:\n%s", tail(out, 60))
+		Expect(out).NotTo(ContainSubstring("running make"),
+			"make ran for a tree already built:\n%s", tail(out, 60))
+
+		Eventually(func(g Gomega) {
+			out, err := kubectlNS("get", "pod", "-l", "app=rook-ceph-operator",
+				"--field-selector", "status.phase=Running",
+				"-o", "jsonpath={.items[0].status.containerStatuses[0].imageID}")
+			g.Expect(err).NotTo(HaveOccurred())
+			g.Expect(strings.TrimSpace(out)).To(Equal(digestBefore), "operator does not run the reused pre-change image")
+		}, 5*time.Minute, 15*time.Second).Should(Succeed())
 	})
 
 	It("tears the cluster down and leaves the disks clean", func() {

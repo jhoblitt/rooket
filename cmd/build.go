@@ -49,6 +49,10 @@ var buildCmd = &cobra.Command{
 images from lines matching "=== container build <image>", retags them for the
 local registry using the current git branch as the image tag, and pushes them.
 
+make is skipped when the rook tree is one already built: the build last pushed
+to this cluster, or any of the clone's five most recently used builds (which
+'up' from another cluster on the same clone shares). --force-build overrides.
+
 Example:
   rooket build --dir ~/github/rook
 `,
@@ -90,32 +94,112 @@ func buildRun(out io.Writer, dir, name string, port int) error {
 	// The fingerprint is computed BEFORE make: edits made while make runs
 	// must invalidate the next stamp, not be attributed to this build.
 	fp, fpErr := treeFingerprint(dir)
+	var reason string
+	var repush []stampImage
+	stamped := false
 	if !buildForce {
 		stamp := readBuildStamp(name)
-		reason, repush := buildSkipCheck(out, fp, fpErr, stamp, containerEngine, dir, name, port, buildNamespace, buildTag, gitRef)
+		reason, repush = buildSkipCheck(out, fp, fpErr, stamp, containerEngine, dir, name, port, buildNamespace, buildTag, gitRef)
 		if reason == "" {
 			run.Fprintf(out, "==> build skipped: rook tree unchanged since last push; %s present in registry (--force-build to rebuild)\n",
 				stampRefs(stamp.Images))
 			return nil
 		}
-		if repush != nil {
-			run.Fprintf(out, "==> rook tree unchanged since last build (%s); pushing the existing image without make\n", reason)
-			imgs, rerr := repushStampedImages(out, repush, port)
-			if rerr == nil {
-				stampBuild(out, name, dir, fp, fpErr, gitRef, imgs)
-				return nil
-			}
-			run.Fprintf(out, "==> cannot reuse the previous image (%v); building\n", rerr)
-		} else if stamp != nil {
-			run.Fprintf(out, "==> building: %s\n", reason)
-		}
+		stamped = stamp != nil
 	}
 
-	builtImages, err := buildMakePhase(out, dir, name)
+	// Everything past the skip reads or writes local images another cluster
+	// built from this clone could be retagging.
+	cache, release, err := lockBuildCache(out, dir)
 	if err != nil {
 		return err
 	}
-	return buildPushPhase(out, builtImages, port, buildNamespace, buildTag, gitRef, name, dir, fp, fpErr)
+	defer release()
+
+	if repush != nil {
+		run.Fprintf(out, "==> rook tree unchanged since last build (%s); pushing the existing image without make\n", reason)
+		imgs, rerr := repushStampedImages(out, repush, port)
+		if rerr == nil {
+			stampBuild(out, name, dir, fp, fpErr, gitRef, imgs)
+			return nil
+		}
+		run.Fprintf(out, "==> cannot reuse the previous image (%v); building\n", rerr)
+	}
+	if !buildForce && fpErr == nil {
+		idOf := func(ref string) string { return localImageID(out, ref) }
+		if cached := cache.lookup(fp, idOf); cached != nil {
+			run.Fprintf(out, "==> reusing the build of this rook tree from %s; pushing it without make\n", cached.BuiltAt)
+			return buildPushPhase(out, cached.Images, true, port, buildNamespace, buildTag, gitRef, name, dir, fp, fpErr)
+		}
+	}
+	if repush == nil && stamped {
+		run.Fprintf(out, "==> building: %s\n", reason)
+	}
+
+	built, err := buildMakePhase(out, dir, name)
+	if err != nil {
+		return err
+	}
+	imgs, stampable := pinBuild(out, cache, dir, fp, fpErr, built)
+	return buildPushPhase(out, imgs, stampable, port, buildNamespace, buildTag, gitRef, name, dir, fp, fpErr)
+}
+
+// pinBuild tags make's output under this build's own names and records it in
+// the clone's build cache. It returns the images to push and whether the build
+// may be stamped: not when the tree changed while make ran, since the images
+// could then hold part of that change while the fingerprint describes the tree
+// without it — and reverting to that tree would reuse them.
+func pinBuild(out io.Writer, cache *buildCache, dir string, fp treeFP, fpErr error, built []string) ([]cachedImage, bool) {
+	imgs := make([]cachedImage, len(built))
+	for i, b := range built {
+		imgs[i] = cachedImage{Built: b}
+	}
+	if fpErr != nil {
+		return imgs, false
+	}
+	after, err := treeFingerprint(dir)
+	if err != nil {
+		run.Fprintf(out, "warning: could not re-fingerprint the rook tree after make (%v); not recording this build\n", err)
+		return imgs, false
+	}
+	if d := fingerprintDiff(fp, after); d != "" {
+		run.Fprintf(out, "warning: rook tree changed while make ran (%s); not recording this build\n", d)
+		return imgs, false
+	}
+	// stampBuild refuses these for the same reason: make printed the image
+	// name without building it.
+	if os.Getenv("BUILD_CONTAINER_IMAGE") == "false" {
+		return imgs, true
+	}
+
+	fpKey := fingerprintKey(fp)
+	pinned := make([]cachedImage, len(imgs))
+	for i, img := range imgs {
+		ref := pinnedRef(cache.clone, fpKey, img.Built)
+		if err := run.CmdTo(out, containerEngine.String(), "tag", img.Built, ref); err != nil {
+			run.Fprintf(out, "warning: could not pin %s as %s (%v); not caching this build\n", img.Built, ref, err)
+			return imgs, true
+		}
+		id := localImageID(out, ref)
+		if id == "" {
+			run.Fprintf(out, "warning: could not read the image ID of %s; not caching this build\n", ref)
+			return imgs, true
+		}
+		pinned[i] = cachedImage{Built: img.Built, Pinned: ref, ID: id}
+	}
+	b := &cachedBuild{
+		Version:     buildCacheVersion,
+		Dir:         dir,
+		Fingerprint: fp,
+		Images:      pinned,
+		BuiltAt:     time.Now().UTC().Format(time.RFC3339),
+	}
+	if err := cache.record(b); err != nil {
+		run.Fprintf(out, "warning: could not record the build in the build cache: %v\n", err)
+	} else {
+		cache.evict(out)
+	}
+	return pinned, true
 }
 
 // buildMakePhase produces the container images: stale chart-dep pruning, the
@@ -145,15 +229,21 @@ func buildMakePhase(out io.Writer, dir, name string) ([]string, error) {
 	return images, nil
 }
 
-// buildPushPhase tags and pushes the built images and records the stamp.
-func buildPushPhase(out io.Writer, images []string, port int, namespace, tagOverride, gitRef, name, dir string, fp treeFP, fpErr error) error {
+// buildPushPhase tags and pushes the built images and, when stampable,
+// records the stamp. An image is published from its pinned tag when it has
+// one, since make's output tag is shared with every other build of the clone.
+func buildPushPhase(out io.Writer, images []cachedImage, stampable bool, port int, namespace, tagOverride, gitRef, name, dir string, fp treeFP, fpErr error) error {
 	registryHost := fmt.Sprintf("localhost:%d", port)
 	var stamped []stampImage
 	local := true
-	for _, src := range images {
+	for _, img := range images {
+		src := img.Built
+		if img.Pinned != "" {
+			src = img.Pinned
+		}
 		target := tagOverride
 		if target == "" {
-			target = deriveTag(registryHost, namespace, src, gitRef)
+			target = deriveTag(registryHost, namespace, img.Built, gitRef)
 		}
 		if err := pushImage(out, src, target); err != nil {
 			return err
@@ -166,10 +256,13 @@ func buildPushPhase(out io.Writer, images []string, port int, namespace, tagOver
 			continue
 		}
 		digest, _ := manifestDigest(port, repo, tag)
-		id := localImageID(out, src)
-		stamped = append(stamped, stampImage{Source: src, SourceID: id, Ref: target, Repo: repo, Tag: tag, Digest: digest})
+		id := img.ID
+		if id == "" {
+			id = localImageID(out, src)
+		}
+		stamped = append(stamped, stampImage{Source: img.Built, SourceID: id, Pinned: img.Pinned, Ref: target, Repo: repo, Tag: tag, Digest: digest})
 	}
-	if local {
+	if local && stampable {
 		stampBuild(out, name, dir, fp, fpErr, gitRef, stamped)
 	}
 	return nil
@@ -205,20 +298,21 @@ func pushImage(out io.Writer, src, target string) error {
 // re-running make.
 func repushStampedImages(out io.Writer, imgs []stampImage, port int) ([]stampImage, error) {
 	for _, img := range imgs {
-		id := localImageID(out, img.Source)
+		src := stampedSource(img)
+		id := localImageID(out, src)
 		if id == "" {
-			return nil, fmt.Errorf("source image %s no longer present locally", img.Source)
+			return nil, fmt.Errorf("source image %s no longer present locally", src)
 		}
 		// The source tag is mutable — a later build (another branch, another
 		// cluster) may have retagged it. Only the stamped content may be
 		// republished under this stamp.
 		if img.SourceID == "" || id != img.SourceID {
-			return nil, fmt.Errorf("source image %s changed since it was stamped", img.Source)
+			return nil, fmt.Errorf("source image %s changed since it was stamped", src)
 		}
 	}
 	pushed := make([]stampImage, 0, len(imgs))
 	for _, img := range imgs {
-		if err := pushImage(out, img.Source, img.Ref); err != nil {
+		if err := pushImage(out, stampedSource(img), img.Ref); err != nil {
 			return nil, err
 		}
 		digest, ok := manifestDigest(port, img.Repo, img.Tag)
@@ -229,6 +323,15 @@ func repushStampedImages(out io.Writer, imgs []stampImage, port int) ([]stampIma
 		pushed = append(pushed, img)
 	}
 	return pushed, nil
+}
+
+// stampedSource is the local image a stamp republishes: its pinned tag, or
+// make's output tag in a stamp written before the build cache existed.
+func stampedSource(img stampImage) string {
+	if img.Pinned != "" {
+		return img.Pinned
+	}
+	return img.Source
 }
 
 // localImageID returns the engine's image ID for a local ref, or "".
