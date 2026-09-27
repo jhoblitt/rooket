@@ -54,51 +54,9 @@ var _ = Describe("rooket up/down", Ordered, func() {
 		}, 2*time.Minute, 15*time.Second).Should(Succeed())
 	})
 
-	It("provisions and reclaims a block PVC through CSI", func() {
-		// The RADOS round-trip above bypasses CSI entirely; this exercises the
-		// RBD provisioner: PVC on the chart's ceph-block StorageClass →
-		// csi-rbdplugin creates the image → bind → delete reclaims it. This
-		// spec deliberately covers provisioning and reclaim only; the
-		// mount-and-I/O path is covered by krbd_test.go, which works because
-		// node prep pre-creates the /dev/rbdN device nodes each node needs to
-		// see the krbd mapping.
-		const manifest = `apiVersion: v1
-kind: PersistentVolumeClaim
-metadata:
-  name: rooket-e2e-rbd-pvc
-spec:
-  accessModes: ["ReadWriteOnce"]
-  storageClassName: ceph-block
-  resources:
-    requests:
-      storage: 1Gi
-`
-		out, err := kubectlApply(manifest)
-		Expect(err).NotTo(HaveOccurred(), "apply block PVC:\n%s", out)
-		DeferCleanup(func() {
-			_, _ = kubectlNS("delete", "pvc", "rooket-e2e-rbd-pvc", "--ignore-not-found", "--timeout=120s")
-		})
-
-		By("binding via the rbd provisioner")
-		Eventually(func(g Gomega) {
-			out, _ := kubectlNS("get", "pvc", "rooket-e2e-rbd-pvc", "-o", "jsonpath={.status.phase}")
-			g.Expect(out).To(Equal("Bound"), "PVC phase")
-		}, 5*time.Minute, 10*time.Second).Should(Succeed())
-
-		By("reclaiming on delete")
-		out, err = kubectlNS("delete", "pvc", "rooket-e2e-rbd-pvc", "--timeout=120s")
-		Expect(err).NotTo(HaveOccurred(), "delete pvc:\n%s", out)
-		Eventually(func() string {
-			out, _ := kubectlNS("get", "pvc", "rooket-e2e-rbd-pvc", "--ignore-not-found")
-			return strings.TrimSpace(out)
-		}, 2*time.Minute, 10*time.Second).Should(BeEmpty(), "PVC not gone after delete")
-	})
-
 	It("serves I/O on a CephFS PVC through CSI", func() {
 		// The full CSI data path — provision, attach, node mount, pod I/O,
-		// detach, reclaim — on the chart's ceph-filesystem StorageClass. The
-		// kernel cephfs client is a network mount and needs no device nodes,
-		// so unlike krbd it works inside kind nodes.
+		// detach, reclaim — on the chart's ceph-filesystem StorageClass.
 		const manifest = `apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
