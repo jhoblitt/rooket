@@ -290,7 +290,8 @@ spec:
 	})
 
 	It("tears the cluster down and leaves the disks clean", func() {
-		args := []string{"down", "--workers", workers, "--name", clusterName}
+		// No --workers: down takes the count the cluster was created with.
+		args := []string{"down", "--name", clusterName}
 		if skipBlock {
 			args = append(args, "--skip-block")
 		}

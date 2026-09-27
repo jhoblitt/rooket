@@ -158,6 +158,11 @@ func deploySetup(cmd *cobra.Command) (string, []profiles.Profile, error) {
 		return "", nil, err
 	}
 	deployName = name
+	// 'rooket up' calls in with these flags unset, so they take the record its
+	// create step just wrote from the same values it forwarded.
+	if err := useRecordedShape(name, cmd.Flags().Changed, matchShape, &deployWorkers, &deployDiskCount, &deployIQNDate); err != nil {
+		return "", nil, err
+	}
 	if deployKubeContext == "" {
 		deployKubeContext = "kind-" + name
 	}
@@ -474,10 +479,10 @@ func init() {
 	pf.StringVar(&deployOperatorName, "operator-release", "rook-ceph", "rook-ceph operator helm release name")
 	pf.StringVar(&deployClusterName, "cluster-release", "rook-ceph-cluster", "rook-ceph-cluster helm release name")
 	pf.StringVar(&deployName, "name", "", "kind cluster name (for node-name and iSCSI by-path derivation)")
-	pf.IntVar(&deployWorkers, "workers", 3, "worker node count (for per-node OSD device pinning)")
-	pf.IntVar(&deployDiskCount, "disk-count", 1, "iSCSI disks per worker (0 disables OSD device pinning)")
+	pf.IntVar(&deployWorkers, "workers", 3, "worker node count for per-node OSD device pinning; unset, the cluster's recorded value, which a set flag must match")
+	pf.IntVar(&deployDiskCount, "disk-count", 1, "iSCSI disks per worker, 0 disables OSD device pinning; unset, the cluster's recorded value, which a set flag must match")
 	pf.IntVar(&deployDiskSizeGB, "disk-size", 10, "disk size in GiB (matches 'rooket block setup')")
-	pf.StringVar(&deployIQNDate, "iqn-date", "2003-01", "IQN date component matching 'rooket block setup'")
+	pf.StringVar(&deployIQNDate, "iqn-date", "2003-01", "IQN date component (YYYY-MM); unset, the cluster's recorded value, which a set flag must match")
 	pf.StringArrayVar(&deployWith, "with", nil, "profile to enable, in addition to the clone's sticky list (repeatable)")
 	pf.StringArrayVar(&deployWithOnly, "with-only", nil, "profile to enable, replacing the clone's sticky list (repeatable)")
 	pf.StringArrayVarP(&deployValueFiles, "values", "f", nil, "additional values file, applied above profiles (repeatable)")

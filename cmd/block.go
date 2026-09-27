@@ -61,13 +61,17 @@ passwordless sudo), otherwise falls back to a single pkexec prompt.
 	RunE: blockSetupRun,
 }
 
-func blockSetupRun(_ *cobra.Command, _ []string) error {
+func blockSetupRun(cmd *cobra.Command, _ []string) error {
 	blockSetupName = clusterName(blockSetupName)
 	release, err := LockCluster(blockSetupName)
 	if err != nil {
 		return err
 	}
 	defer release()
+	if err := useRecordedShape(blockSetupName, cmd.Flags().Changed, reshape,
+		&blockSetupWorkers, &blockSetupDiskCount, &blockSetupIQNDate); err != nil {
+		return err
+	}
 
 	if err := validateIQNDate(blockSetupIQNDate); err != nil {
 		return err
@@ -395,13 +399,21 @@ otherwise falls back to a single pkexec prompt.
 	RunE: blockTeardownRun,
 }
 
-func blockTeardownRun(_ *cobra.Command, _ []string) error {
+func blockTeardownRun(cmd *cobra.Command, _ []string) error {
 	blockTeardownName = clusterName(blockTeardownName)
 	release, err := LockCluster(blockTeardownName)
 	if err != nil {
 		return err
 	}
 	defer release()
+	// down settles the shape against its own flags and calls in without a
+	// command.
+	if cmd != nil {
+		if err := useRecordedShape(blockTeardownName, cmd.Flags().Changed, matchShape,
+			&blockTeardownWorkers, &blockTeardownDiskCount, &blockTeardownIQNDate); err != nil {
+			return err
+		}
+	}
 
 	if err := validateIQNDate(blockTeardownIQNDate); err != nil {
 		return err
@@ -801,16 +813,16 @@ func init() {
 	blockCmd.AddCommand(blockTeardownCmd)
 
 	blockSetupCmd.Flags().StringVar(&blockSetupName, "name", "", "cluster name (used in iSCSI IQN naming)")
-	blockSetupCmd.Flags().IntVar(&blockSetupWorkers, "workers", 3, "number of workers")
-	blockSetupCmd.Flags().IntVar(&blockSetupDiskCount, "disk-count", 1, "disks per worker")
+	blockSetupCmd.Flags().IntVar(&blockSetupWorkers, "workers", 3, "number of workers; unset, an existing cluster's recorded value")
+	blockSetupCmd.Flags().IntVar(&blockSetupDiskCount, "disk-count", 1, "disks per worker; unset, an existing cluster's recorded value")
 	blockSetupCmd.Flags().IntVar(&blockSetupDiskSizeGB, "disk-size", 10, "disk size in GiB")
 	blockSetupCmd.Flags().StringVar(&blockSetupDataDir, "data-dir", "", "directory for disk images (default: ~/.local/share/rooket/<name>)")
-	blockSetupCmd.Flags().StringVar(&blockSetupIQNDate, "iqn-date", "2003-01", "date component for IQNs (YYYY-MM)")
+	blockSetupCmd.Flags().StringVar(&blockSetupIQNDate, "iqn-date", "2003-01", "date component for IQNs (YYYY-MM); unset, an existing cluster's recorded value")
 
 	blockTeardownCmd.Flags().StringVar(&blockTeardownName, "name", "", "cluster name (used in iSCSI IQN naming)")
-	blockTeardownCmd.Flags().IntVar(&blockTeardownWorkers, "workers", 3, "number of workers")
-	blockTeardownCmd.Flags().IntVar(&blockTeardownDiskCount, "disk-count", 1, "disks per worker")
+	blockTeardownCmd.Flags().IntVar(&blockTeardownWorkers, "workers", 3, "number of workers; unset, the cluster's recorded value, which a set flag must match")
+	blockTeardownCmd.Flags().IntVar(&blockTeardownDiskCount, "disk-count", 1, "disks per worker; unset, the cluster's recorded value, which a set flag must match")
 	blockTeardownCmd.Flags().StringVar(&blockTeardownDataDir, "data-dir", "", "directory for disk images (default: ~/.local/share/rooket/<name>)")
-	blockTeardownCmd.Flags().StringVar(&blockTeardownIQNDate, "iqn-date", "2003-01", "date component for IQNs (YYYY-MM)")
+	blockTeardownCmd.Flags().StringVar(&blockTeardownIQNDate, "iqn-date", "2003-01", "date component for IQNs (YYYY-MM); unset, the cluster's recorded value, which a set flag must match")
 	blockTeardownCmd.Flags().BoolVar(&blockTeardownDeleteDisks, "delete-disks", false, "also delete disk image files")
 }

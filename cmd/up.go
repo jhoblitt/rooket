@@ -51,11 +51,14 @@ Use --skip-block, --skip-build, or --skip-deploy to omit individual steps.
 Setting --disk-count 0 also skips the block-setup step automatically.
 
 Re-running up against an existing cluster resumes it, starting its nodes again
-if a reboot stopped them. A cluster whose OSD device paths were renumbered since
-it was created cannot be resumed and is deleted and rebuilt, which wipes its OSD
-disks (see 'rooket cluster create --help'); any other state it cannot resume —
-missing nodes, an unreachable apiserver, nodes that never come back — is reported
-for you to decide on.
+if a reboot stopped them. It keeps the worker count, disks per worker, and IQN
+date the cluster was created with, including across a plain 'rooket down',
+unless --workers, --disk-count, or --iqn-date says otherwise. A stopped cluster
+asked for a different --workers, or whose OSD device paths were renumbered since
+it was created, cannot be resumed and is deleted and rebuilt, which wipes its
+OSD disks (see 'rooket cluster create --help'); a running one is refused rather
+than rebuilt. Any other state it cannot resume — missing nodes, an unreachable
+apiserver, nodes that never come back — is reported for you to decide on.
 
 Example:
   rooket up --dir ~/github/rook
@@ -84,6 +87,11 @@ Example:
 		defer release()
 
 		upName = name
+		// A cluster brought back up keeps the shape it was created with unless
+		// a flag asks for another.
+		if err := useRecordedShape(name, cmd.Flags().Changed, reshape, &upWorkers, &upDiskCount, &upIQNDate); err != nil {
+			return err
+		}
 		// Resolve the port for fail-fast flag-conflict checking; the create step
 		// re-resolves, repairs a stale recording, and persists the final choice.
 		port, err := resolveRegistryPort(upName, upRegistryPort, cmd.Flags().Changed("registry-port"))
@@ -387,11 +395,11 @@ func init() {
 	rootCmd.AddCommand(upCmd)
 
 	upCmd.Flags().StringVar(&upName, "name", "", "kind cluster name")
-	upCmd.Flags().IntVar(&upWorkers, "workers", 3, "number of worker nodes")
-	upCmd.Flags().IntVar(&upDiskCount, "disk-count", 1, "iSCSI disks per worker (0 skips block setup)")
+	upCmd.Flags().IntVar(&upWorkers, "workers", 3, "number of worker nodes; unset, an existing cluster's recorded value")
+	upCmd.Flags().IntVar(&upDiskCount, "disk-count", 1, "iSCSI disks per worker, 0 skips block setup; unset, an existing cluster's recorded value")
 	upCmd.Flags().IntVar(&upDiskSizeGB, "disk-size", 10, "disk size in GiB")
 	upCmd.Flags().IntVar(&upRegistryPort, "registry-port", 5001, "host port for the local OCI registry")
-	upCmd.Flags().StringVar(&upIQNDate, "iqn-date", "2003-01", "IQN date component (YYYY-MM)")
+	upCmd.Flags().StringVar(&upIQNDate, "iqn-date", "2003-01", "IQN date component (YYYY-MM); unset, an existing cluster's recorded value")
 	upCmd.Flags().StringVar(&upRookDir, "dir", "", "path to the rook source directory (default: $ROOK_DIR, else the rook clone found by walking up from the current directory)")
 	upCmd.Flags().StringVar(&upPromVersion, "prometheus-operator-crds-version", "29.0.0", "version of the prometheus-operator-crds helm chart (exact versions enable the reinstall skip)")
 	upCmd.Flags().StringVar(&upPromRelease, "prometheus-operator-crds-release", cluster.DefaultPromCRDsRelease, "helm release name for prometheus-operator-crds")
