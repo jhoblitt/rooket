@@ -100,14 +100,12 @@ func valuesWorkerCount(cmd *cobra.Command) (int, error) {
 // renders for, as a deploy of the cluster in scope would. It writes no record:
 // only a deploy changes what a cluster runs.
 func valuesSource(cmd *cobra.Command) (rookSource, error) {
-	// values has no --name flag of its own; $ROOKET_NAME or an enclosing clone
-	// must name the cluster, the same refusal deploy and up apply.
-	if cmd.Flags().Changed("rook-version") {
-		if err := releasedName(""); err != nil {
-			return rookSource{}, err
-		}
+	versionSet := cmd.Flags().Changed("rook-version")
+	name, err := rookDirClusterName(valuesDir, versionSet)
+	if err != nil {
+		return rookSource{}, err
 	}
-	rec, _, err := resolveSource(clusterName(""), valuesRookVersion, cmd.Flags().Changed("rook-version"),
+	rec, _, err := resolveSource(name, valuesRookVersion, versionSet,
 		valuesConfigDir, cmd.Flags().Changed("config-dir"))
 	if err != nil {
 		return rookSource{}, err
@@ -117,7 +115,7 @@ func valuesSource(cmd *cobra.Command) (rookSource, error) {
 		if err != nil {
 			return rookSource{}, err
 		}
-		return rookSource{charts: dir, config: configHome(rec, dir)}, nil
+		return rookSource{charts: dir, config: configHome(rec, dir), cluster: name}, nil
 	}
 	charts, err := releasedCharts(rec.RookVersion)
 	if err != nil {
@@ -136,7 +134,7 @@ func valuesSource(cmd *cobra.Command) (rookSource, error) {
 			return rookSource{}, err
 		}
 	}
-	return rookSource{charts: charts, config: configHome(rec, rookDir), released: rec.RookVersion}, nil
+	return rookSource{charts: charts, config: configHome(rec, rookDir), released: rec.RookVersion, cluster: name}, nil
 }
 
 // showBase reproduces the generated layer without contacting the registry or
@@ -160,7 +158,7 @@ func showBase(chart string, src rookSource, workers int) (map[string]any, error)
 		if workers > 0 {
 			return clusterBase(src.charts, workers, nil)
 		}
-		shape, _ := readShape(clusterName(""))
+		shape, _ := readShape(src.cluster)
 		return clusterBase(src.charts, shape.Workers, nil)
 	}
 }

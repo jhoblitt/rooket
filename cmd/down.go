@@ -80,7 +80,11 @@ Example:
 			return fmt.Errorf("--include-unmanaged requires --all")
 		}
 
-		downName = clusterName(downName)
+		name, err := clusterName(downName)
+		if err != nil {
+			return err
+		}
+		downName = name
 		release, err := LockCluster(downName)
 		if err != nil {
 			return err

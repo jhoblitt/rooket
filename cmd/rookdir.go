@@ -16,11 +16,8 @@ const rookModulePath = "github.com/rook/rook"
 // the explicit --dir flag, the ROOK_DIR environment variable, then walking up
 // from the current directory for a go.mod that declares the rook module.
 func resolveRookDir(flagDir string) (string, error) {
-	if flagDir != "" {
-		return flagDir, nil
-	}
-	if env := os.Getenv("ROOK_DIR"); env != "" {
-		return env, nil
+	if dir := namedRookDir(flagDir); dir != "" {
+		return dir, nil
 	}
 	wd, err := os.Getwd()
 	if err != nil {
@@ -33,6 +30,16 @@ func resolveRookDir(flagDir string) (string, error) {
 	return "", fmt.Errorf("could not locate a rook source tree: pass --dir, set ROOK_DIR, "+
 		"or run from within a rook clone (no go.mod declaring module %q in %s or any parent directory)",
 		rookModulePath, wd)
+}
+
+// namedRookDir returns the rook source directory the user named, the one
+// resolveRookDir prefers to finding its own: the --dir flag, else $ROOK_DIR,
+// else "".
+func namedRookDir(flagDir string) string {
+	if flagDir != "" {
+		return flagDir
+	}
+	return os.Getenv("ROOK_DIR")
 }
 
 // findRookRoot walks up from dir (inclusive) and returns the first directory

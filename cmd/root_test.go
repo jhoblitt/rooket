@@ -195,6 +195,8 @@ func TestAFailedValuesCommandPrintsItsErrorOnceWithoutUsage(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	t.Setenv("XDG_CACHE_HOME", t.TempDir())
 	t.Setenv("ROOKET_CONFIG_DIR", "")
+	// Outside a rook clone, values needs a cluster named.
+	t.Setenv("ROOKET_NAME", "values-error")
 	prevValuesDir, silenced := valuesDir, valuesShowCmd.SilenceUsage
 	t.Cleanup(func() {
 		valuesShowCmd.SilenceUsage = silenced

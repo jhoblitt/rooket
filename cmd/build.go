@@ -66,7 +66,10 @@ Example:
 			}
 		}
 
-		name := clusterName(buildName)
+		name, err := clusterNameOrDir(buildName, buildDir)
+		if err != nil {
+			return err
+		}
 		release, err := LockCluster(name)
 		if err != nil {
 			return err
@@ -498,7 +501,10 @@ Example:
 			}
 		}
 
-		name := clusterName(buildPushName)
+		name, err := clusterNameOrDir(buildPushName, buildPushDir)
+		if err != nil {
+			return err
+		}
 		release, err := LockCluster(name)
 		if err != nil {
 			return err

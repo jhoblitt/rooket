@@ -62,7 +62,11 @@ passwordless sudo), otherwise falls back to a single pkexec prompt.
 }
 
 func blockSetupRun(cmd *cobra.Command, _ []string) error {
-	blockSetupName = clusterName(blockSetupName)
+	name, err := clusterName(blockSetupName)
+	if err != nil {
+		return err
+	}
+	blockSetupName = name
 	release, err := LockCluster(blockSetupName)
 	if err != nil {
 		return err
@@ -400,7 +404,11 @@ otherwise falls back to a single pkexec prompt.
 }
 
 func blockTeardownRun(cmd *cobra.Command, _ []string) error {
-	blockTeardownName = clusterName(blockTeardownName)
+	name, err := clusterName(blockTeardownName)
+	if err != nil {
+		return err
+	}
+	blockTeardownName = name
 	release, err := LockCluster(blockTeardownName)
 	if err != nil {
 		return err

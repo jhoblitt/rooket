@@ -139,25 +139,6 @@ func configHome(src clusterSource, rookDir string) clone.Dir {
 	return clone.Dir{}
 }
 
-// nameIsFallback reports whether clusterName(flagName) would settle on the
-// fixed name "rook" for want of anything else to go on.
-func nameIsFallback(flagName string) bool {
-	if flagName != "" || os.Getenv("ROOKET_NAME") != "" {
-		return false
-	}
-	wd, err := os.Getwd()
-	return err != nil || findRookRoot(wd) == ""
-}
-
-// releasedName refuses the fallback name for a command deploying released
-// Rook: two unrelated consumers on one host would otherwise share a cluster.
-func releasedName(flagName string) error {
-	if nameIsFallback(flagName) {
-		return fmt.Errorf("--rook-version outside a rook clone needs a cluster name: pass --name or set $ROOKET_NAME")
-	}
-	return nil
-}
-
 // chartPuller unpacks one released chart with helm; tests replace it.
 var chartPuller = func(env []string) chartcache.Puller {
 	return func(dir, chart, version string) error {

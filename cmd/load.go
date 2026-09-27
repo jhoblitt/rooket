@@ -34,7 +34,10 @@ After loading, reference the image in your Rook manifests as:
 `,
 	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
-		name := clusterName(loadName)
+		name, err := clusterName(loadName)
+		if err != nil {
+			return err
+		}
 		release, err := LockCluster(name)
 		if err != nil {
 			return err

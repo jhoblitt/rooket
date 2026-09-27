@@ -186,6 +186,8 @@ func TestValuesEditMultiChartFailureNamesChartAndNotesEarlierSaves(t *testing.T)
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("ROOKET_CONFIG_DIR", "")
 	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	// Outside a rook clone, values needs a cluster named.
+	t.Setenv("ROOKET_NAME", "multi-chart")
 	dir := t.TempDir()
 
 	script := filepath.Join(t.TempDir(), "fake-editor.sh")

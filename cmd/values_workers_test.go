@@ -1,11 +1,17 @@
 package cmd
 
 import (
+	"fmt"
+	"os"
+	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
 	"github.com/spf13/cobra"
 	"go.yaml.in/yaml/v3"
+
+	"github.com/jhoblitt/rooket/internal/chartcache"
 )
 
 // parseWorkersFlags parses args into c's flags, and resets --workers and --dir,
@@ -40,11 +46,14 @@ func previewEnv(t *testing.T) {
 	t.Setenv("ROOK_DIR", "")
 }
 
-// showClusterValues runs 'values show cluster' against the rook clone dir with
-// args and returns the values it prints.
+// showClusterValues runs 'values show cluster' with args, against the rook
+// clone dir unless dir is empty, and returns the values it prints.
 func showClusterValues(t *testing.T, dir string, args ...string) map[string]any {
 	t.Helper()
-	parseWorkersFlags(t, valuesShowCmd, append([]string{"--dir", dir}, args...)...)
+	if dir != "" {
+		args = append([]string{"--dir", dir}, args...)
+	}
+	parseWorkersFlags(t, valuesShowCmd, args...)
 	var runErr error
 	out := captureStdout(t, func() { runErr = valuesShowCmd.RunE(valuesShowCmd, []string{"cluster"}) })
 	if runErr != nil {
@@ -99,6 +108,52 @@ func TestValuesShowWorkers(t *testing.T) {
 				t.Errorf("block pool size = %#v, want 1 for one worker", size)
 			}
 		})
+	}
+}
+
+// A harness deploying released Rook previews it from outside any clone, naming
+// the cluster with $ROOKET_NAME before bringing it up: the values show renders
+// from that version's published charts, fitted to the workers it asks for.
+func TestValuesShowWorkersOfAReleasedCluster(t *testing.T) {
+	for _, workers := range []int{1, 2} {
+		t.Run(fmt.Sprintf("--workers %d", workers), func(t *testing.T) {
+			previewEnv(t)
+			t.Chdir(t.TempDir())
+			keep(t, &valuesDir)
+			valuesDir = ""
+			stubReleasedChartsWithBlockPool(t)
+			parseValuesFlags(t, "--rook-version=v1.20.7")
+
+			got := showClusterValues(t, "", "--workers", strconv.Itoa(workers))
+			if size := blockPoolSize(t, got); size != workers {
+				t.Errorf("block pool size = %#v, want %d for %d workers", size, workers, workers)
+			}
+			if conf, _ := got["configOverride"].(string); !strings.Contains(conf, fmt.Sprintf("osd_pool_default_size = %d\n", workers)) {
+				t.Errorf("configOverride = %q, want osd_pool_default_size = %d", conf, workers)
+			}
+		})
+	}
+}
+
+// stubReleasedChartsWithBlockPool is stubChartPuller with the released
+// rook-ceph-cluster chart defaulting to rookCloneWithBlockPool's one
+// three-replica block pool, so that a fitting shows in the pools.
+func stubReleasedChartsWithBlockPool(t *testing.T) {
+	t.Helper()
+	defaults, err := os.ReadFile(filepath.Join(rookCloneWithBlockPool(t), "deploy", "charts", chartCluster, "values.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	stubChartPuller(t)
+	stub := chartPuller
+	chartPuller = func(repos []string) chartcache.Puller {
+		pull := stub(repos)
+		return func(dir, chart, version string) error {
+			if err := pull(dir, chart, version); err != nil || chart != chartCluster {
+				return err
+			}
+			return os.WriteFile(filepath.Join(dir, chart, "values.yaml"), defaults, 0o644)
+		}
 	}
 }
 

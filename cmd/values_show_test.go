@@ -43,6 +43,8 @@ func TestValuesShowInheritsWithOnlyFlag(t *testing.T) {
 	// could otherwise point it at a released version or a missing directory.
 	t.Setenv("ROOKET_CONFIG_DIR", "")
 	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	// Outside a rook clone, values needs a cluster named.
+	t.Setenv("ROOKET_NAME", "with-only")
 
 	dir := t.TempDir()
 
@@ -149,12 +151,11 @@ func TestClusterBaseReadsTheChartsPools(t *testing.T) {
 // pools for the cluster's recorded worker count too.
 func TestShowBaseUsesTheRecordedShape(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
-	t.Setenv("ROOKET_NAME", "single")
 	if err := writeShape("single", clusterShape{Workers: 1, DiskCount: 1, IQNDate: "2003-01"}); err != nil {
 		t.Fatal(err)
 	}
 
-	base, err := showBase(chartCluster, rookSource{charts: rookCloneWithBlockPool(t)}, 0)
+	base, err := showBase(chartCluster, rookSource{charts: rookCloneWithBlockPool(t), cluster: "single"}, 0)
 	if err != nil {
 		t.Fatalf("showBase: %v", err)
 	}
@@ -244,21 +245,6 @@ func parseValuesFlags(t *testing.T, args ...string) {
 			f.Changed = false
 		}
 	})
-}
-
-// values has no --name flag of its own, so a released --rook-version outside
-// a clone must still be refused the fallback name deploy and up refuse: two
-// unrelated consumers on the host would otherwise share the "rook" cluster.
-func TestValuesSourceReleasedRefusesTheFallbackName(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
-	t.Setenv("ROOKET_NAME", "")
-	t.Chdir(t.TempDir())
-	stubChartPuller(t)
-	parseValuesFlags(t, "--rook-version=v1.20.7")
-
-	if _, err := valuesSource(valuesShowCmd); err == nil || !strings.Contains(err.Error(), "--name") {
-		t.Fatalf("valuesSource = %v, want the fallback name refused, pointing at --name", err)
-	}
 }
 
 // A mutation turning configHome(rec, dir) into an unconditional clone.Open(dir)
