@@ -95,7 +95,7 @@ Example:
 		}
 		// Decided under the lock, so no up can be creating the cluster between
 		// this check and the report that it does not exist.
-		if _, recorded := readShape(downName); !recorded && !clusterLeftovers(downName, lio.DefaultRoot, downIQNDate) {
+		if _, recorded := readShape(downName); !recorded && !clusterLeftovers(downName, hostLIORoot(), downIQNDate) {
 			run.Printf("cluster %q not found: no kind cluster, registry, state directory, or iSCSI targets; nothing to tear down\n", downName)
 			// Nothing is left for its lock file to guard.
 			removeClusterLockOnRelease(downName)
@@ -192,6 +192,11 @@ func clusterLeftovers(name, lioRoot, iqnDate string) bool {
 	found, err := registry.Lookup(os.Stdout, containerEngine, registry.ContainerName(name))
 	return err != nil || found
 }
+
+// hostLIORoot is where down, down --all, and block teardown read the host's LIO
+// configuration. Tests point it at a fake tree, so that no test of those
+// commands depends on the iSCSI targets of the machine it runs on.
+var hostLIORoot = func() string { return lio.DefaultRoot }
 
 func init() {
 	rootCmd.AddCommand(downCmd)

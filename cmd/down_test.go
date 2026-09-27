@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/jhoblitt/rooket/internal/engine"
+	"github.com/jhoblitt/rooket/internal/lio"
 	"github.com/jhoblitt/rooket/internal/registry"
 )
 
@@ -27,6 +28,9 @@ type downHost struct {
 	containers []string // the container names the engine's 'ps -a' lists
 	kindFails  bool     // 'kind get clusters' fails, as it does with the engine down
 	psFails    bool     // the engine's 'ps -a' fails
+	// The kernel's iSCSI configuration, in writeFakeLIO's terms: a backstore
+	// name and its backing path, each exported by a target.
+	lio map[string]string
 }
 
 // stubDownHost puts stubs for every command a down run can reach on PATH, and
@@ -34,8 +38,13 @@ type downHost struct {
 // root or through sudo. Each stub appends its invocation to the returned log.
 // kind stops listing a cluster once it has been asked to delete it. targetcli
 // fails every delete, as the real one does for an object that does not exist.
+// The kernel's iSCSI configuration is read from h.lio, empty unless set, and
+// never from the machine's own.
 func stubDownHost(t *testing.T, h downHost) string {
 	t.Helper()
+	keep(t, &hostLIORoot)
+	lioRoot := writeFakeLIO(t, h.lio)
+	hostLIORoot = func() string { return lioRoot }
 	dir := t.TempDir()
 	logPath := filepath.Join(dir, "calls.log")
 	logCall := fmt.Sprintf(`printf '%%s %%s\n' "${0##*/}" "$*" >> %q`, logPath)
@@ -127,6 +136,9 @@ func statusLines(out string) []string {
 // delete and block teardown steps it hands work to — is restored afterwards.
 func runDown(t *testing.T, args ...string) (string, error) {
 	t.Helper()
+	if hostLIORoot() == lio.DefaultRoot {
+		t.Fatal("runDown without stubDownHost would read this machine's iSCSI configuration")
+	}
 	for _, p := range []*string{&downName, &downIQNDate, &deleteName, &blockTeardownName, &blockTeardownIQNDate} {
 		keep(t, p)
 	}
@@ -491,6 +503,42 @@ func TestClusterLeftovers(t *testing.T) {
 			captureStdout(t, func() { got = clusterLeftovers(name, lioRoot, "2003-01") })
 			if got != c.want {
 				t.Errorf("clusterLeftovers = %v, want %v", got, c.want)
+			}
+		})
+	}
+}
+
+// down reads the kernel's iSCSI configuration from the stubbed host, not from
+// the machine the test runs on: a cluster whose only remnant is a target the
+// stub's configuration holds is found there and torn down.
+func TestDownReadsTheStubbedHostsISCSIConfiguration(t *testing.T) {
+	const name = "w2-kernel"
+	disks := map[string]string{name + "-worker3-disk0": "/gone/worker3-disk0.img"}
+	for _, c := range []struct {
+		desc string
+		host downHost
+		args []string
+	}{
+		{
+			desc: "down",
+			host: downHost{lio: disks},
+			args: []string{"--name", name, "--delete-disks"},
+		},
+		{
+			desc: "down --all",
+			host: downHost{live: []string{name}, containers: []string{registry.ContainerName(name)}, lio: disks},
+			args: []string{"--all", "--delete-disks", "--force"},
+		},
+	} {
+		t.Run(c.desc, func(t *testing.T) {
+			t.Setenv("HOME", t.TempDir())
+			log := stubDownHost(t, c.host)
+
+			if _, err := runDown(t, c.args...); err != nil {
+				t.Fatalf("%s: %v", c.desc, err)
+			}
+			if got, want := deletedTargets(calls(t, log)), workerTargets(name, 3); !slices.Equal(got, want) {
+				t.Errorf("deleted targets %v, want the one the stubbed host holds, %v", got, want)
 			}
 		})
 	}

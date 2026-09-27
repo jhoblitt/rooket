@@ -14,7 +14,6 @@ import (
 
 	"github.com/jhoblitt/rooket/internal/cluster"
 	"github.com/jhoblitt/rooket/internal/engine"
-	"github.com/jhoblitt/rooket/internal/lio"
 	"github.com/jhoblitt/rooket/internal/registry"
 	"github.com/jhoblitt/rooket/internal/run"
 )
@@ -258,7 +257,7 @@ func downAllRun(cmd *cobra.Command) error {
 			// counts to name a grid from: each cluster's disks come from its
 			// state dir and from what the kernel still holds for it.
 			if !blocked[n] {
-				disks = append(disks, teardownDisks(lio.DefaultRoot, n, filepath.Join(root, n), downIQNDate, 0, 0)...)
+				disks = append(disks, teardownDisks(hostLIORoot(), n, filepath.Join(root, n), downIQNDate, 0, 0)...)
 			}
 		}
 		if len(disks) > 0 {

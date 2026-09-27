@@ -439,7 +439,7 @@ func blockTeardownRun(cmd *cobra.Command, _ []string) error {
 		}
 	}
 
-	disks := teardownDisks(lio.DefaultRoot, blockTeardownName, dataDir, blockTeardownIQNDate,
+	disks := teardownDisks(hostLIORoot(), blockTeardownName, dataDir, blockTeardownIQNDate,
 		blockTeardownWorkers, blockTeardownDiskCount)
 	// A teardown told no worker count (down, for a cluster with no record) can
 	// find nothing, and the privileged run would then ask for root only to save
