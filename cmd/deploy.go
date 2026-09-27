@@ -31,8 +31,6 @@ var (
 	deployWith         []string
 	deployWithOnly     []string
 	deployWithOnlySet  bool
-	deployValueFiles   []string
-	deploySets         []string
 )
 
 var deployCmd = &cobra.Command{
@@ -248,12 +246,13 @@ func installRookCephOperator(dir string, active []profiles.Profile) error {
 		return err
 	}
 
-	args := append([]string{
+	args := []string{
 		"--kube-context", deployKubeContext,
 		"-n", "rook-ceph",
 		"upgrade", "--install", "--create-namespace",
 		deployOperatorName, chartPath,
-	}, helmValueArgs(valuesPath, deploySets)...)
+		"-f", valuesPath,
+	}
 	if err := run.CmdWithEnv(deployHelmEnv, "helm", args...); err != nil {
 		return err
 	}
@@ -280,7 +279,7 @@ func writeComposed(chart string, base map[string]any, rookDir string, active []p
 	if err := cloneDir.Ensure(); err != nil {
 		return "", err
 	}
-	c, err := composeChart(chart, base, cloneDir, active, deployValueFiles)
+	c, err := composeChart(chart, base, cloneDir, active)
 	if err != nil {
 		return "", err
 	}
@@ -290,20 +289,6 @@ func writeComposed(chart string, base map[string]any, rookDir string, active []p
 	}
 	path := filepath.Join(dir, chart+".yaml")
 	return path, c.write(path)
-}
-
-// helmValueArgs returns the "-f valuesPath" pair followed by a "--set entry"
-// pair for each set entry, in that order. --set is deliberately not merged
-// into rooket's own layering (see composeChart) — it is passed through to
-// helm verbatim so it keeps helm's own highest-precedence behavior, and
-// ordering it after -f here reflects that.
-func helmValueArgs(valuesPath string, sets []string) []string {
-	args := make([]string, 0, 2+2*len(sets))
-	args = append(args, "-f", valuesPath)
-	for _, s := range sets {
-		args = append(args, "--set", s)
-	}
-	return args
 }
 
 func deployValuesDir(cluster string) (string, error) {
@@ -347,14 +332,15 @@ func installCephCsiDrivers(dir string, active []profiles.Profile) error {
 		return err
 	}
 
-	csiArgs := append([]string{
+	csiArgs := []string{
 		"--kube-context", deployKubeContext,
 		"-n", "rook-ceph",
 		"upgrade", "--install",
 		"ceph-csi-drivers", "ceph-csi-drivers",
 		"--repo", "https://ceph.github.io/ceph-csi-operator",
 		"--version", version,
-	}, helmValueArgs(valuesPath, deploySets)...)
+		"-f", valuesPath,
+	}
 
 	var installErr error
 	for attempt := 1; attempt <= 5; attempt++ {
@@ -416,12 +402,13 @@ func installRookCephCluster(dir string, active []profiles.Profile) error {
 		return err
 	}
 
-	clusterArgs := append([]string{
+	clusterArgs := []string{
 		"--kube-context", deployKubeContext,
 		"-n", "rook-ceph",
 		"upgrade", "--install", "--create-namespace",
 		deployClusterName, chartPath,
-	}, helmValueArgs(valuesPath, deploySets)...)
+		"-f", valuesPath,
+	}
 	return run.CmdWithEnv(deployHelmEnv, "helm", clusterArgs...)
 }
 
@@ -505,6 +492,4 @@ func init() {
 	pf.StringVar(&deployIQNDate, "iqn-date", "2003-01", "IQN date component (YYYY-MM); unset, the cluster's recorded value, which a set flag must match")
 	pf.StringArrayVar(&deployWith, "with", nil, "profile to enable, in addition to the clone's sticky list (repeatable)")
 	pf.StringArrayVar(&deployWithOnly, "with-only", nil, "profile to enable, replacing the clone's sticky list (repeatable)")
-	pf.StringArrayVarP(&deployValueFiles, "values", "f", nil, "additional values file, applied above profiles (repeatable)")
-	pf.StringArrayVar(&deploySets, "set", nil, "value passed straight through to helm, applied above every layer (repeatable)")
 }

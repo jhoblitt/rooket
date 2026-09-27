@@ -1,18 +1,20 @@
 package cmd
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/spf13/cobra"
+)
 
 func TestUpForwardsValueFlags(t *testing.T) {
 	t.Cleanup(func() {
-		upWith, upWithOnly, upValueFiles, upSets = nil, nil, nil, nil
-		deployWith, deployWithOnly, deployValueFiles, deploySets = nil, nil, nil, nil
+		upWith, upWithOnly = nil, nil
+		deployWith, deployWithOnly = nil, nil
 		deployWithOnlySet = false
 	})
 
 	upWith = []string{"rgw"}
 	upWithOnly = []string{"rbd"}
-	upValueFiles = []string{"/tmp/x.yaml"}
-	upSets = []string{"a=b"}
 
 	applyUpValueFlags(true)
 
@@ -25,10 +27,21 @@ func TestUpForwardsValueFlags(t *testing.T) {
 	if !deployWithOnlySet {
 		t.Error("deployWithOnlySet not propagated")
 	}
-	if len(deployValueFiles) != 1 {
-		t.Errorf("deployValueFiles = %#v", deployValueFiles)
-	}
-	if len(deploySets) != 1 || deploySets[0] != "a=b" {
-		t.Errorf("deploySets = %#v", deploySets)
+}
+
+// TestChartAgnosticValueFlagsRemoved pins the removal of -f/--values and
+// --set: both reached every chart, so a key meant for one chart landed in
+// all of them. Per-chart values come from a profile directory instead.
+func TestChartAgnosticValueFlagsRemoved(t *testing.T) {
+	for name, c := range map[string]*cobra.Command{"up": upCmd, "deploy": deployCmd, "values": valuesCmd} {
+		// Command.Flag checks local and persistent flags, climbing to parents.
+		for _, flag := range []string{"values", "set"} {
+			if c.Flag(flag) != nil {
+				t.Errorf("%s still defines --%s", name, flag)
+			}
+		}
+		if c.Flags().ShorthandLookup("f") != nil || c.PersistentFlags().ShorthandLookup("f") != nil {
+			t.Errorf("%s still defines -f", name)
+		}
 	}
 }

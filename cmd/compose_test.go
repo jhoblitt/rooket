@@ -3,7 +3,6 @@ package cmd
 import (
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 
 	"github.com/jhoblitt/rooket/internal/clone"
@@ -99,22 +98,17 @@ func TestComposeChartLayerOrder(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(d.ValuesPath(chartCluster),
-		[]byte("a: from-clone\nb: from-clone\nc: from-clone\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	extra := filepath.Join(root, "extra.yaml")
-	if err := os.WriteFile(extra, []byte("c: from-file\n"), 0o644); err != nil {
+		[]byte("a: from-clone\nb: from-clone\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
 	got, err := composeChart(chartCluster,
-		map[string]any{"a": "from-base", "b": "from-base", "c": "from-base", "d": "from-base"},
+		map[string]any{"a": "from-base", "b": "from-base", "d": "from-base"},
 		d,
 		[]profiles.Profile{{
 			Name:   "p",
-			Values: map[string]map[string]any{chartCluster: {"b": "from-profile", "c": "from-profile"}},
+			Values: map[string]map[string]any{chartCluster: {"b": "from-profile"}},
 		}},
-		[]string{extra},
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -123,7 +117,6 @@ func TestComposeChartLayerOrder(t *testing.T) {
 	want := map[string]string{
 		"a": "from-clone",
 		"b": "from-profile",
-		"c": "from-file",
 		"d": "from-base",
 	}
 	for k, v := range want {
@@ -133,23 +126,6 @@ func TestComposeChartLayerOrder(t *testing.T) {
 	}
 	if got.Provenance["b"] != "profile:p" {
 		t.Errorf("provenance[b] = %q", got.Provenance["b"])
-	}
-}
-
-func TestComposeChartMissingValuesFileErrors(t *testing.T) {
-	root := t.TempDir()
-	d := clone.Open(root)
-	if err := d.Ensure(); err != nil {
-		t.Fatal(err)
-	}
-	missing := filepath.Join(root, "does-not-exist.yaml")
-
-	_, err := composeChart(chartCluster, map[string]any{}, d, nil, []string{missing})
-	if err == nil {
-		t.Fatal("want an error for a missing -f file")
-	}
-	if !strings.Contains(err.Error(), missing) {
-		t.Errorf("error %q does not name the missing path %q", err.Error(), missing)
 	}
 }
 
@@ -173,7 +149,6 @@ func TestComposeChartProfileOrder(t *testing.T) {
 				Values: map[string]map[string]any{chartCluster: {"c": "from-second"}},
 			},
 		},
-		nil,
 	)
 	if err != nil {
 		t.Fatal(err)

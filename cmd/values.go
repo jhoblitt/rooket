@@ -2,8 +2,6 @@ package cmd
 
 import (
 	"fmt"
-	"io"
-	"os"
 	"sort"
 	"strings"
 
@@ -24,7 +22,7 @@ var valuesCmd = &cobra.Command{
 	Long: `values manages the layered chart values rooket supplies to the rook charts.
 
 Layers, lowest first: rooket's generated base, the clone's .rooket/values/,
-each active profile in selection order, then any -f files.
+then each active profile in selection order.
 `,
 }
 
@@ -56,14 +54,12 @@ var valuesShowCmd = &cobra.Command{
 			return err
 		}
 
-		printSetsNote(os.Stderr, deploySets)
-
 		for i, chart := range charts {
 			base, err := showBase(chart, dir)
 			if err != nil {
 				return err
 			}
-			c, err := composeChart(chart, base, cloneDir, active, deployValueFiles)
+			c, err := composeChart(chart, base, cloneDir, active)
 			if err != nil {
 				return err
 			}
@@ -97,16 +93,6 @@ func showBase(chart, rookDir string) (map[string]any, error) {
 		shape, _ := readShape(clusterName(""))
 		return clusterBase(rookDir, shape.Workers, nil)
 	}
-}
-
-// printSetsNote writes a note to w when sets is non-empty, so 'values show'
-// acknowledges --set instead of silently rendering output that doesn't
-// reflect it: helm applies --set above every layer rooket composes.
-func printSetsNote(w io.Writer, sets []string) {
-	if len(sets) == 0 {
-		return
-	}
-	fmt.Fprintln(w, "note: --set values are applied by helm above everything shown here and are not reflected in this output")
 }
 
 func renderShow(c composed, withLayers bool) (string, error) {
@@ -149,8 +135,6 @@ func init() {
 	// is the same one composeChart resolves during a deploy.
 	pf.StringArrayVar(&deployWith, "with", nil, "profile to enable, in addition to the clone's sticky list (repeatable)")
 	pf.StringArrayVar(&deployWithOnly, "with-only", nil, "profile to enable, replacing the clone's sticky list (repeatable)")
-	pf.StringArrayVarP(&deployValueFiles, "values", "f", nil, "additional values file, applied above profiles (repeatable)")
-	pf.StringArrayVar(&deploySets, "set", nil, "value passed straight through to helm, applied above every layer (repeatable)")
 
 	valuesShowCmd.Flags().BoolVar(&valuesShowLayers, "layers", false, "annotate each key with the layer that set it")
 }

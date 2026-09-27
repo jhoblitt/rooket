@@ -161,7 +161,6 @@ rooket composes the Helm values for each chart from layers, lowest first:
 2. rooket's generated base (image refs, OSD device pinning, dev-host cpu trims)
 3. `<rook clone>/.rooket/values/<chart>.yaml` — sticky, this clone
 4. active profiles, in selection order
-5. `-f` files, then `--set`
 
 Nothing is locked: a values file can retarget the operator image or add to the
 storage topology. Named lists such as `cephClusterSpec.storage.nodes` merge by

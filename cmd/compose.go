@@ -93,11 +93,10 @@ type composed struct {
 }
 
 // composeChart stacks every layer for one chart, lowest first: rooket's
-// generated base, the clone's sticky file, each active profile in selection
-// order, then any -f files. --set is not represented here; helm applies it
-// above everything rooket writes.
+// generated base, the clone's sticky file, then each active profile in
+// selection order.
 func composeChart(chart string, base map[string]any, cloneDir clone.Dir,
-	active []profiles.Profile, extraFiles []string) (composed, error) {
+	active []profiles.Profile) (composed, error) {
 
 	layers := []values.Layer{{Name: "rooket base", Values: base}}
 
@@ -113,17 +112,6 @@ func composeChart(chart string, base map[string]any, cloneDir clone.Dir,
 		if v, ok := p.Values[chart]; ok {
 			layers = append(layers, values.Layer{Name: "profile:" + p.Name, Values: v})
 		}
-	}
-
-	for _, f := range extraFiles {
-		v, err := values.LoadFile(f)
-		if err != nil {
-			return composed{}, err
-		}
-		if v == nil {
-			return composed{}, fmt.Errorf("values file %s does not exist", f)
-		}
-		layers = append(layers, values.Layer{Name: "-f " + f, Values: v})
 	}
 
 	merged, prov := values.Merge(layers)

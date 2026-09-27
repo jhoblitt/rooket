@@ -33,8 +33,6 @@ var (
 	upNodeImage       string
 	upWith            []string
 	upWithOnly        []string
-	upValueFiles      []string
-	upSets            []string
 )
 
 var upCmd = &cobra.Command{
@@ -207,8 +205,6 @@ func applyUpValueFlags(withOnlySet bool) {
 	deployWith = upWith
 	deployWithOnly = upWithOnly
 	deployWithOnlySet = withOnlySet
-	deployValueFiles = upValueFiles
-	deploySets = upSets
 }
 
 // upCreateAndBuild runs the infra-plus-create side concurrently with the make
@@ -412,7 +408,5 @@ func init() {
 	upCmd.Flags().StringVar(&upNodeImage, "node-image", defaultNodeImage, "kindest/node image for the cluster, pre-pulled before create (pin tag@digest for a reproducible Kubernetes version)")
 	upCmd.Flags().StringArrayVar(&upWith, "with", nil, "profile to enable, in addition to the clone's sticky list (repeatable)")
 	upCmd.Flags().StringArrayVar(&upWithOnly, "with-only", nil, "profile to enable, replacing the clone's sticky list (repeatable)")
-	upCmd.Flags().StringArrayVarP(&upValueFiles, "values", "f", nil, "additional values file, applied above profiles (repeatable)")
-	upCmd.Flags().StringArrayVar(&upSets, "set", nil, "value passed straight through to helm, applied above every layer (repeatable)")
 	upCmd.MarkFlagsMutuallyExclusive("skip-build", "force-build")
 }
