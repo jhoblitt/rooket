@@ -72,19 +72,27 @@ func GenerateConfig() ([]byte, error) {
 	return json.MarshalIndent(cfg, "", "  ")
 }
 
-// Exists returns true if the registry container already exists (running or stopped).
+// Exists returns true if the registry container already exists (running or
+// stopped). An engine that cannot be queried reads as no container; see Lookup.
 func Exists(out io.Writer, eng engine.Engine, name string) bool {
+	found, _ := Lookup(out, eng, name)
+	return found
+}
+
+// Lookup is Exists for a caller that must tell a container that is not there
+// from an engine that could not say.
+func Lookup(out io.Writer, eng engine.Engine, name string) (bool, error) {
 	res, err := run.OutputTo(out, eng.String(), "ps", "-a",
 		"--filter", "name=^"+name+"$", "--format", "{{.Names}}")
 	if err != nil {
-		return false
+		return false, err
 	}
 	for line := range strings.SplitSeq(res, "\n") {
 		if strings.TrimSpace(line) == name {
-			return true
+			return true, nil
 		}
 	}
-	return false
+	return false, nil
 }
 
 // runArgs renders the engine arguments that create the registry container.

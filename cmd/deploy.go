@@ -161,6 +161,10 @@ type rookSource struct {
 	// released is the Rook version deployed from its published charts and
 	// images; empty for a clone, whose operator image rooket built.
 	released string
+	// cluster is the cluster a values command resolved this source for, whose
+	// recorded shape the values it renders are sized to. A deploy leaves it
+	// empty: it sizes to deployWorkers instead.
+	cluster string
 }
 
 // deploySetup resolves everything a deploy needs: the cluster name (pointing
@@ -184,12 +188,7 @@ type rookSource struct {
 // changes mid-deploy.
 func deploySetup(cmd *cobra.Command) (rookSource, []profiles.Profile, func(), error) {
 	versionSet := cmd.Flags().Changed("rook-version")
-	if versionSet {
-		if err := releasedName(deployName); err != nil {
-			return rookSource{}, nil, nil, err
-		}
-	}
-	name, err := useCluster(deployName)
+	name, err := useClusterOrDir(deployName, deployDir, versionSet)
 	if err != nil {
 		return rookSource{}, nil, nil, err
 	}

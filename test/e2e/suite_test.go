@@ -83,6 +83,9 @@ var _ = BeforeSuite(func() {
 		Skip("neither ROOK_DIR nor ROOKET_ROOK_VERSION set; skipping rooket e2e (needs a Rook source tree or version, and iSCSI block devices)")
 	}
 	kubeCtx = "kind-" + clusterName
+	// 'rooket k', 'helm', and 'values' take no --name, and rooket refuses to
+	// guess a cluster, so they find the suite's through the environment.
+	Expect(os.Setenv("ROOKET_NAME", clusterName)).To(Succeed())
 
 	// rooket writes each cluster's kubeconfig under its own state dir, not
 	// ~/.kube/config; point the suite's kubectl/helm calls at it.

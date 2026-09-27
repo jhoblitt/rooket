@@ -20,7 +20,11 @@ var configCmd = &cobra.Command{
 	Use:   "config",
 	Short: "Print the kind cluster configuration that would be used by 'create'",
 	RunE: func(cmd *cobra.Command, args []string) error {
-		configName = clusterName(configName)
+		name, err := clusterName(configName)
+		if err != nil {
+			return err
+		}
+		configName = name
 		// Build a representative disk map for display purposes.
 		// Actual HostPaths are /dev/sdX assigned by block setup; shown here as placeholders.
 		workerDisks := make(map[int][]cluster.Disk)

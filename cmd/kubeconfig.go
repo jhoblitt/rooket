@@ -25,7 +25,10 @@ saved. rooket keeps each cluster's kubeconfig in its own state directory
 `,
 	Args: cobra.NoArgs,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		name := clusterName(kubeconfigName)
+		name, err := clusterName(kubeconfigName)
+		if err != nil {
+			return err
+		}
 		// --path says where the kubeconfig lives whether or not the cluster
 		// is up.
 		if kubeconfigPathOnly {
@@ -52,6 +55,6 @@ saved. rooket keeps each cluster's kubeconfig in its own state directory
 
 func init() {
 	rootCmd.AddCommand(kubeconfigCmd)
-	kubeconfigCmd.Flags().StringVar(&kubeconfigName, "name", "", "cluster name (default: rook clone basename, or rook)")
+	kubeconfigCmd.Flags().StringVar(&kubeconfigName, "name", "", "cluster name (default: $ROOKET_NAME, else derived from the enclosing rook clone's path)")
 	kubeconfigCmd.Flags().BoolVar(&kubeconfigPathOnly, "path", false, "print the kubeconfig file path instead of its contents")
 }

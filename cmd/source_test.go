@@ -162,29 +162,6 @@ func TestConfigHome(t *testing.T) {
 	}
 }
 
-func TestReleasedName(t *testing.T) {
-	t.Setenv("ROOKET_NAME", "")
-	t.Chdir(t.TempDir())
-	if err := releasedName(""); err == nil {
-		t.Error("releasedName outside a clone with no name = nil, want the fallback refused")
-	}
-	if err := releasedName("rgw-go"); err != nil {
-		t.Errorf("releasedName with --name = %v, want nil", err)
-	}
-	t.Setenv("ROOKET_NAME", "rgw-go")
-	if err := releasedName(""); err != nil {
-		t.Errorf("releasedName with $ROOKET_NAME = %v, want nil", err)
-	}
-
-	clone := t.TempDir()
-	writeGoMod(t, clone, rookModulePath)
-	t.Setenv("ROOKET_NAME", "")
-	t.Chdir(clone)
-	if err := releasedName(""); err != nil {
-		t.Errorf("releasedName inside a clone = %v, want nil: the clone names the cluster", err)
-	}
-}
-
 // stubChartPuller makes releasedCharts unpack stand-in charts into a
 // throwaway cache instead of running helm.
 func stubChartPuller(t *testing.T) {

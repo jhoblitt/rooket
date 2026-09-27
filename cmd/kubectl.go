@@ -23,7 +23,11 @@ clone's path.
 	// them as rooket flags.
 	DisableFlagParsing: true,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		kc, err := requireKubeconfig(clusterName(""))
+		name, err := envClusterName()
+		if err != nil {
+			return err
+		}
+		kc, err := requireKubeconfig(name)
 		if err != nil {
 			return err
 		}

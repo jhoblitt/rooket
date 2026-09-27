@@ -15,23 +15,106 @@ import (
 	"github.com/jhoblitt/rooket/internal/engine"
 )
 
-// clusterName resolves the cluster name in precedence order: the explicit
-// --name flag value if non-empty, then $ROOKET_NAME, then the rook clone's
-// absolute path encoded by encodePath (so two checkouts that share a basename
-// in different directories get distinct clusters), then "rook".
-func clusterName(flagName string) string {
+// clusterName resolves the name of the cluster a command with a --name flag
+// acts on; see resolveClusterName.
+func clusterName(flagName string) (string, error) {
+	return resolveClusterName(flagName, "", noClusterError{takesName: true})
+}
+
+// clusterNameOrDir is clusterName for a command that also takes --dir, a rook
+// clone to work from.
+func clusterNameOrDir(flagName, dir string) (string, error) {
+	return resolveClusterName(flagName, dir, noClusterError{takesName: true, dirWays: "--dir"})
+}
+
+// clusterNameOrRookDir is clusterNameOrDir for a command that finds its rook
+// tree with resolveRookDir, which takes $ROOK_DIR in place of an unset --dir.
+// released says the command was given --rook-version: it then reads no tree,
+// only released charts, and --dir merely locates its configuration home, so
+// neither --dir nor $ROOK_DIR names the cluster.
+func clusterNameOrRookDir(flagName, dir string, released bool) (string, error) {
+	if released {
+		return clusterName(flagName)
+	}
+	return resolveClusterName(flagName, namedRookDir(dir), noClusterError{takesName: true, dirWays: rookDirWays})
+}
+
+// envClusterName is clusterName for a command with no --name flag.
+func envClusterName() (string, error) {
+	return resolveClusterName("", "", noClusterError{})
+}
+
+// rookDirClusterName is clusterNameOrRookDir for a command with no --name flag.
+func rookDirClusterName(dir string, released bool) (string, error) {
+	if released {
+		return envClusterName()
+	}
+	return resolveClusterName("", namedRookDir(dir), noClusterError{dirWays: rookDirWays})
+}
+
+// rookDirWays is how a command reading its tree with resolveRookDir can be
+// pointed at a clone.
+const rookDirWays = "--dir or $ROOK_DIR"
+
+// resolveClusterName resolves a cluster name in precedence order: the --name
+// flag value if non-empty, then $ROOKET_NAME, then the rook clone enclosing the
+// working directory, then the one enclosing dir, the clone the command was
+// pointed at. A clone is named by its root's absolute path encoded by
+// encodePath, so two checkouts that share a basename in different directories
+// get distinct clusters, and a command pointed at a clone gets the name it
+// would get inside that clone. The working directory's clone outranks dir's
+// so that no name a clone already gave a cluster changes.
+//
+// With none of them it returns refusal rather than guess: a fixed default
+// would have the command act on whatever cluster holds that name, possibly
+// someone else's, which down would destroy.
+func resolveClusterName(flagName, dir string, refusal noClusterError) (string, error) {
 	if flagName != "" {
-		return flagName
+		return flagName, nil
 	}
 	if env := os.Getenv("ROOKET_NAME"); env != "" {
-		return env
+		return env, nil
 	}
 	if wd, err := os.Getwd(); err == nil {
 		if root := findRookRoot(wd); root != "" {
-			return encodePath(root)
+			return encodePath(root), nil
 		}
 	}
-	return "rook"
+	if dir != "" {
+		if abs, err := filepath.Abs(dir); err == nil {
+			if root := findRookRoot(abs); root != "" {
+				return encodePath(root), nil
+			}
+		}
+	}
+	return "", refusal
+}
+
+// noClusterError refuses a command that names no cluster, offering only what
+// the command accepts: takesName says whether it has a --name flag, and
+// dirWays names what points it at a clone, or is empty when nothing does.
+type noClusterError struct {
+	takesName bool
+	dirWays   string
+}
+
+func (e noClusterError) Error() string {
+	ways := []string{"set $ROOKET_NAME", "run inside a rook clone"}
+	legacy := "ROOKET_NAME=rook"
+	if e.takesName {
+		ways = append([]string{"pass --name"}, ways...)
+		legacy = "--name rook"
+	}
+	if e.dirWays != "" {
+		ways = append(ways, "point "+e.dirWays+" at one")
+	}
+	last := len(ways) - 1
+	list := strings.Join(ways[:last], ", ")
+	if last > 1 {
+		list += ","
+	}
+	return fmt.Sprintf(`no cluster selected: %s or %s (a cluster made by an older rooket is named "rook": select it with %s)`,
+		list, ways[last], legacy)
 }
 
 // encodePath turns an absolute path into a unique, kind-safe cluster name by
@@ -235,7 +318,31 @@ func helmEnvAt(base string) ([]string, error) {
 // write state (create/up via writeRegistryPort, block setup) create it, so
 // read-only commands like delete don't leave empty dirs behind.
 func useCluster(flagName string) (string, error) {
-	name := clusterName(flagName)
+	return pointKubeconfig(clusterName(flagName))
+}
+
+// useClusterOrDir is useCluster for a command that also takes --dir. released
+// says the command was given --rook-version, when --dir does not name the
+// cluster; see clusterNameOrRookDir.
+func useClusterOrDir(flagName, dir string, released bool) (string, error) {
+	if released {
+		return useCluster(flagName)
+	}
+	return pointKubeconfig(clusterNameOrDir(flagName, dir))
+}
+
+// useClusterOrRookDir is useCluster for a command that finds its rook tree
+// with resolveRookDir; see clusterNameOrRookDir.
+func useClusterOrRookDir(flagName, dir string, released bool) (string, error) {
+	return pointKubeconfig(clusterNameOrRookDir(flagName, dir, released))
+}
+
+// pointKubeconfig points $KUBECONFIG at the kubeconfig of the cluster a
+// resolver named, or passes on the resolver's refusal.
+func pointKubeconfig(name string, err error) (string, error) {
+	if err != nil {
+		return "", err
+	}
 	kc, err := kubeconfigPath(name)
 	if err != nil {
 		return "", err

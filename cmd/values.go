@@ -16,6 +16,7 @@ var (
 	valuesRookVersion string
 	valuesConfigDir   string
 	valuesShowLayers  bool
+	valuesWorkers     int
 )
 
 var valuesCmd = &cobra.Command{
@@ -34,6 +35,10 @@ var valuesShowCmd = &cobra.Command{
 	Short: "Print the merged values rooket would deploy",
 	Args:  cobra.MaximumNArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
+		workers, err := valuesWorkerCount(cmd)
+		if err != nil {
+			return err
+		}
 		src, err := valuesSource(cmd)
 		if err != nil {
 			return err
@@ -57,7 +62,7 @@ var valuesShowCmd = &cobra.Command{
 		}
 
 		for i, chart := range charts {
-			base, err := showBase(chart, src)
+			base, err := showBase(chart, src, workers)
 			if err != nil {
 				return err
 			}
@@ -78,18 +83,29 @@ var valuesShowCmd = &cobra.Command{
 	},
 }
 
+// valuesWorkerCount returns the worker count --workers asks a values command to
+// fit the cluster chart's base to, or 0 when it is unset and the cluster's
+// recorded count applies.
+func valuesWorkerCount(cmd *cobra.Command) (int, error) {
+	if !cmd.Flags().Changed("workers") {
+		return 0, nil
+	}
+	if valuesWorkers < 1 {
+		return 0, fmt.Errorf("--workers must be more than 0, not %d", valuesWorkers)
+	}
+	return valuesWorkers, nil
+}
+
 // valuesSource resolves the charts and configuration home a values command
 // renders for, as a deploy of the cluster in scope would. It writes no record:
 // only a deploy changes what a cluster runs.
 func valuesSource(cmd *cobra.Command) (rookSource, error) {
-	// values has no --name flag of its own; $ROOKET_NAME or an enclosing clone
-	// must name the cluster, the same refusal deploy and up apply.
-	if cmd.Flags().Changed("rook-version") {
-		if err := releasedName(""); err != nil {
-			return rookSource{}, err
-		}
+	versionSet := cmd.Flags().Changed("rook-version")
+	name, err := rookDirClusterName(valuesDir, versionSet)
+	if err != nil {
+		return rookSource{}, err
 	}
-	rec, _, err := resolveSource(clusterName(""), valuesRookVersion, cmd.Flags().Changed("rook-version"),
+	rec, _, err := resolveSource(name, valuesRookVersion, versionSet,
 		valuesConfigDir, cmd.Flags().Changed("config-dir"))
 	if err != nil {
 		return rookSource{}, err
@@ -99,7 +115,7 @@ func valuesSource(cmd *cobra.Command) (rookSource, error) {
 		if err != nil {
 			return rookSource{}, err
 		}
-		return rookSource{charts: dir, config: configHome(rec, dir)}, nil
+		return rookSource{charts: dir, config: configHome(rec, dir), cluster: name}, nil
 	}
 	charts, err := releasedCharts(rec.RookVersion)
 	if err != nil {
@@ -118,14 +134,15 @@ func valuesSource(cmd *cobra.Command) (rookSource, error) {
 			return rookSource{}, err
 		}
 	}
-	return rookSource{charts: charts, config: configHome(rec, rookDir), released: rec.RookVersion}, nil
+	return rookSource{charts: charts, config: configHome(rec, rookDir), released: rec.RookVersion, cluster: name}, nil
 }
 
 // showBase reproduces the generated layer without contacting the registry or
 // an iSCSI session: show runs against a cluster that may not exist, so the
-// image digest and resolved device paths are deliberately absent. The worker
-// count is the cluster's recorded one, which is what a deploy would use.
-func showBase(chart string, src rookSource) (map[string]any, error) {
+// image digest and resolved device paths are deliberately absent. The cluster
+// chart is fitted to workers or, when that is 0, to the cluster's recorded
+// count, which is what a deploy would use.
+func showBase(chart string, src rookSource, workers int) (map[string]any, error) {
 	switch chart {
 	case chartOperator:
 		if src.released != "" {
@@ -138,7 +155,10 @@ func showBase(chart string, src rookSource) (map[string]any, error) {
 	case chartCSI:
 		return values.CSIBase(), nil
 	default:
-		shape, _ := readShape(clusterName(""))
+		if workers > 0 {
+			return clusterBase(src.charts, workers, nil)
+		}
+		shape, _ := readShape(src.cluster)
 		return clusterBase(src.charts, shape.Workers, nil)
 	}
 }
@@ -192,4 +212,5 @@ func init() {
 	pf.StringArrayVar(&deployWithOnly, "with-only", nil, "profile to enable, by name or by directory path (./dir), replacing the configuration home's sticky list (repeatable)")
 
 	valuesShowCmd.Flags().BoolVar(&valuesShowLayers, "layers", false, "annotate each key with the layer that set it")
+	valuesShowCmd.Flags().IntVar(&valuesWorkers, "workers", 0, "fit the cluster chart's base to this many workers, previewing a cluster that is not up yet or would be resized (default: the cluster's recorded count, else the chart's three-host sizing)")
 }

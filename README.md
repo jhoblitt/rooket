@@ -214,6 +214,26 @@ store's realm, zonegroup, and zone after the store, and the example names all
 three; without them, `radosgw-admin` works in a `default` zone the RGW never
 reads.
 
+Rook's operator writes the store's realm, zonegroup, zone, and period with the
+`radosgw-admin` in its own container, so they are encoded by the operator
+image's Ceph, not by `cephImage`'s. Rook v1.20.7's operator image, like
+v1.19.9's, is built on Ceph v20.2.4, which encodes the zone (`zone_info.<id>`
+in `.rgw.root`) as `RGWZoneParams` struct version 18; every Squid release
+writes 15. A client that decodes the zone itself meets version 18 even on a
+cluster pinned to Squid, and must skip the trailing fields it does not know,
+as Ceph's own decoders do.
+
+The cluster adds users and a bucket of its own to the zone, which a client
+listing them will find:
+
+- `dashboard-admin`, a system user Rook's operator creates for the Ceph
+  dashboard while `cephClusterSpec.dashboard.enabled` is true, the chart's
+  default, unless the store's `gateway.dashboardEnabled` is false.
+- With the `rgw` profile, `rooket-rgw-user` from its CephObjectStoreUser, and
+  from its ObjectBucketClaim the user
+  `obc-rook-ceph-rooket-rgw-bucket-<claim UID>` and a bucket `rooket-<UUID>`.
+  Rook's operator creates `rgw-admin-ops-user` to provision both.
+
 From the host, reach the RGW at its node's IP on the gateway port, 80 by the
 chart's default. The Service name in the CephObjectStore's status is where the
 RGW serves inside the cluster, and what `rooket wait` probes, but it does not
@@ -251,7 +271,11 @@ exact rules.
 Each rook clone gets its own cluster. The cluster name is derived from the
 clone's absolute path (`/home/me/github/rook3` → `home-me-github-rook3`), so
 several clusters — one per checkout — can run concurrently; override with
-`--name` or `$ROOKET_NAME`.
+`--name` or `$ROOKET_NAME`. Run outside a rook clone, a command pointed at
+one — with `--dir`, or for `up` and `values` also `$ROOK_DIR` — names the
+cluster after that clone, as it would inside it, unless `--rook-version` has
+it use released Rook instead; with none of these, a command that works on a
+cluster refuses to run rather than guess which one you mean.
 
 Per-cluster state lives in `~/.local/share/rooket/<name>/`:
 
@@ -306,11 +330,12 @@ the host's root filesystem. A `configOverride` in a higher layer replaces that
 string rather than adding to it.
 
 ```console
-$ rooket values show cluster          # what would be deployed
-$ rooket values show cluster --layers # ...and which layer set each key
-$ rooket values edit cluster          # $EDITOR, seeded with the generated base
-$ rooket values profiles              # available profiles, active ones marked *
-$ rooket values profiles fork rgw     # copy a built-in to hack on
+$ rooket values show cluster              # what would be deployed
+$ rooket values show cluster --layers     # ...and which layer set each key
+$ rooket values show cluster --workers 1  # ...for a one-worker cluster not up yet
+$ rooket values edit cluster              # $EDITOR, seeded with the generated base
+$ rooket values profiles                  # available profiles, active ones marked *
+$ rooket values profiles fork rgw         # copy a built-in to hack on
 ```
 
 Profiles bundle values overrides with Kubernetes resources the rook charts do
@@ -441,6 +466,8 @@ job.
 ## Upgrading from older rooket
 
 Older versions used the fixed cluster name `rook` and wrote its context into
-`~/.kube/config`. Tear such a cluster down with `rooket down --name rook`
-before switching to per-clone names, and remove the stale `kind-rook`
-context/cluster/user entries from `~/.kube/config` if kind left them behind.
+`~/.kube/config`. Such a cluster is reached only by naming it: `--name rook`,
+or `ROOKET_NAME=rook` for `kubectl`, `helm`, and `values`, which take no
+`--name`. Tear it down with `rooket down --name rook` before switching to
+per-clone names, and remove the stale `kind-rook` context/cluster/user entries
+from `~/.kube/config` if kind left them behind.

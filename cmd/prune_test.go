@@ -447,6 +447,34 @@ func TestPruneExecute(t *testing.T) {
 		}
 	})
 
+	// As with down, a lock file left beside a state dir that is gone would
+	// outlive everything else of its cluster.
+	t.Run("an orphan's lock file goes with its state dir, and stays with one that survives", func(t *testing.T) {
+		root := t.TempDir()
+		remove := func(p string) error {
+			if p == filepath.Join(root, "kept") {
+				return errors.New("permission denied")
+			}
+			return os.RemoveAll(p)
+		}
+		if err := pruneExecute(root, []string{"gone", "kept"}, nil, func([]iscsiDisk) error { return nil }, remove, io.Discard); err != nil {
+			t.Fatalf("pruneExecute: %v", err)
+		}
+		lock := func(name string) string {
+			p, err := clusterLockPath(root, name)
+			if err != nil {
+				t.Fatal(err)
+			}
+			return p
+		}
+		if _, err := os.Stat(lock("gone")); !os.IsNotExist(err) {
+			t.Errorf("the lock file of the orphan prune removed survived (stat: %v)", err)
+		}
+		if _, err := os.Stat(lock("kept")); err != nil {
+			t.Errorf("the lock file of the orphan whose state dir survived was removed: %v", err)
+		}
+	})
+
 	t.Run("teardown sees the full disks batch in one call", func(t *testing.T) {
 		var gotDisks []iscsiDisk
 		teardown := func(d []iscsiDisk) error {

@@ -19,6 +19,10 @@ var valuesEditCmd = &cobra.Command{
 	Short: "Edit the configuration home's values overrides in $EDITOR",
 	Args:  cobra.MaximumNArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
+		workers, err := valuesWorkerCount(cmd)
+		if err != nil {
+			return err
+		}
 		src, err := valuesSource(cmd)
 		if err != nil {
 			return err
@@ -39,7 +43,7 @@ var valuesEditCmd = &cobra.Command{
 			return err
 		}
 		for _, chart := range charts {
-			seed, err := seedFor(chart, src)
+			seed, err := seedFor(chart, src, workers)
 			if err != nil {
 				return err
 			}
@@ -54,8 +58,8 @@ var valuesEditCmd = &cobra.Command{
 // seedFor renders rooket's generated layer as commented YAML. Knowing which of
 // the chart's keys exist and what rooket already set is the hard part of
 // overriding one, so a new file starts as the answer to both.
-func seedFor(chart string, src rookSource) ([]byte, error) {
-	base, err := showBase(chart, src)
+func seedFor(chart string, src rookSource, workers int) ([]byte, error) {
+	base, err := showBase(chart, src, workers)
 	if err != nil {
 		return nil, err
 	}
@@ -183,4 +187,6 @@ func launchEditor(path string) error {
 
 func init() {
 	valuesCmd.AddCommand(valuesEditCmd)
+	// Bound to show's variable, which valuesWorkerCount reads for either command.
+	valuesEditCmd.Flags().IntVar(&valuesWorkers, "workers", 0, "fit the generated base a new overrides file is seeded with to this many workers, for a cluster that is not up yet or would be resized (default: the cluster's recorded count, else the chart's three-host sizing)")
 }

@@ -260,28 +260,38 @@ func TestUpSourceCloneMode(t *testing.T) {
 	}
 }
 
-// Removing the releasedName call at the top of up's RunE — before useCluster
-// and any cluster work — passes every other unit test: nothing else invokes
-// upCmd.RunE directly, only upSource, which the guard runs ahead of. This
-// wires it into the command a user actually runs.
+// up's refusal of a cluster it cannot name comes from useClusterOrRookDir, at
+// the top of its RunE, ahead of any cluster work; this wires it into the
+// command a user actually runs. Given --rook-version, up reads no rook tree,
+// so a clone that --dir or $ROOK_DIR points at does not name its cluster.
 //
-// isolateUpSource keeps a regressed guard off the developer's real
-// ~/.local/share/rooket and stubs the chart puller; upForceBuild is a second,
-// independent tripwire so a regressed guard still refuses — inside upSource,
-// via releasedBuildConflict, before releasedCharts or writeSource run — ahead
-// of block setup (pkexec) and kind create, which isolating HOME alone would
-// not stop.
-func TestUpRunEReleasedRefusesTheFallbackName(t *testing.T) {
-	isolateUpSource(t)
-	t.Setenv("ROOKET_NAME", "")
-	t.Setenv("KUBECONFIG", "") // useCluster sets this outside testing's tracking
-	name := upName
-	t.Cleanup(func() { upName = name })
-	upName = ""
-	parseUpFlags(t, "--rook-version=v1.20.7")
-	upForceBuild = true
+// isolateUpSource keeps a regressed refusal off the developer's real
+// ~/.local/share/rooket and stubs the chart puller; upForceBuild with
+// --rook-version is a second, independent tripwire so a regressed refusal
+// still stops — inside upSource, via releasedBuildConflict, before
+// releasedCharts or writeSource run — ahead of block setup (pkexec) and kind
+// create, which isolating HOME alone would not stop.
+func TestUpRunERefusesAnUnnamedCluster(t *testing.T) {
+	for _, pointed := range []string{"nothing", "ROOK_DIR", "dir"} {
+		t.Run(pointed, func(t *testing.T) {
+			isolateUpSource(t)
+			t.Setenv("ROOKET_NAME", "")
+			t.Setenv("KUBECONFIG", "") // useCluster sets this outside testing's tracking
+			name := upName
+			t.Cleanup(func() { upName = name })
+			upName = ""
+			clone := t.TempDir()
+			writeGoMod(t, clone, rookModulePath)
+			switch pointed {
+			case "ROOK_DIR":
+				t.Setenv("ROOK_DIR", clone)
+			case "dir":
+				upRookDir = clone
+			}
+			parseUpFlags(t, "--rook-version=v1.20.7")
+			upForceBuild = true
 
-	if err := upCmd.RunE(upCmd, nil); err == nil || !strings.Contains(err.Error(), "--name") {
-		t.Fatalf("upCmd.RunE = %v, want the fallback name refused, pointing at --name", err)
+			assertRefused(t, upCmd.RunE(upCmd, nil), "--name")
+		})
 	}
 }

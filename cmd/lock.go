@@ -3,6 +3,7 @@ package cmd
 import (
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -23,8 +24,15 @@ import (
 // first.
 var (
 	heldMu sync.Mutex
-	held   = map[string]*os.File{}
+	held   = map[string]*clusterLock{}
 )
+
+// clusterLock is one cluster lock this process holds.
+type clusterLock struct {
+	f      *os.File
+	path   string
+	remove bool // the release deletes the lock file; see removeClusterLockOnRelease
+}
 
 // LockCluster takes the host-wide exclusive lock for a cluster and returns the
 // function that releases it.
@@ -80,11 +88,20 @@ func lockClusterIn(root, name string) (release func(), err error) {
 	}
 	writeLockOwner(f)
 
-	held[name] = f
+	l := &clusterLock{f: f, path: path}
+	held[name] = l
 	return func() {
 		heldMu.Lock()
 		defer heldMu.Unlock()
 		delete(held, name)
+		// The unlink must come before the close. Once the flock is dropped,
+		// another rooket can lock this inode and pass acquireFlock's check,
+		// since the path still names it; unlinking after that would pull the
+		// file out from under a live holder and let a third run create and
+		// lock a fresh one. A failed unlink costs a stray file and nothing else.
+		if l.remove {
+			_ = os.Remove(l.path)
+		}
 		// Closing the descriptor releases the flock. The kernel does the same on
 		// exit, including a kill, so an interrupted run never strands the lock —
 		// which is the whole reason this is not a pid file.
@@ -92,16 +109,33 @@ func lockClusterIn(root, name string) (release func(), err error) {
 	}, nil
 }
 
+// removeClusterLockOnRelease has the release of this process's lock on a
+// cluster delete the lock file as well, for a run that leaves nothing of the
+// cluster behind. The deletion waits for the release that actually lets go, a
+// nested one staying a no-op, and nothing happens unless this process holds the
+// lock: only the holder may delete a lock file, and only as it lets go (see
+// acquireFlock).
+func removeClusterLockOnRelease(name string) {
+	heldMu.Lock()
+	defer heldMu.Unlock()
+	if l, ok := held[name]; ok {
+		l.remove = true
+	}
+}
+
 // clusterLockPath is deliberately beside the cluster's state directory rather
 // than inside it: 'down --delete-disks', 'down --all', and 'prune' all
 // os.RemoveAll that directory, and unlinking a locked file is silent and legal.
-// A waiter would then create a fresh file at the same path and lock a different
-// inode, leaving two runs each convinced it holds the cluster.
+// Inside it, the lock file would go whenever the directory did rather than as
+// its holder lets go, the one moment it is safe to delete (see acquireFlock):
+// the next locker could create a fresh file at the same path, lock it, and pass
+// acquireFlock's check while the holder was still at work, leaving two runs
+// each convinced it holds the cluster.
 //
-// For the same reason nothing ever deletes these: unlinking a lock file while
-// holding it reopens exactly that hole. They are a few dozen bytes each, one
-// per cluster name ever used, and stateDirNames only counts directories, so a
-// leftover is invisible to 'list', 'down --all', and 'prune'.
+// Only down and prune delete a lock file: with the cluster's state dir, or, for
+// down, on finding nothing of the cluster at all. A leftover is harmless:
+// stateDirNames only counts directories, so it is invisible to 'list',
+// 'down --all', and 'prune'.
 func clusterLockPath(root, name string) (string, error) {
 	if err := validateClusterName(name); err != nil {
 		return "", err
@@ -163,27 +197,86 @@ func LockPorts() (release func(), err error) {
 // acquireFlock opens path and takes an exclusive flock on it. wait of zero
 // tries once; otherwise it retries until wait elapses, since flock itself has
 // no timeout and a blocking one could never be interrupted.
+//
+// A flock is taken on an inode, not a path, and down and prune delete cluster
+// lock files (see removeClusterLockOnRelease). A locker that opened the file
+// just before one was deleted would go on to lock an inode no path names,
+// while the next locker creates a fresh file at the path and locks that one:
+// two runs, each holding "the" lock. So a flock counts only once the path is
+// seen, with the flock held, to still name the inode it was taken on;
+// otherwise the file is opened and locked afresh.
+//
+// That check is enough because of the rule on the other side: a lock file is
+// deleted only by the process holding its flock, and only as it lets go. While
+// the holder keeps the flock nothing else unlinks the path or puts another file
+// there — O_CREATE never replaces a file — so a locker that passes the check
+// holds a flock on the one inode the path names, and that flock excludes every
+// other locker that passes it. Once the holder deletes the file, a locker still
+// on the old inode fails the check and moves to whatever the path names next.
+// A retry therefore follows the end of another run's hold, so the loop cannot
+// spin on its own; and it retries at once, even when wait is zero, because it
+// is not waiting for the lock but finding the file.
 func acquireFlock(path string, wait time.Duration) (*os.File, error) {
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o644)
-	if err != nil {
-		return nil, err
-	}
 	deadline := time.Now().Add(wait)
 	for {
-		err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
-		if err == nil {
-			return f, nil
+		f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o644)
+		if err != nil {
+			return nil, err
 		}
-		if !errors.Is(err, syscall.EWOULDBLOCK) {
+		betweenOpenAndFlock(path)
+		if err := flockUntil(f, deadline); err != nil {
 			f.Close()
 			return nil, err
 		}
-		if !time.Now().Before(deadline) {
+		current, err := namesFile(path, f)
+		if err != nil {
 			f.Close()
-			return nil, errLockBusy
+			return nil, err
+		}
+		if current {
+			return f, nil
+		}
+		f.Close()
+	}
+}
+
+// betweenOpenAndFlock runs in the window where the lock file acquireFlock has
+// just opened can be deleted under it. Tests set it to land that race on
+// demand.
+var betweenOpenAndFlock = func(path string) {}
+
+// flockUntil takes an exclusive flock on f, retrying while another process
+// holds it until deadline passes.
+func flockUntil(f *os.File, deadline time.Time) error {
+	for {
+		err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
+		if err == nil {
+			return nil
+		}
+		if !errors.Is(err, syscall.EWOULDBLOCK) {
+			return err
+		}
+		if !time.Now().Before(deadline) {
+			return errLockBusy
 		}
 		time.Sleep(25 * time.Millisecond)
 	}
+}
+
+// namesFile reports whether path currently names the file f has open.
+func namesFile(path string, f *os.File) (bool, error) {
+	open, err := f.Stat()
+	if err != nil {
+		return false, err
+	}
+	now, err := os.Stat(path)
+	if errors.Is(err, fs.ErrNotExist) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return os.SameFile(open, now), nil
 }
 
 // lockOwnerAt renders the holder recorded in a lock file we failed to take.

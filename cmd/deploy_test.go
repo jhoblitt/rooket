@@ -335,16 +335,36 @@ func TestDeploySetupTakesTheReleasedVersionFromTheRecord(t *testing.T) {
 	}
 }
 
-func TestDeploySetupReleasedRefusesTheFallbackName(t *testing.T) {
-	isolateDeploySetup(t, "unused", clusterShape{Workers: 1, DiskCount: 1, IQNDate: "2003-01"})
-	stubChartPuller(t)
-	t.Setenv("ROOKET_NAME", "")
-	t.Chdir(t.TempDir())
-	deployName = ""
-	parseDeployFlags(t, "--rook-version=v1.20.7")
+// Given --rook-version, deploy reads no rook tree and --dir only locates its
+// configuration home, so a clone --dir points at does not name the cluster:
+// taking that clone's name would upgrade the clone's own cluster to released
+// charts and record it as released.
+func TestDeploySetupRefusesAnUnnamedCluster(t *testing.T) {
+	for _, pointed := range []string{"no clone", "a clone"} {
+		t.Run("released, --dir at "+pointed, func(t *testing.T) {
+			isolateDeploySetup(t, "unused", clusterShape{Workers: 1, DiskCount: 1, IQNDate: "2003-01"})
+			stubChartPuller(t)
+			t.Setenv("ROOKET_NAME", "")
+			t.Chdir(t.TempDir())
+			dir := t.TempDir()
+			if pointed == "a clone" {
+				writeGoMod(t, dir, rookModulePath)
+			}
+			deployName, deployDir = "", dir
+			parseDeployFlags(t, "--rook-version=v1.20.7")
 
-	if _, _, _, err := deploySetup(deployCmd); err == nil || !strings.Contains(err.Error(), "--name") {
-		t.Fatalf("deploySetup = %v, want the fallback name refused, pointing at --name", err)
+			_, _, release, err := deploySetup(deployCmd)
+			if err == nil {
+				release()
+			}
+			if rec, ok := readSource(encodePath(dir)); ok {
+				t.Errorf("record = %+v for the cluster --dir's clone names, want none written", rec)
+			}
+			if _, err := os.Stat(clusterLockFile(t, encodePath(dir))); !os.IsNotExist(err) {
+				t.Errorf("the cluster --dir's clone names was locked (stat: %v), want the refusal first", err)
+			}
+			assertRefused(t, err, "--name")
+		})
 	}
 }
 

@@ -208,6 +208,7 @@ func pruneExecute(root string, orphans []string, disks []iscsiDisk, teardown fun
 			fmt.Fprintf(out, "warning: remove %s: %v\n", p, err)
 		} else {
 			fmt.Fprintf(out, "removed %s\n", p)
+			removeClusterLockOnRelease(o)
 		}
 		release()
 	}
