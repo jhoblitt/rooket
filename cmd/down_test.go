@@ -49,21 +49,32 @@ type downHost struct {
 	// The kernel's iSCSI configuration, in writeFakeLIO's terms: a backstore
 	// name and its backing path, each exported by a target.
 	lio map[string]string
+	// byPath are the target IQNs with a session logged in, each of which has a
+	// /dev/disk/by-path link for its LUN 0.
+	byPath []string
 }
 
 // stubDownHost puts stubs for every command a down run can reach on PATH, and
 // nothing else, so no real kind, container engine, or iSCSI tool can run — as
 // root or through sudo. Each stub appends its invocation to the returned log.
 // kind stops listing a cluster once it has been asked to delete it, and starts
-// listing h.upLater from its second listing on. targetcli
-// fails every delete, as the real one does for an object that does not exist.
-// The kernel's iSCSI configuration is read from h.lio, empty unless set, and
-// never from the machine's own.
+// listing h.upLater from its second listing on. targetcli fails every delete,
+// as the real one does for an object that does not exist. The kernel's iSCSI
+// configuration is read from h.lio, and the by-path links from h.byPath, each
+// empty unless set, and never from the machine's own.
 func stubDownHost(t *testing.T, h downHost) string {
 	t.Helper()
 	keep(t, &hostLIORoot)
 	lioRoot := writeFakeLIO(t, h.lio)
 	hostLIORoot = func() string { return lioRoot }
+	keep(t, &hostByPathDir)
+	byPath := t.TempDir()
+	for _, iqn := range h.byPath {
+		if err := os.Symlink("/dev/sdz", filepath.Join(byPath, iscsiByPathPrefix+iqn+iscsiByPathSuffix)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	hostByPathDir = func() string { return byPath }
 	dir := t.TempDir()
 	logPath := filepath.Join(dir, "calls.log")
 	logCall := fmt.Sprintf(`printf '%%s %%s\n' "${0##*/}" "$*" >> %q`, logPath)

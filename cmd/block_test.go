@@ -128,6 +128,30 @@ func TestResolveDeviceLink(t *testing.T) {
 	})
 }
 
+// Block setup, create, and deploy find a target's device through the host's
+// by-path links, read from hostByPathDir like prune's scan, so a test can hand
+// them links of its own rather than the machine's sessions.
+func TestISCSIDeviceLookupsReadTheByPathLinksThroughTheSeam(t *testing.T) {
+	keep(t, &hostByPathDir)
+	byPath := t.TempDir()
+	hostByPathDir = func() string { return byPath }
+	dev := filepath.Join(t.TempDir(), "sdz")
+	if err := os.WriteFile(dev, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	const iqn = "iqn.2003-01.local.rooket:y6-seam-worker0-disk0"
+	if err := os.Symlink(dev, filepath.Join(byPath, iscsiByPathPrefix+iqn+iscsiByPathSuffix)); err != nil {
+		t.Fatal(err)
+	}
+
+	if !iscsiDevicePresent(iqn) {
+		t.Errorf("iscsiDevicePresent(%s) = false, want the device the stubbed link names", iqn)
+	}
+	if got, err := waitForISCSIDevice(iqn); err != nil || got != dev {
+		t.Errorf("waitForISCSIDevice(%s) = %q, %v; want %q", iqn, got, err, dev)
+	}
+}
+
 func TestInitiatorNameCurrent(t *testing.T) {
 	const want = "iqn.2003-01.local.rooket:initiator"
 	cases := []struct {

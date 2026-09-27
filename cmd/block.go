@@ -780,7 +780,7 @@ const (
 
 // iscsiByPathLink returns the /dev/disk/by-path symlink for a target's LUN 0.
 func iscsiByPathLink(targetIQN string) string {
-	return filepath.Join(iscsiByPathDir, iscsiByPathPrefix+targetIQN+iscsiByPathSuffix)
+	return filepath.Join(hostByPathDir(), iscsiByPathPrefix+targetIQN+iscsiByPathSuffix)
 }
 
 // resolveDeviceLink reads a symlink and returns its target as an absolute path,

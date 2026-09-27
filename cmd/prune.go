@@ -97,9 +97,10 @@ regardless, so this does not add a new restriction there.
 			return fmt.Errorf("refusing to prune with an unqueryable engine present")
 		}
 
-		strandedFound, err := discoverStranded(hostLIORoot(), iscsiByPathDir, pruneIQNDate)
+		byPathDir := hostByPathDir()
+		strandedFound, err := discoverStranded(hostLIORoot(), byPathDir, pruneIQNDate)
 		if err != nil {
-			return fmt.Errorf("scan %s: %w", iscsiByPathDir, err)
+			return fmt.Errorf("scan %s: %w", byPathDir, err)
 		}
 
 		orphans, parked, disks := prunePlan(root, stateNames, live, hasState, strandedFound, pruneInclParked)

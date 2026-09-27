@@ -180,8 +180,8 @@ func TestDiscoverStrandedFindsWhatByPathCannot(t *testing.T) {
 // printed, restoring its flags afterwards. The host is stubDownHost's.
 func runPrune(t *testing.T, args ...string) (string, error) {
 	t.Helper()
-	if hostLIORoot() == lio.DefaultRoot {
-		t.Fatal("runPrune without stubDownHost would read this machine's iSCSI configuration")
+	if hostLIORoot() == lio.DefaultRoot || hostByPathDir() == iscsiByPathDir {
+		t.Fatal("runPrune without stubDownHost would read this machine's iSCSI configuration and sessions")
 	}
 	for _, p := range []*bool{&pruneForce, &pruneDryRun, &pruneInclParked} {
 		keep(t, p)
@@ -219,6 +219,22 @@ func TestPruneReadsTheStubbedHostsISCSIConfiguration(t *testing.T) {
 	}
 }
 
+// prune reads the host's /dev/disk/by-path links through a seam too, so a test
+// hands it a directory of them and none depends on the machine's sessions.
+func TestPruneReadsTheStubbedHostsByPathLinks(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	const iqn = "iqn.2003-01.local.rooket:w5-session-worker0-disk0"
+	stubDownHost(t, downHost{byPath: []string{iqn}})
+
+	out, err := runPrune(t, "--dry-run")
+	if err != nil {
+		t.Fatalf("prune --dry-run: %v", err)
+	}
+	if !strings.Contains(out, iqn) {
+		t.Errorf("prune --dry-run printed\n%s\nwant the stubbed host's logged-in target %s listed", out, iqn)
+	}
+}
+
 // A cluster that comes up after prune looked — an up that finished between the
 // scan and the lock — is no orphan by the time prune could remove it, so it
 // keeps its targets and its state dir, and prune says why; the orphan beside it
@@ -246,12 +262,8 @@ func TestPruneLeavesAClusterThatCameUpAfterItLooked(t *testing.T) {
 	if err != nil {
 		t.Fatalf("prune: %v", err)
 	}
-	deleted := deletedTargets(calls(t, log))
-	if slices.Contains(deleted, workerTargets(late, 0)[0]) {
-		t.Errorf("prune tore down the targets of %s, which came up after it looked", late)
-	}
-	if !slices.Contains(deleted, workerTargets(gone, 0)[0]) {
-		t.Errorf("prune did not tear down the targets of the orphan %s: deleted %v", gone, deleted)
+	if deleted, want := deletedTargets(calls(t, log)), workerTargets(gone, 0); !slices.Equal(deleted, want) {
+		t.Errorf("prune tore down %v, want only the orphan's %v: not those of %s, which came up after it looked", deleted, want, late)
 	}
 	if _, err := os.Stat(filepath.Join(root, late)); err != nil {
 		t.Errorf("prune removed the state dir of %s, which came up after it looked: %v", late, err)
