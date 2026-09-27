@@ -1,6 +1,8 @@
 package cmd
 
 import (
+	"errors"
+	"os"
 	"strings"
 	"testing"
 
@@ -31,9 +33,18 @@ func TestSudoersCommandsAreRegistered(t *testing.T) {
 	}
 }
 
+// An invalid --user must be refused before install re-runs itself under sudo.
+// The stub sudo succeeds, so a re-exec would neither prompt nor fail.
 func TestSudoersInstallRejectsBadUser(t *testing.T) {
-	if err := sudoersInstall("../../etc/passwd"); err == nil {
-		t.Fatal("sudoersInstall accepted an invalid user name, want error")
+	dir, logPath := writeStubSudo(t, 0, 0)
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	err := sudoersInstall("../../etc/passwd")
+	if err == nil || !strings.Contains(err.Error(), `invalid user name "../../etc/passwd"`) {
+		t.Fatalf("sudoersInstall = %v, want the invalid-user rejection", err)
+	}
+	if _, err := os.Stat(logPath); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("sudo was invoked for an invalid user (stat %s: %v)", logPath, err)
 	}
 }
 

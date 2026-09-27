@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -476,9 +477,19 @@ esac
 	}
 }
 
+// The stubs authorize everything, so the only thing that can refuse the step
+// is runPrivileged's own vocabulary gate, and it must do so before anything
+// is executed.
 func TestRunPrivilegedRejectsUngrantedStep(t *testing.T) {
-	if err := runPrivileged(io.Discard, []privStep{{argv: []string{"rm", "-rf", "/"}}}); err == nil {
-		t.Fatal("runPrivileged accepted an ungranted command, want error")
+	dir, logPath := writeStubSudo(t, 0, 0)
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	err := runPrivileged(io.Discard, []privStep{{argv: []string{"id"}}})
+	if err == nil || !strings.Contains(err.Error(), `step "id" is not covered by rooket's privileged command vocabulary`) {
+		t.Fatalf("runPrivileged = %v, want the vocabulary gate's rejection", err)
+	}
+	if _, err := os.Stat(logPath); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("sudo or pkexec was invoked for an ungranted step (stat %s: %v)", logPath, err)
 	}
 }
 
