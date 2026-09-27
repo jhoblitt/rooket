@@ -245,7 +245,7 @@ Cluster %q is ready.
   kubectl:           rooket k <args>   (or: export KUBECONFIG="$(rooket kubeconfig --path)")
   local registry:    localhost:%d
   push images with:  %s push localhost:%d/<image>
-  image cache:       %s
+`+cacheSummaryLabel+`%s
 
 `, name, port, containerEngine.String(), port, cacheSummary(cacheReady, cacheErr))
 	return nil

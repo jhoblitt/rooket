@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/jhoblitt/rooket/internal/cache"
 	"github.com/jhoblitt/rooket/internal/run"
@@ -81,9 +82,12 @@ func teardownCache(out io.Writer) error {
 	return nil
 }
 
+// cacheSummaryLabel heads the image-cache line of the cluster-ready banner.
+const cacheSummaryLabel = "  image cache:       "
+
 // cacheSummaryIndent aligns a continuation line under the value column of the
 // cluster-ready banner.
-const cacheSummaryIndent = "\n                     "
+var cacheSummaryIndent = "\n" + strings.Repeat(" ", len(cacheSummaryLabel))
 
 // cacheSummary renders the image-cache line of the cluster-ready banner.
 //

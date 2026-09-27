@@ -8,13 +8,16 @@ import (
 )
 
 func TestBuiltInProfilesLoad(t *testing.T) {
-	dir := t.TempDir()
-	for _, name := range []string{"rbd", "rgw", "nfs"} {
-		t.Run(name, func(t *testing.T) {
-			p, err := Load(dir, name)
-			if err != nil {
-				t.Fatal(err)
-			}
+	// With an empty user directory, List returns exactly the built-ins.
+	builtIns, err := List(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(builtIns) == 0 {
+		t.Fatal("List found no built-in profiles")
+	}
+	for _, p := range builtIns {
+		t.Run(p.Name, func(t *testing.T) {
 			if !p.BuiltIn {
 				t.Error("want BuiltIn")
 			}

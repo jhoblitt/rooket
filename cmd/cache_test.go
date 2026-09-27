@@ -38,19 +38,3 @@ func TestCacheSummaryUnavailable(t *testing.T) {
 		}
 	}
 }
-
-// TestCacheSummaryAlignment pins the continuation indent to the banner's value
-// column. The label and the indent are declared in different files, so a later
-// edit to either silently ragged-edges the block without this.
-func TestCacheSummaryAlignment(t *testing.T) {
-	const label = "  image cache:       " // as written in createClusterRun's banner
-	got := cacheSummary(false, errors.New("boom"))
-
-	for _, line := range strings.Split(got, "\n")[1:] {
-		indent := len(line) - len(strings.TrimLeft(line, " "))
-		if indent != len(label) {
-			t.Errorf("continuation indent %d != label width %d; banner would be ragged:\n%s",
-				indent, len(label), got)
-		}
-	}
-}

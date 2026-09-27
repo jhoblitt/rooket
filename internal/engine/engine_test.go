@@ -108,6 +108,9 @@ func TestResolve(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			var warned bool
 			got, err := Resolve(tc.requested, tc.explicit, tc.probe, func(string) { warned = true })
+			if warned != tc.wantWarn {
+				t.Errorf("warned = %v, want %v", warned, tc.wantWarn)
+			}
 			if tc.wantErr {
 				if err == nil {
 					t.Fatalf("expected error, got engine %q", got)
@@ -119,9 +122,6 @@ func TestResolve(t *testing.T) {
 			}
 			if got != tc.want {
 				t.Errorf("engine = %q, want %q", got, tc.want)
-			}
-			if warned != tc.wantWarn {
-				t.Errorf("warned = %v, want %v", warned, tc.wantWarn)
 			}
 		})
 	}

@@ -112,15 +112,33 @@ func TestRenderEmptyDirError(t *testing.T) {
 
 func TestRenderDetectsPathCollision(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "chart")
-	_, err := Render(dir, Context{}, []Source{
-		{Prefix: "a", Files: map[string][]byte{"b-c.yaml": []byte("kind: ConfigMap\n")}},
-		{Prefix: "a-b", Files: map[string][]byte{"c.yaml": []byte("kind: ConfigMap\n")}},
-	})
-	if err == nil {
-		t.Error("Render should return error for path collision")
+	sources := []Source{
+		{Prefix: "a", Files: map[string][]byte{
+			"b-c.yaml": []byte("kind: ConfigMap\n"),
+			"b-d.yaml": []byte("kind: ConfigMap\n"),
+		}},
+		{Prefix: "a-b", Files: map[string][]byte{
+			"c.yaml": []byte("kind: ConfigMap\n"),
+			"d.yaml": []byte("kind: ConfigMap\n"),
+		}},
 	}
-	if !strings.Contains(err.Error(), "collision") {
-		t.Errorf("error should mention collision: %v", err)
+	// Both of a-b's files collide and map order varies from one render to
+	// the next, so the error is the same every time only if Render settles
+	// which collision it reports.
+	var first error
+	for range 100 {
+		_, err := Render(dir, Context{}, sources)
+		if err == nil {
+			t.Fatal("Render should return error for path collision")
+		}
+		if !strings.Contains(err.Error(), "collision") {
+			t.Fatalf("error should mention collision: %v", err)
+		}
+		if first == nil {
+			first = err
+		} else if err.Error() != first.Error() {
+			t.Fatalf("collision error changed between renders:\n  %v\n  %v", first, err)
+		}
 	}
 }
 
@@ -145,13 +163,17 @@ func TestRenderWritesAllFilesInMultiFileSource(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	wantNames := []string{"p-10-a.yaml", "p-20-b.yaml", "p-30-c.yaml"}
-	if len(entries) != len(wantNames) {
-		t.Fatalf("got %d files, want %d", len(entries), len(wantNames))
+	got := make(map[string]bool, len(entries))
+	for _, e := range entries {
+		got[e.Name()] = true
 	}
-	for i, entry := range entries {
-		if entry.Name() != wantNames[i] {
-			t.Errorf("file order position %d: got %q, want %q", i, entry.Name(), wantNames[i])
+	want := []string{"p-10-a.yaml", "p-20-b.yaml", "p-30-c.yaml"}
+	if len(got) != len(want) {
+		t.Fatalf("rendered %v, want %d files", got, len(want))
+	}
+	for _, name := range want {
+		if !got[name] {
+			t.Errorf("%s not rendered; have %v", name, got)
 		}
 	}
 }
