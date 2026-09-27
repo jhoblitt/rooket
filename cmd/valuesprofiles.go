@@ -6,17 +6,16 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/jhoblitt/rooket/internal/clone"
 	"github.com/jhoblitt/rooket/internal/profiles"
 	"github.com/jhoblitt/rooket/internal/run"
 )
 
 var valuesProfilesCmd = &cobra.Command{
 	Use:   "profiles",
-	Short: "List the available profiles, marking the ones this clone enables",
+	Short: "List the available profiles, marking the ones this configuration enables",
 	Args:  cobra.NoArgs,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		dir, err := resolveRookDir(valuesDir)
+		src, err := valuesSource(cmd)
 		if err != nil {
 			return err
 		}
@@ -24,7 +23,7 @@ var valuesProfilesCmd = &cobra.Command{
 		if err != nil {
 			return err
 		}
-		active, err := activeProfileNames(clone.Open(dir), deployWith, deployWithOnly, deployWithOnlySet)
+		active, err := activeProfileNames(src.config, deployWith, deployWithOnly, deployWithOnlySet)
 		if err != nil {
 			return err
 		}
