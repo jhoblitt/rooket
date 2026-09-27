@@ -214,14 +214,16 @@ store's realm, zonegroup, and zone after the store, and the example names all
 three; without them, `radosgw-admin` works in a `default` zone the RGW never
 reads.
 
-Rook's operator writes the store's realm, zonegroup, zone, and period with the
-`radosgw-admin` in its own container, so they are encoded by the operator
-image's Ceph, not by `cephImage`'s. Rook v1.20.7's operator image, like
-v1.19.9's, is built on Ceph v20.2.4, which encodes the zone (`zone_info.<id>`
-in `.rgw.root`) as `RGWZoneParams` struct version 18; every Squid release
-writes 15. A client that decodes the zone itself meets version 18 even on a
-cluster pinned to Squid, and must skip the trailing fields it does not know,
-as Ceph's own decoders do.
+Rook's operator creates the store's realm, zonegroup, zone, and period by
+running `radosgw-admin` in its own container, so they are encoded by the
+operator image's Ceph, not by `cephImage`'s. (With Multus networking, which
+rooket's clusters do not use, Rook runs it in the mgr pod's command-proxy
+container instead, on the cluster's Ceph image.) Rook v1.20.7's operator
+image, like v1.19.9's, is built on Ceph v20.2.4, which encodes the zone
+(`zone_info.<id>` in `.rgw.root`) as `RGWZoneParams` struct version 18; every
+Squid release writes 15. A client that decodes the zone itself meets version
+18 even on a cluster pinned to Squid, and must skip the trailing fields it
+does not know, as Ceph's own decoders do.
 
 The cluster adds users and a bucket of its own to the zone, which a client
 listing them will find:
