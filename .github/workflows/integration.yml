@@ -31,6 +31,41 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # Builds rooket once, with the Go its go.mod names, for every job that runs
+  # it. The e2e jobs then set up only the Go their rook branch needs, which
+  # need not be rooket's. Static, so it also runs in sudoers-policy's Fedora
+  # container.
+  build:
+    name: build rooket
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout rooket
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+
+      - name: Build rooket and the e2e test binary
+        env:
+          CGO_ENABLED: "0"
+        run: |
+          set -eux
+          go build -o rooket .
+          go test -c -tags e2e -o e2e.test ./test/e2e/
+
+      - name: Upload binaries
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: rooket-bin
+          path: |
+            rooket
+            e2e.test
+          if-no-files-found: error
+          retention-days: 1
+
   # Fast signal in parallel with the e2e job: a compile error, vet finding, or
   # unit-test failure reds out in ~1 minute instead of partway into a
   # ~12-minute e2e run.
@@ -68,6 +103,7 @@ jobs:
   # something.
   sudoers-policy:
     name: sudoers policy
+    needs: build
     runs-on: ubuntu-latest
     timeout-minutes: 10
     container:
@@ -76,21 +112,13 @@ jobs:
       - name: Install test dependencies
         run: dnf -y install --setopt=install_weak_deps=False diffutils git sudo targetcli iscsi-initiator-utils systemd
 
-      - name: Checkout rooket
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-
-      - name: Set up Go
-        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+      - name: Download rooket
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          go-version-file: go.mod
+          name: rooket-bin
 
-      - name: Build rooket
-        # actions/checkout leaves the workspace owned by the runner's uid while
-        # this job's container runs as root, so git rejects the repository as
-        # dubiously owned and go build's VCS stamping fails with exit 128.
-        run: |
-          git config --global --add safe.directory "$GITHUB_WORKSPACE"
-          go build -o /usr/local/bin/rooket .
+      - name: Install rooket
+        run: install -m 0755 rooket /usr/local/bin/rooket
 
       - name: Install the rule for an otherwise unprivileged user
         run: |
@@ -193,6 +221,7 @@ jobs:
 
   e2e:
     name: rooket up/down e2e (docker, ${{ matrix.rook-ref }})
+    needs: build
     runs-on: ubuntu-latest
     timeout-minutes: 120
     strategy:
@@ -211,9 +240,6 @@ jobs:
       # name from its cwd, which must then never sit inside the rook checkout.
       ROOKET_NAME: rook
     steps:
-      - name: Checkout rooket
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-
       - name: Free up runner disk
         run: |
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
@@ -221,10 +247,14 @@ jobs:
             /usr/share/swift /usr/local/share/powershell || true
           df -h /
 
-      - name: Set up Go
-        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+      - name: Download rooket and the e2e test binary
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          go-version-file: go.mod
+          name: rooket-bin
+
+      # Artifacts do not preserve the executable bit.
+      - name: Mark binaries executable
+        run: chmod +x rooket e2e.test
 
       - name: Install kind, kubectl, helm
         run: |
@@ -254,11 +284,23 @@ jobs:
           # chart version (a shallow checkout gives a bare SHA -> helm errors)
           fetch-depth: 0
 
-      - name: Build rooket and the e2e test binary
+      # rooket arrives prebuilt, so this job's Go is rook's alone: each rook
+      # branch's Makefile accepts only the minors it names, and its go.mod may
+      # pin an exact patch that setup-go would install verbatim. Build rook
+      # with the newest patch of the minor its go.mod declares.
+      - name: Resolve rook's Go version
+        id: rook-go
         run: |
-          set -eux
-          go build -o rooket .
-          go test -c -tags e2e -o e2e.test ./test/e2e/
+          minor="$(awk '$1 == "go" { split($2, v, "."); print v[1] "." v[2]; exit }' rook/go.mod)"
+          test -n "$minor" || { echo "no go directive in rook/go.mod" >&2; exit 1; }
+          echo "version=${minor}.x" >>"$GITHUB_OUTPUT"
+
+      - name: Set up Go for rook
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: ${{ steps.rook-go.outputs.version }}
+          check-latest: true
+          cache-dependency-path: rook/go.sum
 
       - name: Set up iSCSI OSD disks
         run: ./rooket block setup --workers "$WORKERS" --disk-count 1
