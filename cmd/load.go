@@ -90,6 +90,6 @@ func imageBasename(ref string) string {
 func init() {
 	rootCmd.AddCommand(loadCmd)
 
-	loadCmd.Flags().StringVar(&loadName, "name", "", "kind cluster name (used for context only)")
+	loadCmd.Flags().StringVar(&loadName, "name", "", "cluster name (selects the registry port)")
 	loadCmd.Flags().IntVar(&loadRegistryPort, "registry-port", 5001, "host port of the local OCI registry")
 }
