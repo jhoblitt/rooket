@@ -62,9 +62,12 @@ const replicaHosts = 3
 // ClusterBase builds rooket's generated layer for the rook-ceph-cluster chart.
 //
 // The cpu trims replace the chart's production-HA requests (1 cpu per mon and
-// per OSD): on a small host those fill each node's request budget until later
-// components — the detect-version jobs, the mds — cannot schedule at all, seen
-// as a wedged cluster on 4-vCPU CI runners. Memory requests and limits are left
+// per OSD, half a cpu per detect-version job, a tenth per daemon's log
+// collector): on a small host those fill each node's request budget until
+// later components — the detect-version jobs, the mds — cannot schedule at
+// all, seen as a wedged cluster on 4-vCPU CI runners. A detect-version job
+// that cannot schedule leaves the CephCluster Progressing indefinitely, though
+// Ceph itself is healthy. Memory requests and limits are left
 // alone (rook derives osd_memory_target and the MDS cache limit from them). A
 // standby mgr adds nothing to a disposable dev cluster and its requests eat a
 // node's budget.
@@ -87,6 +90,10 @@ func ClusterBase(in ClusterInput) map[string]any {
 			"mon": map[string]any{"requests": map[string]any{"cpu": "500m"}},
 			"osd": map[string]any{"requests": map[string]any{"cpu": "500m"}},
 			"mgr": map[string]any{"requests": map[string]any{"cpu": "300m"}},
+			// cmd-reporter is the detect-version job; logcollector is the
+			// sidecar in every daemon pod.
+			"cmd-reporter": map[string]any{"requests": map[string]any{"cpu": "100m"}},
+			"logcollector": map[string]any{"requests": map[string]any{"cpu": "50m"}},
 		},
 	}
 	if len(in.Nodes) > 0 {
