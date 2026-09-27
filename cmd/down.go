@@ -4,6 +4,9 @@ import (
 	"fmt"
 	"os"
 
+	"github.com/jhoblitt/rooket/internal/cluster"
+	"github.com/jhoblitt/rooket/internal/lio"
+	"github.com/jhoblitt/rooket/internal/registry"
 	"github.com/jhoblitt/rooket/internal/run"
 	"github.com/spf13/cobra"
 )
@@ -33,6 +36,12 @@ down needs no root and the next up reuses the devices without prompting either.
 Pass --delete-disks for the full teardown (this is the step that needs root —
 see 'rooket sudoers install' to remove the prompt). Use --skip-cluster to omit
 the cluster step.
+
+A cluster with no recorded shape has its iSCSI disks found rather than
+assumed from a worker count: the images in its state directory and the targets
+the kernel still holds for it, plus those of the workers an explicit --workers
+names. A cluster with nothing left at all is reported as not found, and down
+succeeds, so a teardown is safe to repeat.
 
 The shared OCI pull-through cache is host-wide, not per-cluster: it is what
 makes the next 'up' — in this clone or any other — skip re-downloading upstream
@@ -80,6 +89,15 @@ Example:
 		if err := useRecordedShape(downName, cmd.Flags().Changed, matchShape, &downWorkers, &downDiskCount, &downIQNDate); err != nil {
 			return err
 		}
+		// Decided under the lock, so no up can be creating the cluster between
+		// this check and the report that it does not exist.
+		if _, recorded := readShape(downName); !recorded && !clusterLeftovers(downName, lio.DefaultRoot, downIQNDate) {
+			run.Printf("cluster %q not found: no kind cluster, registry, state directory, or iSCSI targets; nothing to tear down\n", downName)
+			if downDeleteCache {
+				return removeSharedCache()
+			}
+			return nil
+		}
 
 		if downSkipCluster {
 			run.Printf("==> [1/2] cluster delete (skipped)\n")
@@ -122,9 +140,8 @@ Example:
 		}
 
 		if downDeleteCache {
-			run.Printf("==> removing the shared image cache\n")
-			if err := teardownCache(os.Stdout); err != nil {
-				return fmt.Errorf("remove image cache: %w", err)
+			if err := removeSharedCache(); err != nil {
+				return err
 			}
 		} else {
 			noteCachePreserved(os.Stdout)
@@ -135,11 +152,45 @@ Example:
 	},
 }
 
+// removeSharedCache is down's --delete-cache step. The cache is host-wide, so
+// it runs even for a cluster that has nothing else to tear down.
+func removeSharedCache() error {
+	run.Printf("==> removing the shared image cache\n")
+	if err := teardownCache(os.Stdout); err != nil {
+		return fmt.Errorf("remove image cache: %w", err)
+	}
+	return nil
+}
+
+// clusterLeftovers reports whether anything of a cluster is left for down to
+// remove, looking everywhere up leaves something: the state directory, the
+// kernel's iSCSI configuration, the kind cluster, and its registry container.
+// A probe that cannot answer counts as something left, so a cluster is only
+// reported absent when it has been shown to be.
+func clusterLeftovers(name, lioRoot, iqnDate string) bool {
+	dir, err := stateDirPath(name)
+	if err != nil {
+		return true
+	}
+	if _, err := os.Stat(dir); !os.IsNotExist(err) {
+		return true
+	}
+	st, err := lio.Read(lioRoot)
+	if err != nil || len(lioClusterDisks(st, iqnDate)[name]) > 0 {
+		return true
+	}
+	if live, err := cluster.Exists(os.Stdout, containerEngine, name); err != nil || live {
+		return true
+	}
+	found, err := registry.Lookup(os.Stdout, containerEngine, registry.ContainerName(name))
+	return err != nil || found
+}
+
 func init() {
 	rootCmd.AddCommand(downCmd)
 
 	downCmd.Flags().StringVar(&downName, "name", "", "kind cluster name")
-	downCmd.Flags().IntVar(&downWorkers, "workers", 3, "number of worker nodes; unset, the cluster's recorded value, which a set flag must match")
+	downCmd.Flags().IntVar(&downWorkers, "workers", 0, "number of worker nodes; unset, the cluster's recorded value, which a set flag must match (with no record, only the iSCSI disks that can be found are torn down)")
 	downCmd.Flags().IntVar(&downDiskCount, "disk-count", 1, "iSCSI disks per worker, 0 skips block teardown; unset, the cluster's recorded value, which a set flag must match")
 	downCmd.Flags().StringVar(&downIQNDate, "iqn-date", "2003-01", "IQN date component (YYYY-MM); unset, the cluster's recorded value, which a set flag must match")
 	downCmd.Flags().BoolVar(&downDeleteDisks, "delete-disks", false, "full teardown: remove iSCSI targets and delete the disk images and state dir (needs root)")

@@ -430,6 +430,13 @@ func blockTeardownRun(cmd *cobra.Command, _ []string) error {
 
 	disks := teardownDisks(lio.DefaultRoot, blockTeardownName, dataDir, blockTeardownIQNDate,
 		blockTeardownWorkers, blockTeardownDiskCount)
+	// A teardown told no worker count (down, for a cluster with no record) can
+	// find nothing, and the privileged run would then ask for root only to save
+	// an unchanged configuration.
+	if len(disks) == 0 {
+		run.Printf("no iSCSI disks found for cluster %q; nothing to tear down\n", blockTeardownName)
+		return nil
+	}
 
 	run.Printf("==> tearing down iSCSI targets\n")
 	steps := buildISCSITeardownSteps(disks)
