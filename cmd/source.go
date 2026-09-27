@@ -149,7 +149,9 @@ var chartPuller = func(env []string) chartcache.Puller {
 
 // releasedCharts returns the chart cache entry for a released Rook version,
 // pulling it on first use. The pull gets a helm home of its own inside the
-// cache, because the cache outlives any one cluster's state dir.
+// cache, because the cache outlives any one cluster's state dir. Every rooket on
+// the host pulls through that one home, which Ensure's lock keeps to one pull
+// at a time.
 func releasedCharts(version string) (string, error) {
 	root, err := chartcache.DefaultRoot()
 	if err != nil {

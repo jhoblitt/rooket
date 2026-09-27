@@ -10,6 +10,8 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"syscall"
+	"time"
 )
 
 // Repo is where released Rook charts are published.
@@ -44,8 +46,23 @@ func DefaultRoot() (string, error) {
 
 // Ensure returns the cache entry for version under root, pulling it first when
 // absent. An entry is pulled into a temporary sibling and renamed into place,
-// so an interrupted pull never leaves one behind; a run that loses that rename
-// to a concurrent one uses the winner's entry.
+// so an interrupted pull never leaves one behind and an entry that exists is
+// whole. One that appears mid-pull anyway, made by hand or by a process that
+// does not take the lock below, is used rather than fought over.
+//
+// Pulls under one root run one at a time, across processes. Different versions
+// get different entries but not a different helm: rooket's Puller gives helm one
+// home under root for every pull on the host, and helm writes the config and
+// cache files it keeps there non-atomically (see cmd's helmEnv). So a miss
+// takes an exclusive flock on root's lock file before it pulls (see lockPulls).
+// A hit takes none: it runs no Puller, and the rename means the entry it finds
+// was never half-written.
+//
+// Holding the lock, a miss looks for the entry again, and that re-check is what
+// makes it one pull per version rather than one per waiting run. The holder
+// renames its entry into place before it lets go, so a run that waited out a
+// successful pull finds that entry and returns it; it pulls only when the pull
+// it waited on failed or was killed, which leaves no entry.
 func Ensure(root, version string, pull Puller) (string, error) {
 	if err := ValidVersion(version); err != nil {
 		return "", err
@@ -57,6 +74,16 @@ func Ensure(root, version string, pull Puller) (string, error) {
 	if err := os.MkdirAll(root, 0o755); err != nil {
 		return "", fmt.Errorf("create chart cache %s: %w", root, err)
 	}
+	afterMiss()
+	release, err := lockPulls(root)
+	if err != nil {
+		return "", err
+	}
+	defer release()
+	if _, err := os.Stat(entry); err == nil {
+		return entry, complete(entry)
+	}
+
 	tmp, err := os.MkdirTemp(root, "."+version+"-")
 	if err != nil {
 		return "", fmt.Errorf("create chart cache entry for %s: %w", version, err)
@@ -95,4 +122,53 @@ func complete(entry string) error {
 		}
 	}
 	return nil
+}
+
+// afterMiss runs between Ensure finding no entry and its taking the lock.
+// Tests set it to make concurrent misses contend for the lock on demand.
+var afterMiss = func() {}
+
+// lockName is the file in root whose flock serializes pulls. The leading dot
+// keeps it out of the entries' namespace: an entry is named for a version, and
+// ValidVersion makes every version start with "v".
+const lockName = ".pull.lock"
+
+// lockWait bounds a miss's wait for another process's pull, so a wedged helm
+// cannot park every later first pull on the host indefinitely. It is generous
+// because giving up on a pull that is merely slow only sends the run back to
+// queue behind it again. Tests shorten it.
+var lockWait = 5 * time.Minute
+
+// lockPulls takes the exclusive flock that serializes pulls under root and
+// returns the function that releases it. It polls, since a blocking flock has
+// no timeout.
+//
+// Unlike cmd's cluster locks, this needs no check after the flock that the
+// path still names the locked file: rooket never deletes or replaces it, so
+// every locker opens and locks the same inode. Only deleting the cache itself
+// removes it, and that also deletes the helm home a running pull is using,
+// which no lock inside the cache could protect. The kernel drops a flock when
+// its holder exits, however it exits, so a killed pull never strands the lock.
+func lockPulls(root string) (release func(), err error) {
+	path := filepath.Join(root, lockName)
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o644)
+	if err != nil {
+		return nil, fmt.Errorf("open chart cache lock: %w", err)
+	}
+	deadline := time.Now().Add(lockWait)
+	for {
+		err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
+		switch {
+		case err == nil:
+			return func() { f.Close() }, nil
+		case !errors.Is(err, syscall.EWOULDBLOCK):
+			f.Close()
+			return nil, fmt.Errorf("lock chart cache %s: %w", path, err)
+		case !time.Now().Before(deadline):
+			f.Close()
+			return nil, fmt.Errorf("another rooket has been pulling released Rook charts for over %s, holding %s; "+
+				"if it is wedged, kill it and retry", lockWait, path)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
 }
