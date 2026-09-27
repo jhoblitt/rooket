@@ -235,7 +235,9 @@ func TestBuildStampRoundTrip(t *testing.T) {
 }
 
 func TestExpectedStampImages(t *testing.T) {
-	stamp := &buildStamp{Images: []stampImage{{Source: "build-x/ceph-amd64", SourceID: "sha256:local"}}}
+	stamp := &buildStamp{Images: []stampImage{{
+		Source: "build-x/ceph-amd64", SourceID: "sha256:local", Pinned: "rooket-build/c/ceph-amd64:k",
+	}}}
 
 	imgs, err := expectedStampImages(stamp, 5001, "rook", "", "mybranch")
 	if err != nil || len(imgs) != 1 {
@@ -248,6 +250,11 @@ func TestExpectedStampImages(t *testing.T) {
 	// it here silently disabled repush entirely once.
 	if imgs[0].SourceID != "sha256:local" {
 		t.Fatalf("SourceID dropped: %+v", imgs[0])
+	}
+	// Likewise the pinned tag: without it a repush would publish make's
+	// mutable output tag.
+	if imgs[0].Pinned != "rooket-build/c/ceph-amd64:k" {
+		t.Fatalf("Pinned dropped: %+v", imgs[0])
 	}
 
 	if _, err := expectedStampImages(stamp, 5001, "rook", "quay.io/other/img:v1", "b"); err == nil {

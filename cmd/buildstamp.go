@@ -197,10 +197,14 @@ type stampImage struct {
 	// so a repush can prove it would publish the stamped content and not
 	// whatever a later build of another branch retagged over it.
 	SourceID string `json:"sourceID"`
-	Ref      string `json:"ref"`
-	Repo     string `json:"repo"`
-	Tag      string `json:"tag"`
-	Digest   string `json:"digest"`
+	// Pinned is the build cache's own tag for the image, which no later build
+	// retags; a repush publishes it rather than Source. Empty in stamps written
+	// before the build cache existed.
+	Pinned string `json:"pinned,omitempty"`
+	Ref    string `json:"ref"`
+	Repo   string `json:"repo"`
+	Tag    string `json:"tag"`
+	Digest string `json:"digest"`
 }
 
 type buildStamp struct {
@@ -356,7 +360,7 @@ func expectedStampImages(stamp *buildStamp, port int, namespace, tagOverride, gi
 		if host != registry && host != fmt.Sprintf("127.0.0.1:%d", port) {
 			return nil, fmt.Errorf("--tag targets %s, not this cluster's registry", host)
 		}
-		imgs = append(imgs, stampImage{Source: img.Source, SourceID: img.SourceID, Ref: ref, Repo: repo, Tag: tag})
+		imgs = append(imgs, stampImage{Source: img.Source, SourceID: img.SourceID, Pinned: img.Pinned, Ref: ref, Repo: repo, Tag: tag})
 	}
 	return imgs, nil
 }
