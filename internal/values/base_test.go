@@ -22,6 +22,16 @@ func TestOperatorBase(t *testing.T) {
 		}
 	})
 
+	// A released chart pins its own operator image by tag, and a released tag
+	// does not move, so there is nothing to override or roll.
+	t.Run("without an image leaves the chart's own", func(t *testing.T) {
+		got := OperatorBase(OperatorInput{})
+		want := map[string]any{"csi": map[string]any{"provisionerReplicas": 1}}
+		if !reflect.DeepEqual(got, want) {
+			t.Errorf("got  %#v\nwant %#v", got, want)
+		}
+	})
+
 	t.Run("with a digest pins pullPolicy and the roll annotation", func(t *testing.T) {
 		got := OperatorBase(OperatorInput{
 			ImageRepo: "localhost:5001/rook/ceph", ImageTag: "master", Digest: "sha256:abc",

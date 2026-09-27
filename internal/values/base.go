@@ -13,7 +13,11 @@ type OperatorInput struct {
 // One provisioner per driver is plenty for a dev cluster, and the HA pair
 // starves small hosts. Consumed only by refs where rook manages the CSI drivers
 // itself (<= v1.19); newer refs take the drivers chart's default of one replica.
+// An empty ImageRepo leaves the chart's own image, as a released chart pins one.
 func OperatorBase(in OperatorInput) map[string]any {
+	if in.ImageRepo == "" {
+		return map[string]any{"csi": map[string]any{"provisionerReplicas": 1}}
+	}
 	image := map[string]any{
 		"repository": in.ImageRepo,
 		"tag":        in.ImageTag,
