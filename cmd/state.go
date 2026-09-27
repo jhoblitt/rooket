@@ -184,7 +184,12 @@ func helmEnv(name, purpose string) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	base := filepath.Join(dir, "helm", purpose)
+	return helmEnvAt(filepath.Join(dir, "helm", purpose))
+}
+
+// helmEnvAt returns environment variables pointing helm at a config/cache/data
+// triplet under base, creating the directories; see helmEnv.
+func helmEnvAt(base string) ([]string, error) {
 	homes := map[string]string{}
 	env := make([]string, 0, 7)
 	for _, sub := range []struct{ envVar, subdir string }{
