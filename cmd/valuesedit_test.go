@@ -210,6 +210,9 @@ func TestValuesEditMultiChartFailureNamesChartAndNotesEarlierSaves(t *testing.T)
 	if err := os.WriteFile(script, []byte(scriptBody), 0o755); err != nil {
 		t.Fatal(err)
 	}
+	t.Setenv("HOME", t.TempDir())
+	// launchEditor prefers $VISUAL, which would bypass the scripted $EDITOR.
+	t.Setenv("VISUAL", "")
 	t.Setenv("EDITOR", script)
 
 	t.Cleanup(func() {
