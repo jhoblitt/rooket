@@ -3,8 +3,8 @@
 package e2e
 
 import (
+	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strconv"
@@ -33,10 +33,15 @@ var _ = Describe("rooket up/down", Ordered, func() {
 		Expect(osdNodes()).To(HaveLen(numWorkers()), "OSDs not spread one-per-node")
 
 		By("using no loop devices")
-		Expect(loopCount()).To(Equal(0))
+		loops, err := hostLoopDevices()
+		Expect(err).NotTo(HaveOccurred(), "probe the host's loop devices")
+		Expect(loops).To(BeEmpty(), "loop devices attached on the host")
 
 		By("masking the host's real devices from every node (allowlist prune)")
-		for _, node := range kindNodeNames() {
+		nodes, err := kindNodeNames()
+		Expect(err).NotTo(HaveOccurred(), "list the kind nodes")
+		Expect(nodes).To(HaveLen(numWorkers()+1), "expected control-plane + workers")
+		for _, node := range nodes {
 			Expect(hostSensitiveDevsOnNode(node)).To(BeEmpty(),
 				"sensitive host devices still reachable from %s", node)
 		}
@@ -272,10 +277,16 @@ spec:
 		Expect(err).NotTo(HaveOccurred(), "rooket down failed:\n%s", tail(out, 40))
 
 		By("removing the kind cluster")
-		Expect(kindClusters()).NotTo(ContainElement(clusterName))
+		clusters, err := kindClusters()
+		Expect(err).NotTo(HaveOccurred(), "list the kind clusters")
+		Expect(clusters).NotTo(ContainElement(clusterName))
 
 		By("leaving the OSD disks clean")
-		Expect(disksDirty()).To(Equal(0))
+		disks, dirty, err := osdDiskSignatures()
+		Expect(err).NotTo(HaveOccurred(), "probe the OSD disks")
+		Expect(disks).To(HaveLen(numWorkers()),
+			"a plain down keeps each worker's iSCSI OSD disk attached")
+		Expect(dirty).To(BeEmpty(), "OSD disks still carry a signature after down")
 
 		By("showing the cluster as not live in 'rooket list'")
 		out, err = rooketRun(time.Minute, "list")
@@ -371,17 +382,24 @@ func osdNodes() []string {
 	return nodes
 }
 
-func loopCount() int {
-	n, _ := strconv.Atoi(strings.TrimSpace(enginePrivileged("losetup -a 2>/dev/null | wc -l")))
-	return n
+// hostLoopDevices returns the host's attached loop devices, one losetup line
+// each.
+func hostLoopDevices() ([]string, error) {
+	out, err := enginePrivileged("losetup -a")
+	if err != nil {
+		return nil, err
+	}
+	return nonEmptyLines(out), nil
 }
 
 // kindNodeNames returns the node container names of the rooket cluster.
-func kindNodeNames() []string {
-	cmd := exec.Command("kind", "get", "nodes", "--name", clusterName)
-	cmd.Env = append(os.Environ(), "KIND_EXPERIMENTAL_PROVIDER="+eng)
-	out, _ := cmd.Output()
-	return strings.Fields(string(out))
+func kindNodeNames() ([]string, error) {
+	out, err := runStdout(time.Minute, []string{"KIND_EXPERIMENTAL_PROVIDER=" + eng},
+		"kind", "get", "nodes", "--name", clusterName)
+	if err != nil {
+		return nil, err
+	}
+	return strings.Fields(out), nil
 }
 
 // hostSensitiveDevsOnNode returns any sensitive host device still reachable
@@ -436,26 +454,40 @@ func waitClusterSettled() {
 	}, 10*time.Minute, 10*time.Second).Should(Succeed())
 }
 
-func kindClusters() []string {
-	cmd := exec.Command("kind", "get", "clusters")
-	cmd.Env = append(os.Environ(), "KIND_EXPERIMENTAL_PROVIDER="+eng)
-	out, _ := cmd.Output() // cluster names on stdout; provider notes go to stderr
-	var cs []string
-	for _, l := range strings.Split(string(out), "\n") {
-		if l = strings.TrimSpace(l); l != "" {
-			cs = append(cs, l)
-		}
+func kindClusters() ([]string, error) {
+	out, err := runStdout(time.Minute, []string{"KIND_EXPERIMENTAL_PROVIDER=" + eng},
+		"kind", "get", "clusters")
+	if err != nil {
+		return nil, err
 	}
-	return cs
+	return strings.Fields(out), nil
 }
 
-func disksDirty() int {
-	script := `n=0
-for l in /dev/disk/by-path/ip-127.0.0.1:3260-iscsi-iqn.*.local.rooket:` + clusterName + `-worker*-disk*-lun-0; do
+// osdDiskSignatures probes the cluster's iSCSI OSD disks on the host with
+// blkid's low-level probe, returning every disk found and those that still
+// carry a signature (a filesystem, partition table, or bluestore label).
+func osdDiskSignatures() (disks, dirty []string, err error) {
+	script := `for l in /dev/disk/by-path/ip-127.0.0.1:3260-iscsi-iqn.*.local.rooket:` + clusterName + `-worker*-disk*-lun-0; do
   [ -e "$l" ] || continue
-  blkid -p "$l" >/dev/null 2>&1 && n=$((n+1))
-done
-echo $n`
-	n, _ := strconv.Atoi(strings.TrimSpace(enginePrivileged(script)))
-	return n
+  blkid -p "$l" >/dev/null
+  echo "$? $l"
+done`
+	out, err := enginePrivileged(script)
+	if err != nil {
+		return nil, nil, err
+	}
+	for _, line := range nonEmptyLines(out) {
+		rc, disk, _ := strings.Cut(line, " ")
+		disks = append(disks, disk)
+		// blkid -p exits 0 on a signature, 8 on several conflicting ones,
+		// and 2 on none; anything else means the probe itself failed.
+		switch rc {
+		case "0", "8":
+			dirty = append(dirty, disk)
+		case "2":
+		default:
+			return nil, nil, fmt.Errorf("blkid -p %s exited %s", disk, rc)
+		}
+	}
+	return disks, dirty, nil
 }

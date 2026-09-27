@@ -17,6 +17,7 @@ package e2e
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"io"
 	"os"
 	"os/exec"
@@ -133,11 +134,12 @@ var _ = AfterEach(func() {
 })
 
 func nodeDevDump() string {
-	cmd := exec.Command("kind", "get", "nodes", "--name", clusterName)
-	cmd.Env = append(os.Environ(), "KIND_EXPERIMENTAL_PROVIDER="+eng)
-	out, _ := cmd.Output()
+	nodes, err := kindNodeNames()
+	if err != nil {
+		return err.Error()
+	}
 	var b strings.Builder
-	for _, node := range strings.Fields(string(out)) {
+	for _, node := range nodes {
 		o, _ := runOut(30*time.Second, eng, "exec", node, "sh", "-c",
 			"echo sd: $(ls -d /dev/sd* 2>/dev/null); echo loops: $(losetup -a 2>/dev/null | wc -l)")
 		b.WriteString(node + ": " + strings.TrimSpace(o) + "\n")
@@ -201,6 +203,23 @@ func runOut(timeout time.Duration, name string, args ...string) (string, error) 
 	return string(out), err
 }
 
+// runStdout runs a command with extra environment variables and returns only
+// its stdout, so a notice the tool writes to stderr cannot corrupt output the
+// caller parses; stderr goes into the error instead.
+func runStdout(timeout time.Duration, extraEnv []string, name string, args ...string) (string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, name, args...)
+	cmd.Env = append(os.Environ(), extraEnv...)
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	out, err := cmd.Output()
+	if err != nil {
+		return "", fmt.Errorf("%s %s: %w\n%s", name, strings.Join(args, " "), err, stderr.String())
+	}
+	return string(out), nil
+}
+
 func kubectlNS(args ...string) (string, error) {
 	return runOut(2*time.Minute, "kubectl", append([]string{"--context", kubeCtx, "-n", "rook-ceph"}, args...)...)
 }
@@ -213,28 +232,31 @@ func cephTool(g Gomega, args ...string) string {
 
 // kindNodeImageID returns a locally-present kindest/node image ID for the
 // throwaway privileged container used to inspect host /dev.
-func kindNodeImageID() string {
-	out, _ := runOut(30*time.Second, eng, "images", "--format", "{{.ID}} {{.Repository}}")
-	for _, line := range strings.Split(out, "\n") {
+func kindNodeImageID() (string, error) {
+	out, err := runStdout(30*time.Second, nil, eng, "images", "--format", "{{.ID}} {{.Repository}}")
+	if err != nil {
+		return "", err
+	}
+	for line := range strings.Lines(out) {
 		if strings.Contains(line, "kindest/node") {
 			if f := strings.Fields(line); len(f) > 0 {
-				return f[0]
+				return f[0], nil
 			}
 		}
 	}
-	return ""
+	return "", fmt.Errorf("no kindest/node image under %s to inspect the host's /dev with", eng)
 }
 
-// enginePrivileged runs a throwaway privileged container (with the configured
-// engine) that shares the host /dev, used to inspect loop devices / disk state.
-func enginePrivileged(script string) string {
-	img := kindNodeImageID()
-	if img == "" {
-		return ""
+// enginePrivileged runs script in a throwaway privileged container (with the
+// configured engine) that shares the host /dev, used to inspect loop devices
+// and disk state, and returns the script's stdout.
+func enginePrivileged(script string) (string, error) {
+	img, err := kindNodeImageID()
+	if err != nil {
+		return "", err
 	}
-	out, _ := runOut(2*time.Minute, eng, "run", "--rm", "--privileged",
+	return runStdout(2*time.Minute, nil, eng, "run", "--rm", "--privileged",
 		"-v", "/dev:/dev", "--entrypoint", "sh", img, "-c", script)
-	return out
 }
 
 func tail(s string, n int) string {
