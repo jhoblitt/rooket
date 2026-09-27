@@ -26,16 +26,19 @@ saved. rooket keeps each cluster's kubeconfig in its own state directory
 	Args: cobra.NoArgs,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		name := clusterName(kubeconfigName)
-		path, err := kubeconfigPath(name)
-		if err != nil {
-			return err
-		}
+		// --path says where the kubeconfig lives whether or not the cluster
+		// is up.
 		if kubeconfigPathOnly {
+			path, err := kubeconfigPath(name)
+			if err != nil {
+				return err
+			}
 			fmt.Println(path)
 			return nil
 		}
-		if _, err := os.Stat(path); err != nil {
-			return fmt.Errorf("no kubeconfig for cluster %q at %s (is it up?)", name, path)
+		path, err := requireKubeconfig(name)
+		if err != nil {
+			return err
 		}
 		f, err := os.Open(path)
 		if err != nil {

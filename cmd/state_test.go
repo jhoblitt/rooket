@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -92,6 +93,35 @@ func TestResolveRegistryPort(t *testing.T) {
 			t.Fatalf("resolveRegistryPort = (%d, %v), want a free port >= 5001", got, err)
 		}
 	})
+}
+
+// The e2e suite matches this error's "is it up?", so its text is pinned whole.
+func TestRequireKubeconfig(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	kc, err := kubeconfigPath("alpha")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = requireKubeconfig("alpha")
+	want := fmt.Sprintf("no kubeconfig for cluster %q at %s (is it up?)", "alpha", kc)
+	if err == nil || err.Error() != want {
+		t.Fatalf("requireKubeconfig with no kubeconfig = %v, want %q", err, want)
+	}
+
+	if err := os.MkdirAll(filepath.Dir(kc), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(kc, []byte("apiVersion: v1\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := requireKubeconfig("alpha"); err != nil || got != kc {
+		t.Errorf("requireKubeconfig = (%q, %v), want (%q, nil)", got, err, kc)
+	}
+
+	if _, err := requireKubeconfig("../escape"); err == nil || strings.Contains(err.Error(), "is it up?") {
+		t.Errorf("requireKubeconfig(\"../escape\") = %v, want the invalid-name error", err)
+	}
 }
 
 func TestEncodePath(t *testing.T) {

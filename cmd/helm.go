@@ -1,7 +1,6 @@
 package cmd
 
 import (
-	"fmt"
 	"os"
 	"os/exec"
 
@@ -29,14 +28,9 @@ $ROOKET_NAME, or the name derived from the enclosing rook clone's path.
 	SilenceErrors:      true,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		name := clusterName("")
-		kc, err := kubeconfigPath(name)
+		kc, err := requireKubeconfig(name)
 		if err != nil {
 			return err
-		}
-		// Fail with an actionable error instead of letting helm chase a
-		// missing kubeconfig into "connection refused" noise.
-		if _, err := os.Stat(kc); err != nil {
-			return fmt.Errorf("no kubeconfig for cluster %q at %s (is it up?)", name, kc)
 		}
 		if err := os.Setenv("KUBECONFIG", kc); err != nil {
 			return err

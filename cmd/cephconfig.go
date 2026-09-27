@@ -66,14 +66,10 @@ is not: an AES256KRB5 key, for one, cannot be parsed by librados older than
 		if err != nil {
 			return err
 		}
-		kc, err := kubeconfigPath(name)
-		if err != nil {
+		if _, err := requireKubeconfig(name); err != nil {
 			return err
 		}
-		if _, err := os.Stat(kc); err != nil {
-			return fmt.Errorf("no kubeconfig for cluster %q at %s (is it up?)", name, kc)
-		}
-		conf, err := exportCephConfig(cephConfigOut, os.Stderr)
+		conf, err := exportCephConfig(cephConfigOut, cmd.ErrOrStderr())
 		if err != nil {
 			return err
 		}

@@ -554,6 +554,35 @@ func TestCephConfigCmdChecksOutBeforeTheCluster(t *testing.T) {
 	}
 }
 
+// The key-type warning goes where the command's errors go, so whoever runs
+// the command can capture it.
+func TestCephConfigCmdWarnsOnItsErrorStream(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("KUBECONFIG", "")
+	setCephConfigFlags(t, "alpha", t.TempDir())
+	kc, err := kubeconfigPath("alpha")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(kc), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(kc, []byte("apiVersion: v1\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	stubKubectl(t, hostNetworked(cephCryptoAES256KRB5))
+	var errOut bytes.Buffer
+	cephConfigCmd.SetErr(&errOut)
+	t.Cleanup(func() { cephConfigCmd.SetErr(nil) })
+
+	if err := cephConfigCmd.RunE(cephConfigCmd, nil); err != nil {
+		t.Fatalf("ceph-config: %v", err)
+	}
+	if !strings.Contains(errOut.String(), "warning: the client.admin key is AES256KRB5") {
+		t.Errorf("the command's error stream got %q, want the key-type warning", errOut.String())
+	}
+}
+
 func setCephConfigFlags(t *testing.T, name, out string) {
 	t.Helper()
 	prevName, prevOut := cephConfigName, cephConfigOut
