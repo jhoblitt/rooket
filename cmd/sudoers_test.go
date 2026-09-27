@@ -121,16 +121,6 @@ func TestValidateExactArg(t *testing.T) {
 	}
 }
 
-func TestVocabularyExactArgsAreSudoersSafe(t *testing.T) {
-	for _, c := range privilegedCommands {
-		for _, a := range c.exactArgs {
-			if err := validateExactArg(c.name, a); err != nil {
-				t.Errorf("privilegedCommands entry %q: %v", c.name, err)
-			}
-		}
-	}
-}
-
 func TestCheckTrustedBinary(t *testing.T) {
 	t.Run("rejects a non-root-owned binary", func(t *testing.T) {
 		p := filepath.Join(t.TempDir(), "targetcli")

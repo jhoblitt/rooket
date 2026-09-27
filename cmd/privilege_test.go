@@ -58,16 +58,6 @@ func TestValidateStepsRejectsUngrantedCommand(t *testing.T) {
 	}
 }
 
-func TestValidateStepsAcceptsGrantedCommands(t *testing.T) {
-	steps := []privStep{
-		{argv: []string{"systemctl", "start", "iscsid"}},
-		{argv: []string{"targetcli", "saveconfig"}},
-	}
-	if err := validateSteps(steps); err != nil {
-		t.Fatalf("validateSteps rejected granted commands: %v", err)
-	}
-}
-
 func TestRenderScript(t *testing.T) {
 	steps := []privStep{
 		{argv: []string{"systemctl", "start", "iscsid"}},

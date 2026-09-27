@@ -134,8 +134,6 @@ func TestClusterLockFileSitsOutsideTheStateDir(t *testing.T) {
 	if filepath.Dir(lock) != filepath.Dir(stateDir) {
 		t.Errorf("lock %q should sit beside the state dir %q", lock, stateDir)
 	}
-	// stateDirNames counts only directories, so the lock file must stay a file
-	// or it would start showing up as a cluster.
 	if _, err := clusterLockPath(root, "../escape"); err == nil {
 		t.Errorf("an invalid cluster name must not produce a lock path")
 	}

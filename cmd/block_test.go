@@ -58,14 +58,29 @@ func TestBuiltStepsAreGranted(t *testing.T) {
 		targetIQN:     "iqn.2003-01.local.rooket:c-worker0-disk0",
 	}}
 	initIQN := "iqn.2003-01.local.rooket:initiator"
+	orphans := []lioOrphan{{
+		object: fileio("c-worker3-disk0", "/home/u/.local/share/rooket/c/worker3-disk0.img"),
+		iqns:   []string{"iqn.2003-01.local.rooket:c-worker3-disk0"},
+	}}
 
-	for _, write := range []bool{true, false} {
-		if err := validateSteps(buildISCSISteps(initIQN, disks, 10, write)); err != nil {
-			t.Errorf("setup steps (writeInitiator=%v): %v", write, err)
-		}
+	cases := []struct {
+		name  string
+		steps []privStep
+	}{
+		{"setup writing the initiator name", buildISCSISteps(initIQN, disks, 10, true)},
+		{"setup keeping the initiator name", buildISCSISteps(initIQN, disks, 10, false)},
+		{"teardown", buildISCSITeardownSteps(disks)},
+		{"orphan repair", buildLIORepairSteps(orphans)},
 	}
-	if err := validateSteps(buildISCSITeardownSteps(disks)); err != nil {
-		t.Errorf("teardown steps: %v", err)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if len(tc.steps) == 0 {
+				t.Fatal("builder emitted no steps")
+			}
+			if err := validateSteps(tc.steps); err != nil {
+				t.Error(err)
+			}
+		})
 	}
 }
 
@@ -187,17 +202,13 @@ func TestBuildISCSIScriptInitiatorWriteGatesRestart(t *testing.T) {
 	if !has(without, "systemctl", "start", "iscsid") {
 		t.Error("writeInitiator=false dropped the unconditional iscsid start")
 	}
-
-	if err := validateSteps(without); err != nil {
-		t.Errorf("steps without the initiator write are not granted: %v", err)
-	}
 }
 
 // --login is a no-op on a target the initiator already has a session with, so
 // a LUN added to that target after the session was established is never
 // scanned in by --login alone. A per-disk rescan after --login is the actual
-// recovery; this must appear for every disk and only after --login, and must
-// still be granted by the sudoers vocabulary in both writeInitiator states.
+// recovery; this must appear for every disk, in both writeInitiator states,
+// and only after --login.
 func TestBuildISCSIStepsRescansAfterLogin(t *testing.T) {
 	disks := []iscsiDisk{
 		{targetIQN: "iqn.2003-01.local.rooket:c-worker0-disk0"},
@@ -238,10 +249,6 @@ func TestBuildISCSIStepsRescansAfterLogin(t *testing.T) {
 			if !steps[idx].ignoreErr {
 				t.Errorf("writeInitiator=%v: rescan step for %s must tolerate failure like --login does", write, d.targetIQN)
 			}
-		}
-
-		if err := validateSteps(steps); err != nil {
-			t.Errorf("writeInitiator=%v: %v", write, err)
 		}
 	}
 }
