@@ -10,6 +10,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/jhoblitt/rooket/internal/clone"
 	"github.com/jhoblitt/rooket/internal/cluster"
 	"github.com/jhoblitt/rooket/internal/run"
 )
@@ -70,6 +71,11 @@ Example:
 			var err error
 			rookDir, err = resolveRookDir(upRookDir)
 			if err != nil {
+				return err
+			}
+		}
+		if !upSkipDeploy {
+			if err := checkProfileSelection(rookDir, cmd.Flags().Changed("with-only")); err != nil {
 				return err
 			}
 		}
@@ -205,6 +211,18 @@ func applyUpValueFlags(withOnlySet bool) {
 	deployWith = upWith
 	deployWithOnly = upWithOnly
 	deployWithOnlySet = withOnlySet
+}
+
+// checkProfileSelection resolves and loads the profiles 'up' would deploy and
+// discards them; deploy resolves them again for real. It lets a bad selection
+// fail before block setup, cluster create, and build rather than at deploy.
+func checkProfileSelection(rookDir string, withOnlySet bool) error {
+	names, err := activeProfileNames(clone.Open(rookDir), upWith, upWithOnly, withOnlySet)
+	if err != nil {
+		return err
+	}
+	_, err = loadProfiles(names)
+	return err
 }
 
 // upCreateAndBuild runs the infra-plus-create side concurrently with the make

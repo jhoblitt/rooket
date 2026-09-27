@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/spf13/cobra"
@@ -26,6 +27,28 @@ func TestUpForwardsValueFlags(t *testing.T) {
 	}
 	if !deployWithOnlySet {
 		t.Error("deployWithOnlySet not propagated")
+	}
+}
+
+func TestCheckProfileSelection(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Cleanup(func() { upWith, upWithOnly = nil, nil })
+	rookDir := t.TempDir()
+	bad := writePathProfile(t, t.TempDir(), "mytest", map[string]string{"cluster.yaml": "a: 1\n"})
+
+	upWith, upWithOnly = nil, []string{bad}
+	if err := checkProfileSelection(rookDir, true); err == nil || !strings.Contains(err.Error(), bad) {
+		t.Errorf("err = %v, want the misnamed values file in %s rejected", err, bad)
+	}
+
+	upWithOnly = []string{"rbd"}
+	if err := checkProfileSelection(rookDir, true); err != nil {
+		t.Errorf("a valid selection failed: %v", err)
+	}
+
+	upWith, upWithOnly = []string{"./does-not-exist"}, nil
+	if err := checkProfileSelection(rookDir, false); err == nil || !strings.Contains(err.Error(), "does-not-exist") {
+		t.Errorf("err = %v, want the missing --with path rejected", err)
 	}
 }
 
