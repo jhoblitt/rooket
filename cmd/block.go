@@ -279,7 +279,7 @@ func pathUnder(dir, p string) bool {
 // about to create backstores: a run whose devices are all attached creates
 // nothing an orphan could poison.
 func lioRepairPreflight(out io.Writer, disks []iscsiDisk) ([]privStep, error) {
-	st, err := lio.Read(lio.DefaultRoot)
+	st, err := lio.Read(hostLIORoot())
 	if err != nil {
 		run.Fprintf(out, "warning: could not read the host's iSCSI configuration (%v); continuing\n", err)
 		return nil, nil

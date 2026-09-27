@@ -198,9 +198,9 @@ func clusterLeftovers(name, lioRoot, iqnDate string) bool {
 	return err != nil || found
 }
 
-// hostLIORoot is where down, down --all, and block teardown read the host's LIO
-// configuration. Tests point it at a fake tree, so that no test of those
-// commands depends on the iSCSI targets of the machine it runs on.
+// hostLIORoot is where every command reads the host's LIO configuration. Tests
+// point it at a fake tree, so that no test depends on the iSCSI targets of the
+// machine it runs on.
 var hostLIORoot = func() string { return lio.DefaultRoot }
 
 func init() {

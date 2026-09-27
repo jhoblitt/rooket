@@ -97,7 +97,7 @@ regardless, so this does not add a new restriction there.
 			return fmt.Errorf("refusing to prune with an unqueryable engine present")
 		}
 
-		strandedFound, err := discoverStranded(lio.DefaultRoot, iscsiByPathDir, pruneIQNDate)
+		strandedFound, err := discoverStranded(hostLIORoot(), iscsiByPathDir, pruneIQNDate)
 		if err != nil {
 			return fmt.Errorf("scan %s: %w", iscsiByPathDir, err)
 		}

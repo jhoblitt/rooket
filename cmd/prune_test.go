@@ -14,6 +14,7 @@ import (
 	"testing"
 
 	"github.com/jhoblitt/rooket/internal/engine"
+	"github.com/jhoblitt/rooket/internal/lio"
 )
 
 func TestParseStrandedByPathLink(t *testing.T) {
@@ -172,6 +173,49 @@ func TestDiscoverStrandedFindsWhatByPathCannot(t *testing.T) {
 			t.Errorf("c disks = %v, want the one by-path names", diskKeys(found["c"]))
 		}
 	})
+}
+
+// runPrune runs prune with args as its command line and returns what it
+// printed, restoring its flags afterwards. The host is stubDownHost's.
+func runPrune(t *testing.T, args ...string) (string, error) {
+	t.Helper()
+	if hostLIORoot() == lio.DefaultRoot {
+		t.Fatal("runPrune without stubDownHost would read this machine's iSCSI configuration")
+	}
+	for _, p := range []*bool{&pruneForce, &pruneDryRun, &pruneInclParked} {
+		keep(t, p)
+	}
+	keep(t, &pruneIQNDate)
+	t.Cleanup(func() {
+		for _, name := range []string{"force", "dry-run", "iqn-date", "include-parked"} {
+			f := pruneCmd.Flags().Lookup(name)
+			_ = f.Value.Set(f.DefValue)
+			f.Changed = false
+		}
+	})
+	if err := pruneCmd.ParseFlags(args); err != nil {
+		t.Fatalf("parse %v: %v", args, err)
+	}
+	var err error
+	out := captureStdout(t, func() { err = pruneCmd.RunE(pruneCmd, nil) })
+	return out, err
+}
+
+// prune reads the host's iSCSI configuration through hostLIORoot, as down does,
+// so a test hands it one and none depends on the machine's own.
+func TestPruneReadsTheStubbedHostsISCSIConfiguration(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	stubDownHost(t, downHost{lio: map[string]string{
+		"w5-stranded-worker0-disk0": "/data/w5-stranded/worker0-disk0.img",
+	}})
+
+	out, err := runPrune(t, "--dry-run")
+	if err != nil {
+		t.Fatalf("prune --dry-run: %v", err)
+	}
+	if iqn := "iqn.2003-01.local.rooket:w5-stranded-worker0-disk0"; !strings.Contains(out, iqn) {
+		t.Errorf("prune --dry-run printed\n%s\nwant the stubbed host's stranded target %s listed", out, iqn)
+	}
 }
 
 // The two strandable names are chosen so their insertion order into the map
