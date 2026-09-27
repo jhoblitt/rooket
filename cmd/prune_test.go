@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"encoding/json"
 	"errors"
 	"io"
 	"os"
@@ -336,6 +337,47 @@ func TestPrunePlanKeepsClustersWhoseCloneStillExists(t *testing.T) {
 	}
 	if !diskSet(disks)[parkedDisk.targetIQN] {
 		t.Error("--include-parked did not bring the parked cluster's target into the teardown batch")
+	}
+}
+
+// A released cluster may have no rook clone at all; prune must still judge
+// it parked while its recorded configuration directory exists, exactly as a
+// clone-built cluster is judged by its clone (see
+// TestPrunePlanKeepsClustersWhoseCloneStillExists). This is the regression
+// prunePlan calling cloneGone instead of ownerGone would reintroduce: with
+// no clone recorded at all, cloneGone reads every released cluster as
+// abandoned regardless of its configuration directory.
+func TestPrunePlanKeepsReleasedClusterWhoseConfigDirStillExists(t *testing.T) {
+	root := t.TempDir()
+	configDir := t.TempDir()
+	dir := filepath.Join(root, "released")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	data, err := json.Marshal(clusterSource{RookVersion: "v1.20.7", ConfigDir: configDir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(dir, sourceFile), string(data))
+
+	stateNames := []string{"released"}
+	hasState := map[string]bool{"released": true}
+
+	orphans, parked, _ := prunePlan(root, stateNames, map[string][]engine.Engine{}, hasState, nil, false)
+	if len(orphans) != 0 {
+		t.Errorf("orphans = %v, want none", orphans)
+	}
+	if want := []string{"released"}; !reflect.DeepEqual(parked, want) {
+		t.Errorf("parked = %v, want %v", parked, want)
+	}
+
+	// --include-parked is the escape hatch here too.
+	orphans, parked, _ = prunePlan(root, stateNames, map[string][]engine.Engine{}, hasState, nil, true)
+	if want := []string{"released"}; !reflect.DeepEqual(orphans, want) {
+		t.Errorf("orphans with --include-parked = %v, want %v", orphans, want)
+	}
+	if len(parked) != 0 {
+		t.Errorf("parked with --include-parked = %v, want none", parked)
 	}
 }
 

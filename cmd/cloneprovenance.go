@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -72,4 +73,48 @@ func cloneGone(stateDir string) bool {
 	}
 	_, err := os.Stat(clone)
 	return err != nil
+}
+
+// ownerGone reports whether a cluster's state dir is abandoned rather than
+// parked. A cluster deployed from a released Rook is owned by its recorded
+// configuration directory and by the clone it was created in, when it has
+// them: it is parked while either exists, and always when it has neither,
+// since nothing on disk will then disappear to say it was abandoned and its
+// record shows it is no leftover from before provenance was recorded. Any
+// other cluster is judged by its clone alone (see cloneGone).
+func ownerGone(stateDir string) bool {
+	src, ok := readSourceAt(stateDir)
+	if !ok || src.RookVersion == "" {
+		return cloneGone(stateDir)
+	}
+	owned := false
+	for _, owner := range []string{cloneDir(stateDir), src.ConfigDir} {
+		if owner == "" {
+			continue
+		}
+		owned = true
+		if _, err := os.Stat(owner); err == nil {
+			return false
+		}
+	}
+	return owned
+}
+
+// parkedBecause says why prune kept a parked cluster.
+func parkedBecause(stateDir string) string {
+	src, ok := readSourceAt(stateDir)
+	if !ok || src.RookVersion == "" {
+		return fmt.Sprintf("its clone %s still exists", cloneDir(stateDir))
+	}
+	if clone := cloneDir(stateDir); clone != "" {
+		if _, err := os.Stat(clone); err == nil {
+			return fmt.Sprintf("its clone %s still exists", clone)
+		}
+	}
+	if src.ConfigDir != "" {
+		if _, err := os.Stat(src.ConfigDir); err == nil {
+			return fmt.Sprintf("its configuration directory %s still exists", src.ConfigDir)
+		}
+	}
+	return fmt.Sprintf("it deploys released Rook %s and names no clone or configuration directory", src.RookVersion)
 }
