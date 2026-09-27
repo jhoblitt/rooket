@@ -59,7 +59,11 @@ var valuesShowCmd = &cobra.Command{
 		printSetsNote(os.Stderr, deploySets)
 
 		for i, chart := range charts {
-			c, err := composeChart(chart, showBase(chart), cloneDir, active, deployValueFiles)
+			base, err := showBase(chart, dir)
+			if err != nil {
+				return err
+			}
+			c, err := composeChart(chart, base, cloneDir, active, deployValueFiles)
 			if err != nil {
 				return err
 			}
@@ -78,18 +82,20 @@ var valuesShowCmd = &cobra.Command{
 
 // showBase reproduces the generated layer without contacting the registry or
 // an iSCSI session: show runs against a cluster that may not exist, so the
-// image digest and resolved device paths are deliberately absent.
-func showBase(chart string) map[string]any {
+// image digest and resolved device paths are deliberately absent. The worker
+// count is the cluster's recorded one, which is what a deploy would use.
+func showBase(chart, rookDir string) (map[string]any, error) {
 	switch chart {
 	case chartOperator:
 		return values.OperatorBase(values.OperatorInput{
 			ImageRepo: fmt.Sprintf("localhost:%d/%s/%s", deployRegistryPort, deployNamespace, deployImageName),
 			ImageTag:  "<git ref>",
-		})
+		}), nil
 	case chartCSI:
-		return values.CSIBase()
+		return values.CSIBase(), nil
 	default:
-		return values.ClusterBase(values.ClusterInput{OperatorNamespace: "rook-ceph"})
+		shape, _ := readShape(clusterName(""))
+		return clusterBase(rookDir, shape.Workers, nil)
 	}
 }
 
