@@ -277,11 +277,25 @@ func downAllRun(cmd *cobra.Command) error {
 				run.Printf("warning: remove state dir %s: %v\n", dir, err)
 			} else {
 				run.Printf("removed state dir %s\n", dir)
-				removeClusterLockOnRelease(n)
 			}
 		}
 	} else if downDeleteDisks {
 		run.Printf("block teardown skipped by --skip-block; disk images and state dirs preserved\n")
+	}
+	// A cluster the sweep tore down that is left with no state dir, whether it
+	// was removed above or a live cluster never had one, has nothing in the
+	// state root for its lock file to stand beside, so the file goes as the
+	// lock is let go. removeClusterLockOnRelease does nothing for a cluster the
+	// sweep does not hold.
+	for _, n := range names {
+		if blocked[n] {
+			continue
+		}
+		if dir, err := stateDirPath(n); err == nil {
+			if _, err := os.Stat(dir); os.IsNotExist(err) {
+				removeClusterLockOnRelease(n)
+			}
+		}
 	}
 	releaseAll()
 

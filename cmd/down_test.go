@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/jhoblitt/rooket/internal/engine"
+	"github.com/jhoblitt/rooket/internal/registry"
 )
 
 // keep restores *p to its current value when the test ends.
@@ -387,6 +388,43 @@ func TestDownAllTearsDownOnlyTheClustersItHolds(t *testing.T) {
 	}
 	if _, err := os.Stat(images[busy]); err != nil {
 		t.Errorf("the disk image of a cluster another rooket holds was removed: %v", err)
+	}
+}
+
+// down --all leaves no lock file behind a cluster it deleted that has no state
+// dir — a live cluster rooket's only by its registry has none to remove — and
+// keeps it beside a state dir the sweep leaves in place.
+func TestDownAllRemovesTheLockFileOfADeletedClusterWithNoStateDir(t *testing.T) {
+	for _, c := range []struct {
+		args      []string
+		stateKept bool
+	}{
+		{args: nil, stateKept: true},
+		{args: []string{"--delete-disks"}, stateKept: false},
+		{args: []string{"--delete-disks", "--skip-block"}, stateKept: true},
+	} {
+		t.Run(fmt.Sprintf("%v", c.args), func(t *testing.T) {
+			t.Setenv("HOME", t.TempDir())
+			const bare, withState = "w2-bare", "w2-with-state"
+			stubDownHost(t, downHost{live: []string{bare, withState}, containers: []string{registry.ContainerName(bare)}})
+			if _, err := ensureStateDir(withState); err != nil {
+				t.Fatal(err)
+			}
+
+			if _, err := runDown(t, append([]string{"--all", "--force"}, c.args...)...); err != nil {
+				t.Fatalf("down --all %v: %v", c.args, err)
+			}
+			if _, err := os.Stat(clusterLockFile(t, bare)); !os.IsNotExist(err) {
+				t.Errorf("the lock file of %s, deleted with no state dir, survived (stat: %v)", bare, err)
+			}
+			_, err := os.Stat(clusterLockFile(t, withState))
+			if c.stateKept && err != nil {
+				t.Errorf("the lock file of %s went while its state dir was kept: %v", withState, err)
+			}
+			if !c.stateKept && !os.IsNotExist(err) {
+				t.Errorf("the lock file of %s survived its state dir (stat: %v)", withState, err)
+			}
+		})
 	}
 }
 

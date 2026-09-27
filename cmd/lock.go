@@ -111,10 +111,10 @@ func lockClusterIn(root, name string) (release func(), err error) {
 
 // removeClusterLockOnRelease has the release of this process's lock on a
 // cluster delete the lock file as well, for a run that leaves nothing of the
-// cluster behind. The deletion waits for the release that actually lets go, a
-// nested one staying a no-op, and nothing happens unless this process holds the
-// lock: only the holder may delete a lock file, and only as it lets go (see
-// acquireFlock).
+// cluster in the state root. The deletion waits for the release that actually
+// lets go, a nested one staying a no-op, and nothing happens unless this
+// process holds the lock: only the holder may delete a lock file, and only as
+// it lets go (see acquireFlock).
 func removeClusterLockOnRelease(name string) {
 	heldMu.Lock()
 	defer heldMu.Unlock()
@@ -133,9 +133,10 @@ func removeClusterLockOnRelease(name string) {
 // each convinced it holds the cluster.
 //
 // Only down and prune delete a lock file: with the cluster's state dir, or, for
-// down, on finding nothing of the cluster at all. A leftover is harmless:
-// stateDirNames only counts directories, so it is invisible to 'list',
-// 'down --all', and 'prune'.
+// down, when the cluster has none — on finding nothing of it at all, or, for
+// 'down --all', on deleting a live cluster that never had one. A leftover is
+// harmless: stateDirNames only counts directories, so it is invisible to
+// 'list', 'down --all', and 'prune'.
 func clusterLockPath(root, name string) (string, error) {
 	if err := validateClusterName(name); err != nil {
 		return "", err
