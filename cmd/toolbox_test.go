@@ -1,12 +1,14 @@
 package cmd
 
 import (
+	"context"
 	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // fakeKubectl puts a kubectl first on PATH that exits 1 with its arguments on
@@ -35,7 +37,7 @@ func TestKubectlOutputReturnsStdout(t *testing.T) {
 	fakeKubectl(t)
 	useRealKubectl(t)
 
-	out, err := kubectlOutput("get", "cephcluster")
+	out, err := kubectlOutput(context.Background(), "get", "cephcluster")
 	if err != nil {
 		t.Fatalf("kubectlOutput: %v", err)
 	}
@@ -49,7 +51,7 @@ func TestKubectlOutputFailureCarriesStderr(t *testing.T) {
 	fakeKubectl(t)
 	useRealKubectl(t)
 
-	_, err := kubectlOutput("fail", "exec", "deploy/rook-ceph-tools")
+	_, err := kubectlOutput(context.Background(), "fail", "exec", "deploy/rook-ceph-tools")
 	if err == nil {
 		t.Fatal("kubectlOutput succeeded for a kubectl that exits 1")
 	}
@@ -59,6 +61,19 @@ func TestKubectlOutputFailureCarriesStderr(t *testing.T) {
 	var ee *exec.ExitError
 	if !errors.As(err, &ee) {
 		t.Errorf("kubectlOutput() error = %v, want it to still wrap the *exec.ExitError", err)
+	}
+}
+
+// A deadline that has passed stops ceph-config's runner before it starts
+// kubectl, and the error says so, which is what ceph-config's budget rests on.
+func TestKubectlOutputHonorsItsDeadline(t *testing.T) {
+	fakeKubectl(t)
+	useRealKubectl(t)
+	ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+	defer cancel()
+
+	if out, err := kubectlOutput(ctx, "get", "cephcluster"); !errors.Is(err, context.DeadlineExceeded) {
+		t.Errorf("kubectlOutput() past its deadline = %q, %v; want context.DeadlineExceeded", out, err)
 	}
 }
 

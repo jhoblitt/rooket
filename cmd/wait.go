@@ -208,20 +208,7 @@ func (w readyWaiter) budget(d time.Duration) (context.Context, context.CancelFun
 // died of.
 func (w readyWaiter) query(ctx context.Context, spent string, args ...string) (string, error) {
 	out, err := w.kubectl(ctx, args...)
-	if errors.Is(err, context.DeadlineExceeded) {
-		return out, fmt.Errorf("timed out: %s ran out", spent)
-	}
-	return out, err
-}
-
-// toolboxCeph returns the kubectl arguments that run a ceph command in the
-// toolbox, bounded so that ceph gives up by itself. Killing kubectl at the end
-// of a budget leaves the ceph it started running, and unbounded, ceph waits
-// five minutes to connect and as long as it takes for a mon to answer. Each
-// option is one argument, so the ceph CLI cannot take its value for a word
-// of the command.
-func toolboxCeph(command ...string) []string {
-	return toolboxArgs(append([]string{"ceph", "--connect-timeout=20", "--rados-mon-op-timeout=20"}, command...)...)
+	return out, budgetSpent(err, spent)
 }
 
 // diagnose prints what explains a cluster that did not become ready, each

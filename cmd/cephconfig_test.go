@@ -2,19 +2,22 @@ package cmd
 
 import (
 	"bytes"
+	"context"
 	"encoding/base64"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 const (
 	clusterQuery = "-n rook-ceph get cephcluster -o json"
-	monDumpQuery = "-n rook-ceph exec deploy/rook-ceph-tools -- ceph mon dump -f json"
-	authGetQuery = "-n rook-ceph exec deploy/rook-ceph-tools -- ceph auth get client.admin"
+	monDumpQuery = "-n rook-ceph exec deploy/rook-ceph-tools -- ceph --connect-timeout=20 --rados-mon-op-timeout=20 mon dump -f json"
+	authGetQuery = "-n rook-ceph exec deploy/rook-ceph-tools -- ceph --connect-timeout=20 --rados-mon-op-timeout=20 auth get client.admin"
 )
 
 // oneMonDump is `ceph mon dump -f json` for a single host-networked mon, with
@@ -54,14 +57,21 @@ func adminKeyring(key string) string {
 
 // stubKubectl answers kubectlOutput from canned stdout keyed by the full
 // argument line, failing any command it has no answer for, and returns the
-// lines it was asked to run.
+// lines it was asked to run. It also fails a query whose context carries no
+// deadline within ceph-config's budget, so an unbounded query fails the test.
 func stubKubectl(t *testing.T, answers map[string]string) *[]string {
 	t.Helper()
 	prev := kubectlOutput
 	var calls []string
-	kubectlOutput = func(args ...string) (string, error) {
+	kubectlOutput = func(ctx context.Context, args ...string) (string, error) {
 		line := strings.Join(args, " ")
 		calls = append(calls, line)
+		now := time.Now()
+		if deadline, ok := ctx.Deadline(); !ok || !deadline.After(now) || deadline.After(now.Add(cephConfigQueryBudget)) {
+			t.Errorf("kubectl %s ran with deadline %v (set: %v), want one within %s from now",
+				line, deadline, ok, cephConfigQueryBudget)
+			return "", errors.New("no budget")
+		}
 		if out, ok := answers[line]; ok {
 			return out, nil
 		}
@@ -417,6 +427,51 @@ func TestExportCephConfigWritesNothingWhenAQueryFails(t *testing.T) {
 	}
 }
 
+// A query that outlasts its budget fails ceph-config naming the budget, not
+// the "signal: killed" kubectl died of, and leaves --out as it was.
+func TestExportCephConfigNamesAQueryItsBudgetCutOff(t *testing.T) {
+	stubKubectl(t, hostNetworked(1))
+	stubbed := kubectlOutput
+	kubectlOutput = func(ctx context.Context, args ...string) (string, error) {
+		if strings.Join(args, " ") == monDumpQuery {
+			return "", fmt.Errorf("%w: signal: killed", context.DeadlineExceeded)
+		}
+		return stubbed(ctx, args...)
+	}
+	out := filepath.Join(t.TempDir(), "ceph")
+
+	_, err := exportCephConfig(out, &bytes.Buffer{})
+	want := fmt.Sprintf("read the mon addresses: timed out: its %s budget ran out", cephConfigQueryBudget)
+	if err == nil || err.Error() != want {
+		t.Fatalf("exportCephConfig() = %v, want %q", err, want)
+	}
+	if _, err := os.Stat(out); !os.IsNotExist(err) {
+		t.Errorf("--out was created (stat: %v) though a query timed out", err)
+	}
+}
+
+// Killing kubectl at the end of a budget leaves what it started in the
+// toolbox running, so each ceph command there carries its own bound.
+func TestExportCephConfigBoundsWhatRunsInTheToolbox(t *testing.T) {
+	calls := stubKubectl(t, hostNetworked(1))
+
+	if _, err := exportCephConfig(t.TempDir(), &bytes.Buffer{}); err != nil {
+		t.Fatalf("exportCephConfig: %v", err)
+	}
+	ran := 0
+	for _, c := range *calls {
+		if _, command, inToolbox := strings.Cut(c, " -- "); inToolbox {
+			ran++
+			if !strings.HasPrefix(command, "ceph --connect-timeout=20 --rados-mon-op-timeout=20 ") {
+				t.Errorf("ran %q, want ceph bounded by --connect-timeout and --rados-mon-op-timeout", command)
+			}
+		}
+	}
+	if ran != 2 {
+		t.Errorf("ran %q, want the mon dump and the auth get in the toolbox", *calls)
+	}
+}
+
 func TestCephConfigCmdTargetsTheSelectedCluster(t *testing.T) {
 	for _, tc := range []struct {
 		name, flag, env, want string
@@ -435,9 +490,9 @@ func TestCephConfigCmdTargetsTheSelectedCluster(t *testing.T) {
 			var seen []string
 			stubKubectl(t, hostNetworked(1))
 			stubbed := kubectlOutput
-			kubectlOutput = func(args ...string) (string, error) {
+			kubectlOutput = func(ctx context.Context, args ...string) (string, error) {
 				seen = append(seen, os.Getenv("KUBECONFIG"))
-				return stubbed(args...)
+				return stubbed(ctx, args...)
 			}
 
 			if err := cephConfigCmd.RunE(cephConfigCmd, nil); err != nil {

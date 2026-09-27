@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/binary"
 	"encoding/json"
@@ -10,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 
@@ -20,6 +22,11 @@ var (
 	cephConfigName string
 	cephConfigOut  string
 )
+
+// cephConfigQueryBudget bounds each of ceph-config's queries. It outlasts the
+// connect and mon-op timeouts toolboxCeph gives ceph together, so ceph gives
+// up and says why before kubectl is killed.
+const cephConfigQueryBudget = time.Minute
 
 var cephConfigCmd = &cobra.Command{
 	Use:   "ceph-config",
@@ -108,14 +115,14 @@ func exportCephConfig(out string, warn io.Writer) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	clusters, err := kubectlOutput("-n", "rook-ceph", "get", "cephcluster", "-o", "json")
+	clusters, err := cephConfigQuery("-n", "rook-ceph", "get", "cephcluster", "-o", "json")
 	if err != nil {
 		return "", fmt.Errorf("read the CephCluster: %w", err)
 	}
 	if err := requireHostNetwork(clusters); err != nil {
 		return "", err
 	}
-	dump, err := kubectlOutput(toolboxArgs("ceph", "mon", "dump", "-f", "json")...)
+	dump, err := cephConfigQuery(toolboxCeph("mon", "dump", "-f", "json")...)
 	if err != nil {
 		return "", fmt.Errorf("read the mon addresses: %w", err)
 	}
@@ -123,7 +130,7 @@ func exportCephConfig(out string, warn io.Writer) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	keyring, err := kubectlOutput(toolboxArgs("ceph", "auth", "get", "client.admin")...)
+	keyring, err := cephConfigQuery(toolboxCeph("auth", "get", "client.admin")...)
 	if err != nil {
 		return "", fmt.Errorf("read the client.admin keyring: %w", err)
 	}
@@ -147,6 +154,15 @@ func exportCephConfig(out string, warn io.Writer) (string, error) {
 		fmt.Fprintf(warn, "warning: %s\n", w)
 	}
 	return confPath, nil
+}
+
+// cephConfigQuery runs one of ceph-config's queries within its own
+// cephConfigQueryBudget.
+func cephConfigQuery(args ...string) (string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), cephConfigQueryBudget)
+	defer cancel()
+	out, err := kubectlOutput(ctx, args...)
+	return out, budgetSpent(err, fmt.Sprintf("its %s budget", cephConfigQueryBudget))
 }
 
 // requireHostNetwork refuses a cluster whose mons listen on pod IPs: the host
