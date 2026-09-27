@@ -4,9 +4,11 @@ import (
 	"bufio"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 
@@ -100,7 +102,7 @@ regardless, so this does not add a new restriction there.
 			return fmt.Errorf("scan %s: %w", iscsiByPathDir, err)
 		}
 
-		orphans, parked, byPathDisks := prunePlan(root, stateNames, live, hasState, strandedFound, pruneInclParked)
+		orphans, parked, disks := prunePlan(root, stateNames, live, hasState, strandedFound, pruneInclParked)
 		stranded := strandableClusters(strandedFound, live, hasState)
 
 		for _, p := range parked {
@@ -118,11 +120,13 @@ regardless, so this does not add a new restriction there.
 		// accurate total — and while each orphan's worker*-disk*.img filenames
 		// still exist to name it; nothing can reconstruct them once the state
 		// dir is gone.
-		var disks []iscsiDisk
 		for _, o := range orphans {
-			disks = append(disks, stateDirDisks(o, filepath.Join(root, o), pruneIQNDate)...)
+			disks[o] = append(stateDirDisks(o, filepath.Join(root, o), pruneIQNDate), disks[o]...)
 		}
-		disks = append(disks, byPathDisks...)
+		nDisks := 0
+		for _, d := range disks {
+			nDisks += len(d)
+		}
 
 		engNames := make([]string, len(consulted))
 		for i, eng := range consulted {
@@ -145,7 +149,7 @@ regardless, so this does not add a new restriction there.
 				}
 			}
 		}
-		if len(disks) > 0 {
+		if nDisks > 0 {
 			run.Printf("The iSCSI targets listed above will be removed too, in one privileged run.\n")
 		}
 
@@ -154,7 +158,7 @@ regardless, so this does not add a new restriction there.
 		}
 		if !pruneForce {
 			run.Printf("Remove %d state director(y/ies) and %d iSCSI target(s)? [y/N] ",
-				len(orphans), len(disks))
+				len(orphans), nDisks)
 			line, _ := bufio.NewReader(os.Stdin).ReadString('\n')
 			if strings.TrimSpace(strings.ToLower(line)) != "y" {
 				run.Printf("aborted\n")
@@ -178,7 +182,8 @@ func teardownISCSI(disks []iscsiDisk) error {
 }
 
 // pruneExecute performs the two side-effecting steps of a prune run: tear
-// down disks' iSCSI targets (if any), then, only once that succeeds, remove
+// down the iSCSI targets of disks, each orphan's and each stranded cluster's
+// filed under its cluster, in one batch, then, only once that succeeds, remove
 // each orphan's state directory. teardown and remove are injected so this can
 // be tested against fakes instead of real privilege escalation or disk I/O.
 //
@@ -186,21 +191,48 @@ func teardownISCSI(disks []iscsiDisk) error {
 // fails — is the whole point: an orphan's state directory is prune's only
 // remaining record of its targets, so it must never be deleted ahead of, or
 // despite a failure of, the teardown that names them.
-func pruneExecute(root string, orphans []string, disks []iscsiDisk, teardown func([]iscsiDisk) error, remove func(string) error, out io.Writer) error {
-	if len(disks) > 0 {
+//
+// Both steps run under the lock of every cluster they touch, taken before the
+// first and held through the second (see lockSweep). The plan came from a
+// scan that has since gone stale, and a concurrent 'up' may be building one of
+// these very clusters: iSCSI targets but no kind cluster yet is just what an
+// orphan or a stranded cluster looks like. Its lock is the only sign of that,
+// so a cluster prune cannot lock keeps its targets as well as its state dir,
+// and is reported; prune still succeeds, as it always has for one it skips. A
+// state dir whose name cannot be a cluster's has no lock anyone could hold,
+// and is pruned unlocked.
+func pruneExecute(root string, orphans []string, disks map[string][]iscsiDisk, teardown func([]iscsiDisk) error, remove func(string) error, out io.Writer) error {
+	touched := map[string]bool{}
+	for n := range disks {
+		touched[n] = true
+	}
+	for _, o := range orphans {
+		touched[o] = true
+	}
+	names := slices.Sorted(maps.Keys(touched))
+	var toLock []string
+	for _, n := range names {
+		if validateClusterName(n) == nil {
+			toLock = append(toLock, n)
+		}
+	}
+	skipped, releaseAll := lockSweep(out, root, toLock)
+	defer releaseAll()
+
+	var batch []iscsiDisk
+	for _, n := range names {
+		if !skipped[n] {
+			batch = append(batch, disks[n]...)
+		}
+	}
+	if len(batch) > 0 {
 		fmt.Fprintf(out, "==> tearing down iSCSI targets (all clusters in one privileged run)\n")
-		if err := teardown(disks); err != nil {
+		if err := teardown(batch); err != nil {
 			return err
 		}
 	}
 	for _, o := range orphans {
-		// "Orphan" was decided by a scan that has since gone stale: a concurrent
-		// 'up' may be building this very cluster, in which case its state dir is
-		// not garbage. Taking the lock is what makes that decision current, and
-		// a held lock is the proof to leave it alone.
-		release, err := lockClusterIn(root, o)
-		if err != nil {
-			fmt.Fprintf(out, "warning: skipping %s: %v\n", o, err)
+		if skipped[o] {
 			continue
 		}
 		p := filepath.Join(root, o)
@@ -208,19 +240,25 @@ func pruneExecute(root string, orphans []string, disks []iscsiDisk, teardown fun
 			fmt.Fprintf(out, "warning: remove %s: %v\n", p, err)
 		} else {
 			fmt.Fprintf(out, "removed %s\n", p)
-			removeClusterLockOnRelease(o)
 		}
-		release()
 	}
+	var tornDown []string
+	for _, n := range names {
+		if !skipped[n] {
+			tornDown = append(tornDown, n)
+		}
+	}
+	removeStatelessLockFiles(root, tornDown)
 	return nil
 }
 
 // prunePlan decides which state-dir clusters are orphaned and which
 // by-path-discovered disks the run's privileged teardown batch must include
 // for them, in addition to whatever the caller reconstructs from each
-// orphan's state dir via stateDirDisks. The clusters it declines to orphan
-// because they are merely parked are returned separately, so the caller can
-// say why they survived.
+// orphan's state dir via stateDirDisks. The disks are filed by cluster, since
+// prune tears a cluster's disks down only while it holds that cluster's lock.
+// The clusters it declines to orphan because they are merely parked are
+// returned separately, so the caller can say why they survived.
 //
 // Orphaned means more than "not live": a plain 'rooket down' leaves a state
 // dir with no live kind cluster on purpose, its disk images and iSCSI targets
@@ -244,7 +282,8 @@ func pruneExecute(root string, orphans []string, disks []iscsiDisk, teardown fun
 // clusters that already have a state dir (are in stateNames); it does not
 // itself decide the no-state-dir "stranded" bucket. A live cluster's by-path
 // entries are never included here or there.
-func prunePlan(root string, stateNames []string, live map[string][]engine.Engine, hasState map[string]bool, strandedFound map[string][]iscsiDisk, includeParked bool) (orphans, parked []string, disks []iscsiDisk) {
+func prunePlan(root string, stateNames []string, live map[string][]engine.Engine, hasState map[string]bool, strandedFound map[string][]iscsiDisk, includeParked bool) (orphans, parked []string, disks map[string][]iscsiDisk) {
+	disks = map[string][]iscsiDisk{}
 	for _, n := range stateNames {
 		if _, ok := live[n]; ok {
 			continue
@@ -254,10 +293,12 @@ func prunePlan(root string, stateNames []string, live map[string][]engine.Engine
 			continue
 		}
 		orphans = append(orphans, n)
-		disks = append(disks, strandedFound[n]...)
+		if found := strandedFound[n]; len(found) > 0 {
+			disks[n] = found
+		}
 	}
 	for _, c := range strandableClusters(strandedFound, live, hasState) {
-		disks = append(disks, strandedFound[c]...)
+		disks[c] = strandedFound[c]
 	}
 	return orphans, parked, disks
 }

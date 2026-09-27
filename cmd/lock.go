@@ -3,6 +3,7 @@ package cmd
 import (
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -10,6 +11,8 @@ import (
 	"sync"
 	"syscall"
 	"time"
+
+	"github.com/jhoblitt/rooket/internal/run"
 )
 
 // held records the cluster locks this process already owns.
@@ -123,6 +126,59 @@ func removeClusterLockOnRelease(name string) {
 	}
 }
 
+// lockSweep takes the locks of a sweep over many clusters (down --all, prune):
+// every named cluster's, under root, before the sweep removes anything of any
+// of them, to be held until it is done with them all. The lock is the only sign
+// that another rooket is using a cluster, and it says so only while that rooket
+// holds it, so a sweep that took a cluster's lock after tearing anything of it
+// down, or let go before its last step, could remove what an up in flight had
+// just built. A cluster whose lock cannot be taken — another rooket holds it,
+// say — is reported on out and returned in skipped, and the sweep must touch
+// nothing of it. releaseAll lets go of every lock taken; a second call does
+// nothing.
+//
+// Holding any number of these at once cannot deadlock. Every cluster lock in
+// rooket is taken through lockClusterIn, which only ever tries it: a rooket
+// that finds one held gives up at once rather than wait (acquireFlock's loop
+// with no wait re-opens only a file deleted under it, and never waits for a
+// holder). With no one ever waiting for a cluster lock, no cycle of waits can
+// pass through one, whatever else its holders wait on. Two sweeps at once each
+// take what is free and skip the rest, splitting the clusters between them.
+func lockSweep(out io.Writer, root string, names []string) (skipped map[string]bool, releaseAll func()) {
+	skipped = map[string]bool{}
+	var releases []func()
+	for _, n := range names {
+		release, err := lockClusterIn(root, n)
+		if err != nil {
+			skipped[n] = true
+			run.Fprintf(out, "warning: skipping cluster %q: %v\n", n, err)
+			continue
+		}
+		releases = append(releases, release)
+	}
+	return skipped, func() {
+		for _, release := range releases {
+			release()
+		}
+		releases = nil
+	}
+}
+
+// removeStatelessLockFiles has the release of each named cluster's lock delete
+// the lock file too, if the cluster has no state dir under root. It is for a
+// sweep that tore the clusters down, and decides under their locks: one left
+// with no state dir, whether the sweep removed it or the cluster never had
+// one, has nothing in the state root for its lock file to stand beside.
+// removeClusterLockOnRelease does nothing for a cluster the sweep does not
+// hold.
+func removeStatelessLockFiles(root string, names []string) {
+	for _, n := range names {
+		if _, err := os.Stat(filepath.Join(root, n)); os.IsNotExist(err) {
+			removeClusterLockOnRelease(n)
+		}
+	}
+}
+
 // clusterLockPath is deliberately beside the cluster's state directory rather
 // than inside it: 'down --delete-disks', 'down --all', and 'prune' all
 // os.RemoveAll that directory, and unlinking a locked file is silent and legal.
@@ -132,11 +188,12 @@ func removeClusterLockOnRelease(name string) {
 // acquireFlock's check while the holder was still at work, leaving two runs
 // each convinced it holds the cluster.
 //
-// Only down and prune delete a lock file: with the cluster's state dir, or, for
-// down, when the cluster has none — on finding nothing of it at all, or, for
-// 'down --all', on deleting a live cluster that never had one. A leftover is
-// harmless: stateDirNames only counts directories, so it is invisible to
-// 'list', 'down --all', and 'prune'.
+// Only down and prune delete a lock file: with the cluster's state dir, or when
+// the cluster has none — down on finding nothing of it at all, 'down --all' on
+// deleting a live cluster that never had one, and prune on tearing down the
+// iSCSI targets a cluster left with no state dir. A leftover is harmless:
+// stateDirNames only counts directories, so it is invisible to 'list',
+// 'down --all', and 'prune'.
 func clusterLockPath(root, name string) (string, error) {
 	if err := validateClusterName(name); err != nil {
 		return "", err

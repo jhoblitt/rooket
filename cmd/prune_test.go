@@ -3,10 +3,14 @@ package cmd
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
+	"strings"
+	"syscall"
 	"testing"
 
 	"github.com/jhoblitt/rooket/internal/engine"
@@ -208,6 +212,15 @@ func diskSet(disks []iscsiDisk) map[string]bool {
 	return s
 }
 
+// allDisks flattens prunePlan's per-cluster disks.
+func allDisks(byCluster map[string][]iscsiDisk) []iscsiDisk {
+	var disks []iscsiDisk
+	for _, d := range byCluster {
+		disks = append(disks, d...)
+	}
+	return disks
+}
+
 func TestPrunePlan(t *testing.T) {
 	orphanDisk := iscsiDisk{targetIQN: "iqn.2003-01.local.rooket:orphan-worker0-disk0"}
 	liveDisk := iscsiDisk{targetIQN: "iqn.2003-01.local.rooket:live-worker0-disk0"}
@@ -239,10 +252,20 @@ func TestPrunePlan(t *testing.T) {
 		t.Errorf("orphans = %v, want %v", orphans, want)
 	}
 
-	got := diskSet(disks)
+	got := diskSet(allDisks(disks))
 	want := diskSet([]iscsiDisk{orphanDisk, strandedDisk, untouchedOrphanImg})
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("disks = %v, want %v", got, want)
+	}
+	// Each disk is filed under its own cluster: prune tears a cluster's disks
+	// down only while it holds that cluster's lock.
+	wantByCluster := map[string][]iscsiDisk{
+		"orphan":    {orphanDisk},
+		"stranded":  {strandedDisk},
+		"untouched": {untouchedOrphanImg},
+	}
+	if !reflect.DeepEqual(disks, wantByCluster) {
+		t.Errorf("disks by cluster = %+v, want %+v", disks, wantByCluster)
 	}
 	// The concrete regression: a live cluster's by-path entries must never
 	// enter the teardown batch, no matter how it was discovered (it has a
@@ -269,7 +292,7 @@ func TestPrunePlanUnionsOrphanByPathEvenWithNoReconstructableImages(t *testing.T
 	if want := []string{"orphan"}; !reflect.DeepEqual(orphans, want) {
 		t.Errorf("orphans = %v, want %v", orphans, want)
 	}
-	if len(disks) != 1 || disks[0].targetIQN != "iqn.1999-01.local.rooket:orphan-worker0-disk0" {
+	if d := disks["orphan"]; len(d) != 1 || d[0].targetIQN != "iqn.1999-01.local.rooket:orphan-worker0-disk0" {
 		t.Errorf("disks = %+v, want the orphan's by-path disk", disks)
 	}
 }
@@ -323,7 +346,7 @@ func TestPrunePlanKeepsClustersWhoseCloneStillExists(t *testing.T) {
 	if want := []string{"parked"}; !reflect.DeepEqual(parked, want) {
 		t.Errorf("parked = %v, want %v", parked, want)
 	}
-	if diskSet(disks)[parkedDisk.targetIQN] {
+	if diskSet(allDisks(disks))[parkedDisk.targetIQN] {
 		t.Error("parked cluster's iSCSI target leaked into the teardown batch")
 	}
 
@@ -335,7 +358,7 @@ func TestPrunePlanKeepsClustersWhoseCloneStillExists(t *testing.T) {
 	if len(parked) != 0 {
 		t.Errorf("parked with --include-parked = %v, want none", parked)
 	}
-	if !diskSet(disks)[parkedDisk.targetIQN] {
+	if !diskSet(allDisks(disks))[parkedDisk.targetIQN] {
 		t.Error("--include-parked did not bring the parked cluster's target into the teardown batch")
 	}
 }
@@ -392,13 +415,18 @@ func TestPruneExecute(t *testing.T) {
 			calls = append(calls, "remove:"+p)
 			return nil
 		}
-		disks := []iscsiDisk{{targetIQN: "iqn.x"}}
-		err := pruneExecute("/root", []string{"orphan-a", "orphan-b"}, disks, teardown, remove, io.Discard)
+		disks := map[string][]iscsiDisk{"orphan-a": {{targetIQN: "iqn.x"}}}
+		err := pruneExecute(t.TempDir(), []string{"orphan-a", "orphan-b"}, disks, teardown, remove, io.Discard)
 		if err == nil {
 			t.Fatal("pruneExecute = nil error, want the teardown failure")
 		}
 		if !reflect.DeepEqual(calls, []string{"teardown:iqn.x"}) {
 			t.Errorf("calls = %v, want only the teardown call — no removal must follow a teardown failure", calls)
+		}
+		for _, n := range []string{"orphan-a", "orphan-b"} {
+			if _, ok := heldFile(n); ok {
+				t.Errorf("prune still holds the lock of %s after its teardown failed", n)
+			}
 		}
 	})
 
@@ -451,6 +479,11 @@ func TestPruneExecute(t *testing.T) {
 	// outlive everything else of its cluster.
 	t.Run("an orphan's lock file goes with its state dir, and stays with one that survives", func(t *testing.T) {
 		root := t.TempDir()
+		for _, n := range []string{"gone", "kept"} {
+			if err := os.Mkdir(filepath.Join(root, n), 0o755); err != nil {
+				t.Fatal(err)
+			}
+		}
 		remove := func(p string) error {
 			if p == filepath.Join(root, "kept") {
 				return errors.New("permission denied")
@@ -476,17 +509,146 @@ func TestPruneExecute(t *testing.T) {
 	})
 
 	t.Run("teardown sees the full disks batch in one call", func(t *testing.T) {
-		var gotDisks []iscsiDisk
+		var batches [][]iscsiDisk
 		teardown := func(d []iscsiDisk) error {
-			gotDisks = d
+			batches = append(batches, d)
 			return nil
 		}
-		disks := []iscsiDisk{{targetIQN: "iqn.a"}, {targetIQN: "iqn.b"}}
-		if err := pruneExecute("/root", nil, disks, teardown, func(string) error { return nil }, io.Discard); err != nil {
+		a := []iscsiDisk{{targetIQN: "iqn.a0"}, {targetIQN: "iqn.a1"}}
+		b := []iscsiDisk{{targetIQN: "iqn.b0"}}
+		disks := map[string][]iscsiDisk{"a": a, "b": b}
+		if err := pruneExecute(t.TempDir(), nil, disks, teardown, func(string) error { return nil }, io.Discard); err != nil {
 			t.Fatalf("pruneExecute: %v", err)
 		}
-		if !reflect.DeepEqual(gotDisks, disks) {
-			t.Errorf("teardown saw %v, want %v (one call, not per-disk)", gotDisks, disks)
+		if want := [][]iscsiDisk{slices.Concat(a, b)}; !reflect.DeepEqual(batches, want) {
+			t.Errorf("teardown saw %v, want %v (one call for every cluster, not one per cluster or disk)", batches, want)
 		}
 	})
+}
+
+// clusterLockHeld reports whether anyone, this process included, holds the lock
+// of cluster name under root. It tries the flock through an open file
+// description of its own, which contends with every other one, this process's
+// included, and lets go at once.
+func clusterLockHeld(t *testing.T, root, name string) bool {
+	t.Helper()
+	path, err := clusterLockPath(root, name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return false
+	}
+	defer f.Close()
+	return errors.Is(syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB), syscall.EWOULDBLOCK)
+}
+
+// prune tears down a cluster's iSCSI targets, and removes its state dir, only
+// while it holds the cluster's lock, a stranded cluster with no state dir
+// included. A cluster another rooket holds — an up that has set up its targets
+// but not yet created its kind cluster, say — keeps its targets and its state,
+// and prune reports it and still succeeds.
+func TestPruneExecuteTearsDownOnlyTheClustersItHolds(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	root, err := stateDirRoot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	const orphan, stranded, busyOrphan, busyStranded = "w5-orphan", "w5-stranded", "w5-busy-orphan", "w5-busy-stranded"
+	for _, n := range []string{orphan, busyOrphan} {
+		if err := os.MkdirAll(filepath.Join(root, n), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	lockClusterExternally(t, busyOrphan)
+	lockClusterExternally(t, busyStranded)
+	disks := map[string][]iscsiDisk{}
+	for _, n := range []string{orphan, stranded, busyOrphan, busyStranded} {
+		id := n + "-worker0-disk0"
+		disks[n] = []iscsiDisk{{backstoreName: id, targetIQN: "iqn.2003-01.local.rooket:" + id}}
+	}
+
+	var tornDown []string
+	teardown := func(batch []iscsiDisk) error {
+		for _, d := range batch {
+			_, n, ok := parseRooketIQN(d.targetIQN)
+			if !ok {
+				t.Fatalf("%q is not one of rooket's target IQNs", d.targetIQN)
+			}
+			tornDown = append(tornDown, n)
+			if !clusterLockHeld(t, root, n) {
+				t.Errorf("the targets of %s were torn down while its lock was not held", n)
+			}
+		}
+		return nil
+	}
+	var removed []string
+	remove := func(p string) error {
+		removed = append(removed, filepath.Base(p))
+		return os.RemoveAll(p)
+	}
+	var out strings.Builder
+	if err := pruneExecute(root, []string{busyOrphan, orphan}, disks, teardown, remove, &out); err != nil {
+		t.Fatalf("pruneExecute = %v, want success: a cluster prune cannot lock is reported, not an error", err)
+	}
+
+	slices.Sort(tornDown)
+	if want := []string{orphan, stranded}; !slices.Equal(tornDown, want) {
+		t.Errorf("tore down the targets of %v, want only the unheld clusters' %v", tornDown, want)
+	}
+	if want := []string{orphan}; !slices.Equal(removed, want) {
+		t.Errorf("removed the state dirs of %v, want only %v", removed, want)
+	}
+	for _, n := range []string{busyOrphan, busyStranded} {
+		if !strings.Contains(out.String(), fmt.Sprintf("skipping cluster %q", n)) {
+			t.Errorf("prune did not report skipping %s, which another rooket holds:\n%s", n, out.String())
+		}
+	}
+	if _, err := os.Stat(filepath.Join(root, busyOrphan)); err != nil {
+		t.Errorf("the state dir of a cluster another rooket holds was removed: %v", err)
+	}
+	// Neither cluster prune tore down has a state dir left for its lock file to
+	// stand beside; the held clusters' lock files are their holders'.
+	for _, n := range []string{orphan, stranded} {
+		if _, err := os.Stat(filepath.Join(root, n+".lock")); !os.IsNotExist(err) {
+			t.Errorf("the lock file of %s survived its teardown (stat: %v)", n, err)
+		}
+	}
+	for _, n := range []string{busyOrphan, busyStranded} {
+		if _, err := os.Stat(filepath.Join(root, n+".lock")); err != nil {
+			t.Errorf("the lock file another rooket holds for %s was removed: %v", n, err)
+		}
+	}
+}
+
+// A state dir whose name cannot be a cluster's — made by hand, say — has no
+// lock anyone could hold, so prune tears it down and removes it unlocked, as
+// down --all does.
+func TestPruneExecuteRemovesAStateDirNoClusterCouldOwn(t *testing.T) {
+	root := t.TempDir()
+	const name = "Hand_Made"
+	if validateClusterName(name) == nil {
+		t.Fatalf("%q is a valid cluster name", name)
+	}
+	if err := os.Mkdir(filepath.Join(root, name), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	disks := map[string][]iscsiDisk{name: {{targetIQN: "iqn.2003-01.local.rooket:" + name + "-worker0-disk0"}}}
+	var tornDown []iscsiDisk
+	teardown := func(batch []iscsiDisk) error {
+		tornDown = batch
+		return nil
+	}
+
+	var out strings.Builder
+	if err := pruneExecute(root, []string{name}, disks, teardown, os.RemoveAll, &out); err != nil {
+		t.Fatalf("pruneExecute = %v, want success", err)
+	}
+	if !reflect.DeepEqual(tornDown, disks[name]) {
+		t.Errorf("tore down %v, want %v", tornDown, disks[name])
+	}
+	if entries, _ := os.ReadDir(root); len(entries) != 0 {
+		t.Errorf("state root holds %v, want %s removed and nothing left:\n%s", entries, name, out.String())
+	}
 }
