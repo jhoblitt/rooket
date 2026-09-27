@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 
@@ -76,29 +75,6 @@ is not: an AES256KRB5 key, for one, cannot be parsed by librados older than
 		run.Printf("==> wrote %s\n", conf)
 		return nil
 	},
-}
-
-// kubectlOutput runs kubectl for ceph-config. Indirected so tests can answer
-// with canned output instead of a cluster.
-var kubectlOutput = runKubectl
-
-// runKubectl runs kubectl against the cluster $KUBECONFIG names (see
-// useCluster) and returns its trimmed stdout. A failure carries kubectl's
-// stderr, without which it would say only "exit status 1" — not, for one,
-// that the toolbox is missing.
-func runKubectl(args ...string) (string, error) {
-	out, err := run.Output("kubectl", args...)
-	var ee *exec.ExitError
-	if errors.As(err, &ee) && len(ee.Stderr) > 0 {
-		err = fmt.Errorf("%w: %s", err, strings.TrimSpace(string(ee.Stderr)))
-	}
-	return out, err
-}
-
-// toolboxArgs returns the kubectl arguments that run command in the Ceph
-// toolbox the cluster chart deploys.
-func toolboxArgs(command ...string) []string {
-	return append([]string{"-n", "rook-ceph", "exec", "deploy/rook-ceph-tools", "--"}, command...)
 }
 
 // confUnsafe holds the characters a ceph.conf value cannot carry: values are
@@ -171,19 +147,6 @@ func exportCephConfig(out string, warn io.Writer) (string, error) {
 		fmt.Fprintf(warn, "warning: %s\n", w)
 	}
 	return confPath, nil
-}
-
-// cephClusterList is the part of `kubectl get cephcluster -o json`
-// ceph-config reads.
-type cephClusterList struct {
-	Items []struct {
-		Spec struct {
-			Network struct {
-				Provider    string `json:"provider"`
-				HostNetwork bool   `json:"hostNetwork"`
-			} `json:"network"`
-		} `json:"spec"`
-	} `json:"items"`
 }
 
 // requireHostNetwork refuses a cluster whose mons listen on pod IPs: the host

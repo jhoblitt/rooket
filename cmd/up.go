@@ -37,6 +37,8 @@ var (
 	upWithOnly        []string
 	upRookVersion     string
 	upConfigDir       string
+	upWait            bool
+	upWaitTimeout     time.Duration
 )
 
 var upCmd = &cobra.Command{
@@ -51,6 +53,10 @@ var upCmd = &cobra.Command{
 
 Use --skip-block, --skip-build, or --skip-deploy to omit individual steps.
 Setting --disk-count 0 also skips the block-setup step automatically.
+
+With --wait, up then waits until the cluster is ready for clients, as
+'rooket wait' does, and fails if it is not within --wait-timeout. With
+--skip-deploy there is nothing newly deployed, and the wait is skipped too.
 
 With --rook-version, up deploys that released Rook version instead of a rook
 clone: its published charts from the Rook chart repository, running the
@@ -75,6 +81,9 @@ Example:
 `,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		upStart := time.Now()
+		if err := checkUpWaitFlags(upWait, cmd.Flags().Changed("wait-timeout"), upWaitTimeout); err != nil {
+			return err
+		}
 		if cmd.Flags().Changed("rook-version") {
 			if err := releasedName(upName); err != nil {
 				return err
@@ -206,6 +215,11 @@ Example:
 			return nil
 		}); err != nil {
 			return err
+		}
+		if upWait {
+			if err := upWaitStep(upName, upSkipDeploy, upWaitTimeout, cmd.ErrOrStderr()); err != nil {
+				return err
+			}
 		}
 
 		run.Printf(`
@@ -464,6 +478,27 @@ func upCreateAndBuild(createRun, infra func(io.Writer) error, infraOverlapSafe b
 	return nil
 }
 
+// checkUpWaitFlags refuses a --wait-timeout up cannot use: one given without
+// --wait, which would be ignored, or one that is not positive.
+func checkUpWaitFlags(wait, timeoutSet bool, timeout time.Duration) error {
+	if timeoutSet && !wait {
+		return errors.New("--wait-timeout needs --wait")
+	}
+	if timeout <= 0 {
+		return fmt.Errorf("--wait-timeout must be more than 0, not %s", timeout)
+	}
+	return nil
+}
+
+// upWaitStep runs up --wait's wait on the cluster up just brought up.
+func upWaitStep(name string, skipDeploy bool, timeout time.Duration, diag io.Writer) error {
+	if skipDeploy {
+		run.Printf("==> wait (skipped: --skip-deploy deployed nothing to wait for)\n")
+		return nil
+	}
+	return upStep("wait", false, func() error { return waitForCluster(name, timeout, diag) })
+}
+
 // upStep runs one numbered up step, printing its banner and, when it ran, its
 // duration on completion.
 func upStep(banner string, skipped bool, fn func() error) error {
@@ -508,5 +543,7 @@ func init() {
 	upCmd.Flags().StringVar(&upNodeImage, "node-image", defaultNodeImage, "kindest/node image for the cluster, pre-pulled before create (pin tag@digest for a reproducible Kubernetes version)")
 	upCmd.Flags().StringArrayVar(&upWith, "with", nil, "profile to enable, by name or by directory path (./dir), in addition to the configuration home's sticky list (repeatable)")
 	upCmd.Flags().StringArrayVar(&upWithOnly, "with-only", nil, "profile to enable, by name or by directory path (./dir), replacing the configuration home's sticky list (repeatable)")
+	upCmd.Flags().BoolVar(&upWait, "wait", false, "after deploying, wait until the cluster is ready for clients (see 'rooket wait --help')")
+	upCmd.Flags().DurationVar(&upWaitTimeout, "wait-timeout", defaultWaitTimeout, "how long --wait waits before failing")
 	upCmd.MarkFlagsMutuallyExclusive("skip-build", "force-build")
 }

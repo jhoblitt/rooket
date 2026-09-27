@@ -101,12 +101,15 @@ func isolateUpSource(t *testing.T) {
 	stubChartPuller(t)
 	dir, force, skipBuild, skipDeploy := upRookDir, upForceBuild, upSkipBuild, upSkipDeploy
 	with, withOnly := upWith, upWithOnly
+	wait, waitFor := upWait, upWaitTimeout
 	t.Cleanup(func() {
 		upRookDir, upForceBuild, upSkipBuild, upSkipDeploy = dir, force, skipBuild, skipDeploy
 		upWith, upWithOnly = with, withOnly
+		upWait, upWaitTimeout = wait, waitFor
 	})
 	upRookDir, upForceBuild, upSkipBuild, upSkipDeploy = "", false, false, false
 	upWith, upWithOnly = nil, nil
+	upWait, upWaitTimeout = false, defaultWaitTimeout
 }
 
 // parseUpFlags parses args into upCmd's flags as a command line would, and
@@ -117,7 +120,7 @@ func parseUpFlags(t *testing.T, args ...string) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() {
-		for _, name := range []string{"rook-version", "config-dir"} {
+		for _, name := range []string{"rook-version", "config-dir", "wait", "wait-timeout"} {
 			f := upCmd.Flags().Lookup(name)
 			_ = f.Value.Set(f.DefValue)
 			f.Changed = false

@@ -3,6 +3,8 @@
 package run
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -175,6 +177,27 @@ func Output(name string, args ...string) (string, error) {
 func OutputTo(w io.Writer, name string, args ...string) (string, error) {
 	return OutputWithEnvTo(w, nil, name, args...)
 }
+
+// OutputContextTo is OutputTo bounded by ctx: when ctx ends first, the command
+// is killed, and the error wraps ctx's (context.DeadlineExceeded, for a
+// deadline), so a caller can tell a command cut short from one that failed.
+func OutputContextTo(ctx context.Context, w io.Writer, name string, args ...string) (string, error) {
+	tracef(w, name, args)
+	cmd := exec.CommandContext(ctx, name, args...)
+	// Killing the command leaves its own children running, and any holding
+	// its stdout or stderr open would keep Output reading for as long as they
+	// live.
+	cmd.WaitDelay = killedOutputWait
+	out, err := cmd.Output()
+	if err != nil && ctx.Err() != nil && !errors.Is(err, ctx.Err()) {
+		err = fmt.Errorf("%w: %w", ctx.Err(), err)
+	}
+	return strings.TrimSpace(string(out)), err
+}
+
+// killedOutputWait is how long OutputContextTo waits, once it has killed a
+// command, for the command's output pipes to close.
+const killedOutputWait = 2 * time.Second
 
 // OutputWithEnvTo is OutputTo with extraEnv appended to the environment. The
 // environment is not echoed: callers pass whole config triplets (helm's, for
