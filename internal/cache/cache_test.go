@@ -37,7 +37,7 @@ func TestRunArgs(t *testing.T) {
 }
 
 func TestGenerateConfig(t *testing.T) {
-	raw, err := GenerateConfig(nil)
+	raw, err := GenerateConfig()
 	if err != nil {
 		t.Fatalf("GenerateConfig: %v", err)
 	}

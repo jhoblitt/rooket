@@ -40,7 +40,7 @@ func setupCache(out io.Writer) error {
 	if err != nil {
 		return err
 	}
-	want, err := cache.GenerateConfig(nil)
+	want, err := cache.GenerateConfig()
 	if err != nil {
 		return err
 	}

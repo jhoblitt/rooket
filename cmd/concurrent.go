@@ -23,9 +23,6 @@ import (
 // abort its siblings (a best-effort optimization) should return nil and log its
 // own failure as a warning.
 func runConcurrent(out io.Writer, fns ...func(io.Writer) error) error {
-	if len(fns) == 0 {
-		return nil
-	}
 	bufs := make([]bytes.Buffer, len(fns))
 	errs := make([]error, len(fns))
 	var wg sync.WaitGroup

@@ -7,7 +7,6 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/jhoblitt/rooket/internal/cluster"
-	"github.com/jhoblitt/rooket/internal/registry"
 )
 
 var (
@@ -22,8 +21,6 @@ var configCmd = &cobra.Command{
 	Short: "Print the kind cluster configuration that would be used by 'create'",
 	RunE: func(cmd *cobra.Command, args []string) error {
 		configName = clusterName(configName)
-		regName := registry.ContainerName(configName)
-
 		// Build a representative disk map for display purposes.
 		// Actual HostPaths are /dev/sdX assigned by block setup; shown here as placeholders.
 		workerDisks := make(map[int][]cluster.Disk)
@@ -40,11 +37,9 @@ var configCmd = &cobra.Command{
 		}
 
 		cfg := cluster.Config{
-			Name:             configName,
-			Workers:          configWorkers,
-			RegistryName:     regName,
-			RegistryHostPort: configRegistryPort,
-			WorkerDisks:      workerDisks,
+			Name:        configName,
+			Workers:     configWorkers,
+			WorkerDisks: workerDisks,
 		}
 
 		b, err := cluster.GenerateConfig(cfg)

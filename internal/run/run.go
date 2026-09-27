@@ -3,7 +3,6 @@
 package run
 
 import (
-	"bytes"
 	"fmt"
 	"io"
 	"os"
@@ -165,7 +164,7 @@ func CmdWithEnvTo(w io.Writer, extraEnv []string, name string, args ...string) e
 }
 
 // Output runs a command and returns its stdout output as a string.
-// stdin is /dev/null; use OutputInteractive when the command may prompt.
+// stdin is /dev/null.
 func Output(name string, args ...string) (string, error) {
 	return OutputWithEnvTo(os.Stdout, nil, name, args...)
 }
@@ -177,14 +176,7 @@ func OutputTo(w io.Writer, name string, args ...string) (string, error) {
 	return OutputWithEnvTo(w, nil, name, args...)
 }
 
-// OutputWithEnv runs a command with additional environment variables appended
-// to the current environment (later entries override earlier ones) and returns
-// its stdout output as a string.
-func OutputWithEnv(extraEnv []string, name string, args ...string) (string, error) {
-	return OutputWithEnvTo(os.Stdout, extraEnv, name, args...)
-}
-
-// OutputWithEnvTo is OutputWithEnv with the trace line routed to w. The
+// OutputWithEnvTo is OutputTo with extraEnv appended to the environment. The
 // environment is not echoed: callers pass whole config triplets (helm's, for
 // one), which would bury the command in the trace.
 func OutputWithEnvTo(w io.Writer, extraEnv []string, name string, args ...string) (string, error) {
@@ -211,49 +203,6 @@ func outputWithEnvTo(w io.Writer, extraEnv []string, echoEnv bool, name string, 
 	}
 	out, err := cmd.Output()
 	return strings.TrimSpace(string(out)), err
-}
-
-// OutputInteractive runs a command with stdin connected to /dev/tty (the
-// controlling terminal) so that programs like sudo can prompt for a password
-// even when the process's os.Stdin is /dev/null (e.g. inside a systemd scope).
-// Returns the stdout output as a string.
-func OutputInteractive(name string, args ...string) (string, error) {
-	var buf bytes.Buffer
-	cmd := exec.Command(name, args...)
-
-	// Open /dev/tty directly so sudo can prompt regardless of how stdin is wired.
-	if tty, err := os.OpenFile("/dev/tty", os.O_RDWR, 0); err == nil {
-		cmd.Stdin = tty
-		defer tty.Close()
-	} else {
-		cmd.Stdin = os.Stdin
-	}
-	cmd.Stdout = &buf
-	cmd.Stderr = os.Stderr
-	tracef(os.Stdout, name, args)
-	if err := cmd.Run(); err != nil {
-		return "", err
-	}
-	return strings.TrimSpace(buf.String()), nil
-}
-
-// CmdWithStdin runs a command with stdin piped from the provided reader.
-func CmdWithStdin(stdin io.Reader, name string, args ...string) error {
-	return CmdWithStdinEnv(stdin, nil, name, args...)
-}
-
-// CmdWithStdinEnv runs a command with stdin piped from the provided reader
-// and additional environment variables appended to the current environment.
-func CmdWithStdinEnv(stdin io.Reader, extraEnv []string, name string, args ...string) error {
-	cmd := exec.Command(name, args...)
-	cmd.Stdin = stdin
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	if len(extraEnv) > 0 {
-		cmd.Env = append(os.Environ(), extraEnv...)
-	}
-	tracef(os.Stdout, name, args)
-	return cmd.Run()
 }
 
 // CmdWithStdinTo runs a command with stdin piped from the provided reader,

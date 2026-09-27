@@ -63,20 +63,6 @@ func (d Dir) Profiles() ([]string, error) {
 	return c.Profiles, nil
 }
 
-func (d Dir) SetProfiles(names []string) error {
-	if err := d.Ensure(); err != nil {
-		return err
-	}
-	data, err := yaml.Marshal(config{Profiles: names})
-	if err != nil {
-		return fmt.Errorf("encode %s: %w", d.configPath(), err)
-	}
-	if err := os.WriteFile(d.configPath(), data, 0o644); err != nil {
-		return fmt.Errorf("write %s: %w", d.configPath(), err)
-	}
-	return nil
-}
-
 func (d Dir) Templates() (map[string][]byte, error) {
 	dir := filepath.Join(d.root, "templates")
 	entries, err := os.ReadDir(dir)
