@@ -1,6 +1,8 @@
 package cmd
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -100,4 +102,57 @@ func TestRenderShow(t *testing.T) {
 			}
 		}
 	})
+}
+
+// rookCloneWithBlockPool plants a rook clone whose rook-ceph-cluster chart
+// defaults to one three-replica block pool, and returns its path.
+func rookCloneWithBlockPool(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	chart := filepath.Join(dir, "deploy", "charts", chartCluster)
+	if err := os.MkdirAll(chart, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	defaults := "cephBlockPools:\n  - name: ceph-blockpool\n    spec:\n      replicated:\n        size: 3\n"
+	if err := os.WriteFile(filepath.Join(chart, "values.yaml"), []byte(defaults), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return dir
+}
+
+func blockPoolSize(t *testing.T, base map[string]any) any {
+	t.Helper()
+	pools, ok := base["cephBlockPools"].([]any)
+	if !ok || len(pools) == 0 {
+		t.Fatalf("cephBlockPools = %#v, want the chart's pool fitted to the cluster", base["cephBlockPools"])
+	}
+	return pools[0].(map[string]any)["spec"].(map[string]any)["replicated"].(map[string]any)["size"]
+}
+
+func TestClusterBaseReadsTheChartsPools(t *testing.T) {
+	base, err := clusterBase(rookCloneWithBlockPool(t), 1, nil)
+	if err != nil {
+		t.Fatalf("clusterBase: %v", err)
+	}
+	if size := blockPoolSize(t, base); size != 1 {
+		t.Errorf("block pool size = %#v, want 1 for a single-worker cluster", size)
+	}
+}
+
+// 'values show' and 'values edit' render what a deploy would, so they size the
+// pools for the cluster's recorded worker count too.
+func TestShowBaseUsesTheRecordedShape(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("ROOKET_NAME", "single")
+	if err := writeShape("single", clusterShape{Workers: 1, DiskCount: 1, IQNDate: "2003-01"}); err != nil {
+		t.Fatal(err)
+	}
+
+	base, err := showBase(chartCluster, rookCloneWithBlockPool(t))
+	if err != nil {
+		t.Fatalf("showBase: %v", err)
+	}
+	if size := blockPoolSize(t, base); size != 1 {
+		t.Errorf("block pool size = %#v, want 1 for the recorded single worker", size)
+	}
 }

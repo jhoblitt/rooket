@@ -407,7 +407,10 @@ func installRookCephCluster(dir string, active []profiles.Profile) error {
 			return err
 		}
 	}
-	base := values.ClusterBase(values.ClusterInput{OperatorNamespace: "rook-ceph", Nodes: nodes})
+	base, err := clusterBase(dir, deployWorkers, nodes)
+	if err != nil {
+		return err
+	}
 	valuesPath, err := writeComposed(chartCluster, base, dir, active)
 	if err != nil {
 		return err
@@ -420,6 +423,23 @@ func installRookCephCluster(dir string, active []profiles.Profile) error {
 		deployClusterName, chartPath,
 	}, helmValueArgs(valuesPath, deploySets)...)
 	return run.CmdWithEnv(deployHelmEnv, "helm", clusterArgs...)
+}
+
+// clusterBase builds the rook-ceph-cluster chart's generated layer for a
+// cluster of hosts workers. The chart's own defaults are read from the rook
+// clone at dir, because a cluster of few hosts gets the chart's pool lists
+// rewritten, whole, to fit.
+func clusterBase(dir string, hosts int, nodes []values.StorageNode) (map[string]any, error) {
+	defaults, err := values.LoadFile(filepath.Join(dir, "deploy", "charts", chartCluster, "values.yaml"))
+	if err != nil {
+		return nil, err
+	}
+	return values.ClusterBase(values.ClusterInput{
+		OperatorNamespace: "rook-ceph",
+		Nodes:             nodes,
+		Hosts:             hosts,
+		ChartDefaults:     defaults,
+	}), nil
 }
 
 // clusterStorageNodes resolves each worker's iSCSI disks to the device paths

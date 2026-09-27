@@ -38,7 +38,7 @@ var valuesEditCmd = &cobra.Command{
 			return err
 		}
 		for _, chart := range charts {
-			seed, err := seedFor(chart)
+			seed, err := seedFor(chart, dir)
 			if err != nil {
 				return err
 			}
@@ -53,8 +53,12 @@ var valuesEditCmd = &cobra.Command{
 // seedFor renders rooket's generated layer as commented YAML. Knowing which of
 // the chart's keys exist and what rooket already set is the hard part of
 // overriding one, so a new file starts as the answer to both.
-func seedFor(chart string) ([]byte, error) {
-	data, err := values.Encode(showBase(chart))
+func seedFor(chart, rookDir string) ([]byte, error) {
+	base, err := showBase(chart, rookDir)
+	if err != nil {
+		return nil, err
+	}
+	data, err := values.Encode(base)
 	if err != nil {
 		return nil, err
 	}

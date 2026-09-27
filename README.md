@@ -171,6 +171,19 @@ node alongside rooket's iSCSI-pinned ones. To actually replace such a list, set
 it to `null` in a lower-priority layer and re-add it in a higher one — that
 needs two layers, so it can't be done within a single sticky file.
 
+The rook-ceph-cluster chart assumes three hosts. For a cluster of one or two
+workers, the generated base also sets one mon and carries the chart's
+`cephBlockPools`, `cephFileSystems`, and `cephObjectStores` whole, with every
+pool fitted to the workers: replicated to at most the worker count, and
+replicated rather than erasure-coded. Higher layers still merge onto those
+entries by name, and `osd_pool_default_size` fits the pools Ceph creates on
+its own, such as `.mgr`.
+
+Every cluster's base sets `configOverride` to turn off the mon's free-space
+check (`mon_data_avail_crit = 0`), since a kind node's `/var/lib/rook` sits on
+the host's root filesystem. A `configOverride` in a higher layer replaces that
+string rather than adding to it.
+
 ```console
 $ rooket values show cluster          # what would be deployed
 $ rooket values show cluster --layers # ...and which layer set each key
