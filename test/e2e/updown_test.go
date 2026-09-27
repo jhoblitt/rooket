@@ -141,10 +141,16 @@ spec:
 	})
 
 	It("prunes orphaned state dirs but spares the live cluster", func() {
-		orphan := filepath.Join(stateDir, "..", "rooket-e2e-orphan")
+		orphan := filepath.Join(filepath.Dir(stateDir), "rooket-e2e-orphan")
 		Expect(os.MkdirAll(orphan, 0o755)).To(Succeed())
 		Expect(os.WriteFile(filepath.Join(orphan, "registry-port"), []byte("5999\n"), 0o644)).To(Succeed())
 		DeferCleanup(func() { _ = os.RemoveAll(orphan) })
+
+		// Not live, but its recorded clone exists: prune keeps it as parked.
+		parked := filepath.Join(filepath.Dir(stateDir), "rooket-e2e-parked")
+		Expect(os.MkdirAll(parked, 0o755)).To(Succeed())
+		Expect(os.WriteFile(filepath.Join(parked, "clone-path"), []byte(GinkgoT().TempDir()+"\n"), 0o644)).To(Succeed())
+		DeferCleanup(func() { _ = os.RemoveAll(parked) })
 
 		out, err := rooketRun(time.Minute, "prune", "--force")
 		Expect(err).NotTo(HaveOccurred(), "rooket prune:\n%s", out)
@@ -153,6 +159,15 @@ spec:
 		Expect(os.IsNotExist(err)).To(BeTrue(), "orphan state dir survived prune")
 		_, err = os.Stat(filepath.Join(stateDir, "registry-port"))
 		Expect(err).NotTo(HaveOccurred(), "live cluster's state was pruned")
+
+		// The live cluster's build stamp names its existing clone, so prune
+		// would keep its state dir as parked even if it missed the cluster as
+		// live; only the absence of a "keeping" line shows it was seen live.
+		// The parked fixture proves that line is still what prune prints.
+		Expect(out).To(ContainSubstring("keeping "+parked+":"),
+			"parked state dir not reported as kept:\n%s", out)
+		Expect(out).NotTo(ContainSubstring("keeping "+stateDir+":"),
+			"prune treated the live cluster as parked, not live:\n%s", out)
 	})
 
 	It("stays healthy when up is re-run (idempotent)", func() {
