@@ -139,7 +139,7 @@ func sudoersState(userFlag string) (string, bool, error) {
 	if err != nil {
 		return "", false, err
 	}
-	installed, ok := readInstalledSudoersFunc()
+	installed, ok := readInstalledSudoers()
 	if !ok {
 		return "not installed", false, nil
 	}

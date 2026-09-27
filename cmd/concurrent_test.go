@@ -54,9 +54,3 @@ func TestRunConcurrentFlushesAllAndJoinsErrors(t *testing.T) {
 		t.Errorf("output = %q, want %q (every branch flushes even when one fails)", got, want)
 	}
 }
-
-func TestRunConcurrentEmpty(t *testing.T) {
-	if err := runConcurrent(io.Discard); err != nil {
-		t.Errorf("runConcurrent() with no funcs = %v, want nil", err)
-	}
-}

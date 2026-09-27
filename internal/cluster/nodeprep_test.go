@@ -1,11 +1,17 @@
 package cluster
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
+	"testing/synctest"
+
+	"github.com/jhoblitt/rooket/internal/engine"
 )
 
 func TestNodePrepScript(t *testing.T) {
@@ -169,36 +175,42 @@ func TestCacheScript(t *testing.T) {
 	}
 }
 
-// TestEvalWrapperSurvivesStdinReaders proves the `sh -c 'eval "$(cat)"'`
-// transport is immune to script commands that read stdin: with the script
-// fed directly as sh's stdin, a child like apt-get/dpkg that reads fd 0
-// would consume the remaining script lines — silently skipping the
-// safety-critical masking. The wrapper slurps the whole script first.
-func TestEvalWrapperSurvivesStdinReaders(t *testing.T) {
-	script := "echo first\nhead -c 100000 >/dev/null\necho ROOKET_DONE\n"
-	cmd := exec.Command("sh", "-c", `eval "$(cat)"`)
-	cmd.Stdin = strings.NewReader(script)
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		t.Fatalf("wrapper run failed: %v\n%s", err, out)
-	}
-	for _, want := range []string{"first", "ROOKET_DONE"} {
-		if !strings.Contains(string(out), want) {
-			t.Fatalf("output missing %q (stdin reader consumed the script?):\n%s", want, out)
-		}
-	}
+// TestRunNodeScriptSurvivesStdinReaders proves runNodeScript's transport is
+// immune to script commands that read stdin: with the script fed directly as
+// sh's stdin, a child like apt-get/dpkg that reads fd 0 would consume the
+// remaining script lines — silently skipping the safety-critical masking. The
+// engine is a stub that drops "exec -i <node>" and runs the rest of the argv
+// on this host, so the real transport runs against the local sh.
+func TestRunNodeScriptSurvivesStdinReaders(t *testing.T) {
+	// The padding puts the sentinel past the first block a block-reading
+	// shell such as dash pulls in before it runs cat.
+	script := "echo first\ncat >/dev/null\n#" + strings.Repeat("x", 32<<10) + "\necho ROOKET_DONE\n"
 
-	// Sanity-check the failure mode being defended against: the same script
-	// fed as sh's stdin loses everything after the stdin-reading command.
+	// A pass proves nothing unless this sh, fed the script on stdin, loses the
+	// sentinel to cat.
 	direct := exec.Command("sh")
 	direct.Stdin = strings.NewReader(script)
-	out, err = direct.CombinedOutput()
+	out, err := direct.CombinedOutput()
 	if err != nil {
 		t.Fatalf("direct run failed: %v\n%s", err, out)
 	}
 	if strings.Contains(string(out), "ROOKET_DONE") {
-		t.Skip("this sh does not exhibit the stdin-consumption hazard; wrapper remains harmless")
+		t.Skip("this sh buffered the script past its sentinel before starting cat, so the stdin-consumption hazard cannot reproduce here")
 	}
+
+	stub := filepath.Join(t.TempDir(), "engine")
+	if err := os.WriteFile(stub, []byte("#!/bin/sh\nshift 3\nexec \"$@\"\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// runNodeScript sleeps between retries of a run that loses the sentinel;
+	// the bubble's fake clock spares a regression from sitting through them.
+	synctest.Test(t, func(t *testing.T) {
+		var buf bytes.Buffer
+		if errs := runNodeScript(engine.Engine(stub), &buf, "node", script); len(errs) != 0 {
+			t.Fatalf("script did not run to completion: %v\n%s", errors.Join(errs...), buf.String())
+		}
+	})
 }
 
 func TestNodeScriptErrors(t *testing.T) {

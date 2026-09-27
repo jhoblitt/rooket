@@ -119,12 +119,10 @@ func createClusterRun(out io.Writer, name string, requestedPort int, portExplici
 	// This also creates the "kind" network used by the registry.
 	run.Fprintf(out, "==> kind cluster\n")
 	clusterCfg := cluster.Config{
-		Name:             name,
-		Workers:          workers,
-		RegistryName:     regName,
-		RegistryHostPort: port,
-		NodeImage:        nodeImage,
-		WorkerDisks:      workerDisks,
+		Name:        name,
+		Workers:     workers,
+		NodeImage:   nodeImage,
+		WorkerDisks: workerDisks,
 	}
 	// PrepareNodes keys its per-node device allowlist by node name; the same map
 	// tells a resume whether the existing node containers are still bound to
@@ -245,7 +243,7 @@ Cluster %q is ready.
   kubectl:           rooket k <args>   (or: export KUBECONFIG="$(rooket kubeconfig --path)")
   local registry:    localhost:%d
   push images with:  %s push localhost:%d/<image>
-  image cache:       %s
+`+cacheSummaryLabel+`%s
 
 `, name, port, containerEngine.String(), port, cacheSummary(cacheReady, cacheErr))
 	return nil

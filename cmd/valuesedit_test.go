@@ -54,31 +54,6 @@ func TestEditValuesRemovesEmptyResult(t *testing.T) {
 	}
 }
 
-func TestEditValuesReopensOnParseError(t *testing.T) {
-	p := filepath.Join(t.TempDir(), "values.yaml")
-	calls := 0
-	err := editValues(p, nil, func(path string) error {
-		calls++
-		if calls == 1 {
-			return os.WriteFile(path, []byte("a: [1,\n"), 0o644)
-		}
-		return os.WriteFile(path, []byte("a: 1\n"), 0o644)
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if calls != 2 {
-		t.Errorf("editor called %d times, want 2", calls)
-	}
-	data, err := os.ReadFile(p)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if string(data) != "a: 1\n" {
-		t.Errorf("saved %q", data)
-	}
-}
-
 // TestWriteFileAtomicLeavesOldFileOnFailure induces a real write failure (a
 // read-only directory blocks the sibling temp file's creation) and checks
 // that the pre-existing file survives untouched, rather than being truncated
@@ -136,10 +111,11 @@ func TestEditValuesLeavesNoStrayTempFiles(t *testing.T) {
 	}
 }
 
-// TestEditValuesReopenMessageNamesTargetFile asserts the reopen-on-parse-error
-// message names the file the user believes they're editing rather than the
-// ephemeral temp file, while still keeping the underlying yaml error's detail
-// (e.g. line/column).
+// TestEditValuesReopenMessageNamesTargetFile asserts that a parse error reopens
+// the editor and saves the corrected result, and that the reopen message names
+// the file the user believes they're editing rather than the ephemeral temp
+// file, while still keeping the underlying yaml error's detail (e.g.
+// line/column).
 func TestEditValuesReopenMessageNamesTargetFile(t *testing.T) {
 	p := filepath.Join(t.TempDir(), "values.yaml")
 
@@ -174,6 +150,16 @@ func TestEditValuesReopenMessageNamesTargetFile(t *testing.T) {
 
 	if editErr != nil {
 		t.Fatal(editErr)
+	}
+	if calls != 2 {
+		t.Errorf("editor called %d times, want 2", calls)
+	}
+	data, err := os.ReadFile(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != "a: 1\n" {
+		t.Errorf("saved %q", data)
 	}
 	printed := out.String()
 	if !strings.Contains(printed, p) {
@@ -210,6 +196,9 @@ func TestValuesEditMultiChartFailureNamesChartAndNotesEarlierSaves(t *testing.T)
 	if err := os.WriteFile(script, []byte(scriptBody), 0o755); err != nil {
 		t.Fatal(err)
 	}
+	t.Setenv("HOME", t.TempDir())
+	// launchEditor prefers $VISUAL, which would bypass the scripted $EDITOR.
+	t.Setenv("VISUAL", "")
 	t.Setenv("EDITOR", script)
 
 	t.Cleanup(func() {

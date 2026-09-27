@@ -60,8 +60,6 @@ type Config struct {
 	Network string
 	// HostConfigPath is the generated zot config on the host, bind-mounted read-only.
 	HostConfigPath string
-	// Upstreams are the registries to proxy; defaults to Upstreams when empty.
-	Upstreams []string
 }
 
 // InClusterAddr returns the address cluster nodes use to reach the cache.
@@ -82,12 +80,9 @@ func upstreamURL(ns string) string {
 // repository prefix equal to its namespace, so that upstream "cephcsi/cephcsi"
 // on quay.io is served locally as "quay.io/cephcsi/cephcsi" — the path the
 // nodes' hosts.toml asks for.
-func GenerateConfig(upstreams []string) ([]byte, error) {
-	if len(upstreams) == 0 {
-		upstreams = Upstreams
-	}
-	regs := make([]zot.SyncRegistry, 0, len(upstreams))
-	for _, ns := range upstreams {
+func GenerateConfig() ([]byte, error) {
+	regs := make([]zot.SyncRegistry, 0, len(Upstreams))
+	for _, ns := range Upstreams {
 		regs = append(regs, zot.SyncRegistry{
 			URLs:      []string{upstreamURL(ns)},
 			Content:   []zot.Content{{Prefix: "**", Destination: "/" + ns}},

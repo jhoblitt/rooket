@@ -63,22 +63,3 @@ func TestLoadFile(t *testing.T) {
 		}
 	})
 }
-
-func TestEncodeRoundTrips(t *testing.T) {
-	in := map[string]any{"a": map[string]any{"b": 1}}
-	data, err := Encode(in)
-	if err != nil {
-		t.Fatal(err)
-	}
-	p := filepath.Join(t.TempDir(), "out.yaml")
-	if err := os.WriteFile(p, data, 0o644); err != nil {
-		t.Fatal(err)
-	}
-	got, err := LoadFile(p)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got["a"].(map[string]any)["b"] != 1 {
-		t.Errorf("got %#v", got)
-	}
-}

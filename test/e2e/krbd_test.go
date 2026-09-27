@@ -32,9 +32,7 @@ var _ = Describe("rooket krbd", Ordered, func() {
 		// internal/cluster/cluster.go: rbdNodeScript) — without them the map
 		// succeeds but the node can't see the device and mount fails with
 		// "rbd: mapping succeeded but /dev/rbd0 is not accessible, is host /dev
-		// mounted?". The block PVC spec in updown_test.go deliberately stops
-		// short of mounting for that same historical reason; this spec is the
-		// mount-and-read-back proof, modeled on the CephFS spec there.
+		// mounted?".
 		const manifest = `apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:

@@ -36,10 +36,6 @@ type Config struct {
 	Name string
 	// Workers is the number of worker nodes.
 	Workers int
-	// RegistryName is the container name of the local OCI registry.
-	RegistryName string
-	// RegistryHostPort is the port the registry listens on on the host.
-	RegistryHostPort int
 	// NodeImage is the kindest/node image passed to `kind create cluster
 	// --image`. Pinning it (rather than letting kind pick its built-in default)
 	// keeps the Kubernetes version reproducible and lets the caller pre-pull the

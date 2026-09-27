@@ -13,6 +13,8 @@ import (
 // this hook (cobra runs only the nearest ancestor's PersistentPreRunE) — fails
 // a test instead of silently making --with-only a no-op.
 func TestValuesShowInheritsWithOnlyFlag(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	t.Cleanup(func() {
 		deployWith, deployWithOnly = nil, nil
 		deployWithOnlySet = false

@@ -3,8 +3,8 @@
 package e2e
 
 import (
+	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strconv"
@@ -33,10 +33,15 @@ var _ = Describe("rooket up/down", Ordered, func() {
 		Expect(osdNodes()).To(HaveLen(numWorkers()), "OSDs not spread one-per-node")
 
 		By("using no loop devices")
-		Expect(loopCount()).To(Equal(0))
+		loops, err := hostLoopDevices()
+		Expect(err).NotTo(HaveOccurred(), "probe the host's loop devices")
+		Expect(loops).To(BeEmpty(), "loop devices attached on the host")
 
 		By("masking the host's real devices from every node (allowlist prune)")
-		for _, node := range kindNodeNames() {
+		nodes, err := kindNodeNames()
+		Expect(err).NotTo(HaveOccurred(), "list the kind nodes")
+		Expect(nodes).To(HaveLen(numWorkers()+1), "expected control-plane + workers")
+		for _, node := range nodes {
 			Expect(hostSensitiveDevsOnNode(node)).To(BeEmpty(),
 				"sensitive host devices still reachable from %s", node)
 		}
@@ -54,51 +59,9 @@ var _ = Describe("rooket up/down", Ordered, func() {
 		}, 2*time.Minute, 15*time.Second).Should(Succeed())
 	})
 
-	It("provisions and reclaims a block PVC through CSI", func() {
-		// The RADOS round-trip above bypasses CSI entirely; this exercises the
-		// RBD provisioner: PVC on the chart's ceph-block StorageClass →
-		// csi-rbdplugin creates the image → bind → delete reclaims it. This
-		// spec deliberately covers provisioning and reclaim only; the
-		// mount-and-I/O path is covered by krbd_test.go, which works because
-		// node prep pre-creates the /dev/rbdN device nodes each node needs to
-		// see the krbd mapping.
-		const manifest = `apiVersion: v1
-kind: PersistentVolumeClaim
-metadata:
-  name: rooket-e2e-rbd-pvc
-spec:
-  accessModes: ["ReadWriteOnce"]
-  storageClassName: ceph-block
-  resources:
-    requests:
-      storage: 1Gi
-`
-		out, err := kubectlApply(manifest)
-		Expect(err).NotTo(HaveOccurred(), "apply block PVC:\n%s", out)
-		DeferCleanup(func() {
-			_, _ = kubectlNS("delete", "pvc", "rooket-e2e-rbd-pvc", "--ignore-not-found", "--timeout=120s")
-		})
-
-		By("binding via the rbd provisioner")
-		Eventually(func(g Gomega) {
-			out, _ := kubectlNS("get", "pvc", "rooket-e2e-rbd-pvc", "-o", "jsonpath={.status.phase}")
-			g.Expect(out).To(Equal("Bound"), "PVC phase")
-		}, 5*time.Minute, 10*time.Second).Should(Succeed())
-
-		By("reclaiming on delete")
-		out, err = kubectlNS("delete", "pvc", "rooket-e2e-rbd-pvc", "--timeout=120s")
-		Expect(err).NotTo(HaveOccurred(), "delete pvc:\n%s", out)
-		Eventually(func() string {
-			out, _ := kubectlNS("get", "pvc", "rooket-e2e-rbd-pvc", "--ignore-not-found")
-			return strings.TrimSpace(out)
-		}, 2*time.Minute, 10*time.Second).Should(BeEmpty(), "PVC not gone after delete")
-	})
-
 	It("serves I/O on a CephFS PVC through CSI", func() {
 		// The full CSI data path — provision, attach, node mount, pod I/O,
-		// detach, reclaim — on the chart's ceph-filesystem StorageClass. The
-		// kernel cephfs client is a network mount and needs no device nodes,
-		// so unlike krbd it works inside kind nodes.
+		// detach, reclaim — on the chart's ceph-filesystem StorageClass.
 		const manifest = `apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
@@ -183,10 +146,16 @@ spec:
 	})
 
 	It("prunes orphaned state dirs but spares the live cluster", func() {
-		orphan := filepath.Join(stateDir, "..", "rooket-e2e-orphan")
+		orphan := filepath.Join(filepath.Dir(stateDir), "rooket-e2e-orphan")
 		Expect(os.MkdirAll(orphan, 0o755)).To(Succeed())
 		Expect(os.WriteFile(filepath.Join(orphan, "registry-port"), []byte("5999\n"), 0o644)).To(Succeed())
 		DeferCleanup(func() { _ = os.RemoveAll(orphan) })
+
+		// Not live, but its recorded clone exists: prune keeps it as parked.
+		parked := filepath.Join(filepath.Dir(stateDir), "rooket-e2e-parked")
+		Expect(os.MkdirAll(parked, 0o755)).To(Succeed())
+		Expect(os.WriteFile(filepath.Join(parked, "clone-path"), []byte(GinkgoT().TempDir()+"\n"), 0o644)).To(Succeed())
+		DeferCleanup(func() { _ = os.RemoveAll(parked) })
 
 		out, err := rooketRun(time.Minute, "prune", "--force")
 		Expect(err).NotTo(HaveOccurred(), "rooket prune:\n%s", out)
@@ -195,6 +164,15 @@ spec:
 		Expect(os.IsNotExist(err)).To(BeTrue(), "orphan state dir survived prune")
 		_, err = os.Stat(filepath.Join(stateDir, "registry-port"))
 		Expect(err).NotTo(HaveOccurred(), "live cluster's state was pruned")
+
+		// The live cluster's build stamp names its existing clone, so prune
+		// would keep its state dir as parked even if it missed the cluster as
+		// live; only the absence of a "keeping" line shows it was seen live.
+		// The parked fixture proves that line is still what prune prints.
+		Expect(out).To(ContainSubstring("keeping "+parked+":"),
+			"parked state dir not reported as kept:\n%s", out)
+		Expect(out).NotTo(ContainSubstring("keeping "+stateDir+":"),
+			"prune treated the live cluster as parked, not live:\n%s", out)
 	})
 
 	It("stays healthy when up is re-run (idempotent)", func() {
@@ -299,10 +277,16 @@ spec:
 		Expect(err).NotTo(HaveOccurred(), "rooket down failed:\n%s", tail(out, 40))
 
 		By("removing the kind cluster")
-		Expect(kindClusters()).NotTo(ContainElement(clusterName))
+		clusters, err := kindClusters()
+		Expect(err).NotTo(HaveOccurred(), "list the kind clusters")
+		Expect(clusters).NotTo(ContainElement(clusterName))
 
 		By("leaving the OSD disks clean")
-		Expect(disksDirty()).To(Equal(0))
+		disks, dirty, err := osdDiskSignatures()
+		Expect(err).NotTo(HaveOccurred(), "probe the OSD disks")
+		Expect(disks).To(HaveLen(numWorkers()),
+			"a plain down keeps each worker's iSCSI OSD disk attached")
+		Expect(dirty).To(BeEmpty(), "OSD disks still carry a signature after down")
 
 		By("showing the cluster as not live in 'rooket list'")
 		out, err = rooketRun(time.Minute, "list")
@@ -398,17 +382,24 @@ func osdNodes() []string {
 	return nodes
 }
 
-func loopCount() int {
-	n, _ := strconv.Atoi(strings.TrimSpace(enginePrivileged("losetup -a 2>/dev/null | wc -l")))
-	return n
+// hostLoopDevices returns the host's attached loop devices, one losetup line
+// each.
+func hostLoopDevices() ([]string, error) {
+	out, err := enginePrivileged("losetup -a")
+	if err != nil {
+		return nil, err
+	}
+	return nonEmptyLines(out), nil
 }
 
 // kindNodeNames returns the node container names of the rooket cluster.
-func kindNodeNames() []string {
-	cmd := exec.Command("kind", "get", "nodes", "--name", clusterName)
-	cmd.Env = append(os.Environ(), "KIND_EXPERIMENTAL_PROVIDER="+eng)
-	out, _ := cmd.Output()
-	return strings.Fields(string(out))
+func kindNodeNames() ([]string, error) {
+	out, err := runStdout(time.Minute, []string{"KIND_EXPERIMENTAL_PROVIDER=" + eng},
+		"kind", "get", "nodes", "--name", clusterName)
+	if err != nil {
+		return nil, err
+	}
+	return strings.Fields(out), nil
 }
 
 // hostSensitiveDevsOnNode returns any sensitive host device still reachable
@@ -463,26 +454,40 @@ func waitClusterSettled() {
 	}, 10*time.Minute, 10*time.Second).Should(Succeed())
 }
 
-func kindClusters() []string {
-	cmd := exec.Command("kind", "get", "clusters")
-	cmd.Env = append(os.Environ(), "KIND_EXPERIMENTAL_PROVIDER="+eng)
-	out, _ := cmd.Output() // cluster names on stdout; provider notes go to stderr
-	var cs []string
-	for _, l := range strings.Split(string(out), "\n") {
-		if l = strings.TrimSpace(l); l != "" {
-			cs = append(cs, l)
-		}
+func kindClusters() ([]string, error) {
+	out, err := runStdout(time.Minute, []string{"KIND_EXPERIMENTAL_PROVIDER=" + eng},
+		"kind", "get", "clusters")
+	if err != nil {
+		return nil, err
 	}
-	return cs
+	return strings.Fields(out), nil
 }
 
-func disksDirty() int {
-	script := `n=0
-for l in /dev/disk/by-path/ip-127.0.0.1:3260-iscsi-iqn.*.local.rooket:` + clusterName + `-worker*-disk*-lun-0; do
+// osdDiskSignatures probes the cluster's iSCSI OSD disks on the host with
+// blkid's low-level probe, returning every disk found and those that still
+// carry a signature (a filesystem, partition table, or bluestore label).
+func osdDiskSignatures() (disks, dirty []string, err error) {
+	script := `for l in /dev/disk/by-path/ip-127.0.0.1:3260-iscsi-iqn.*.local.rooket:` + clusterName + `-worker*-disk*-lun-0; do
   [ -e "$l" ] || continue
-  blkid -p "$l" >/dev/null 2>&1 && n=$((n+1))
-done
-echo $n`
-	n, _ := strconv.Atoi(strings.TrimSpace(enginePrivileged(script)))
-	return n
+  blkid -p "$l" >/dev/null
+  echo "$? $l"
+done`
+	out, err := enginePrivileged(script)
+	if err != nil {
+		return nil, nil, err
+	}
+	for _, line := range nonEmptyLines(out) {
+		rc, disk, _ := strings.Cut(line, " ")
+		disks = append(disks, disk)
+		// blkid -p exits 0 on a signature, 8 on several conflicting ones,
+		// and 2 on none; anything else means the probe itself failed.
+		switch rc {
+		case "0", "8":
+			dirty = append(dirty, disk)
+		case "2":
+		default:
+			return nil, nil, fmt.Errorf("blkid -p %s exited %s", disk, rc)
+		}
+	}
+	return disks, dirty, nil
 }

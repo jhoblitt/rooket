@@ -40,15 +40,20 @@ func TestProfiles(t *testing.T) {
 		}
 	})
 
-	t.Run("round-trips order", func(t *testing.T) {
-		if err := d.SetProfiles([]string{"rbd", "rgw"}); err != nil {
+	t.Run("preserves the file's order", func(t *testing.T) {
+		if err := os.MkdirAll(filepath.Join(root, ".rooket"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		// Not alphabetical, so a reader that sorted the list would fail.
+		config := []byte("profiles: [rgw, rbd]\n")
+		if err := os.WriteFile(filepath.Join(root, ".rooket", "config.yaml"), config, 0o644); err != nil {
 			t.Fatal(err)
 		}
 		got, err := d.Profiles()
 		if err != nil {
 			t.Fatal(err)
 		}
-		if !reflect.DeepEqual(got, []string{"rbd", "rgw"}) {
+		if !reflect.DeepEqual(got, []string{"rgw", "rbd"}) {
 			t.Errorf("got %#v", got)
 		}
 	})

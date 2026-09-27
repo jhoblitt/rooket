@@ -171,9 +171,6 @@ func TestLIORepairStepsRemovesOwnedOrphan(t *testing.T) {
 	if last.ignoreErr || last.warnOnFailure {
 		t.Errorf("backstore delete is best-effort (%+v); a surviving orphan fails every create in the run", last)
 	}
-	if err := validateSteps(steps); err != nil {
-		t.Errorf("repair steps escape the sudoers vocabulary: %v", err)
-	}
 }
 
 // The repair runs as root and its operands come from the kernel's

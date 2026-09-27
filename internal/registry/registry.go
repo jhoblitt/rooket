@@ -54,17 +54,6 @@ func ContainerName(clusterName string) string {
 	return clusterName + "-registry"
 }
 
-// HostAddr returns the host-accessible registry address (e.g. "localhost:5001").
-func (c *Config) HostAddr() string {
-	return fmt.Sprintf("localhost:%d", c.HostPort)
-}
-
-// InClusterAddr returns the address reachable from inside cluster nodes.
-// kind nodes share a container network and can reach the registry by name.
-func (c *Config) InClusterAddr() string {
-	return fmt.Sprintf("%s:%d", c.Name, zot.InternalPort)
-}
-
 // GenerateConfig renders the registry's zot configuration: a plain OCI
 // registry — no sync section, which would turn it into a second mirror
 // shadowing the shared cache — that also accepts the Docker schema-2
