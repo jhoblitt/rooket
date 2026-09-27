@@ -169,13 +169,11 @@ func TestCheckTrustedBinary(t *testing.T) {
 	})
 
 	t.Run("accepts a root-owned system binary and returns its resolved path", func(t *testing.T) {
-		if os.Geteuid() == 0 {
-			t.Skip("running as root; ownership checks are not meaningful here")
-		}
 		want, err := filepath.EvalSymlinks("/bin/sh")
 		if err != nil {
 			t.Fatal(err)
 		}
+		skipUnlessRootOwned(t, want)
 		got, err := checkTrustedBinary("/bin/sh")
 		if err != nil {
 			t.Fatalf("checkTrustedBinary(/bin/sh) = %v, want nil", err)
@@ -186,13 +184,11 @@ func TestCheckTrustedBinary(t *testing.T) {
 	})
 
 	t.Run("accepts a symlink, in a world-writable directory, to a trusted root binary", func(t *testing.T) {
-		if os.Geteuid() == 0 {
-			t.Skip("running as root; ownership checks are not meaningful here")
-		}
 		want, err := filepath.EvalSymlinks("/bin/sh")
 		if err != nil {
 			t.Fatal(err)
 		}
+		skipUnlessRootOwned(t, want)
 		dir := t.TempDir()
 		if err := os.Chmod(dir, 0o777); err != nil {
 			t.Fatal(err)
@@ -289,13 +285,30 @@ func TestCheckAncestorDirsRejectsWorldWritableAncestor(t *testing.T) {
 
 func TestCheckAncestorDirsAcceptsRealTrustedBinaries(t *testing.T) {
 	for _, p := range []string{"/usr/bin/targetcli", "/usr/sbin/iscsiadm"} {
-		resolved, err := filepath.EvalSymlinks(p)
-		if err != nil {
-			t.Skipf("%s not present on this host: %v", p, err)
-		}
-		if err := checkAncestorDirs(resolved); err != nil {
-			t.Errorf("checkAncestorDirs(%s) = %v, want nil", resolved, err)
-		}
+		t.Run(filepath.Base(p), func(t *testing.T) {
+			resolved, err := filepath.EvalSymlinks(p)
+			if err != nil {
+				t.Skipf("%s not present on this host: %v", p, err)
+			}
+			skipUnlessRootOwned(t, filepath.Dir(resolved))
+			if err := checkAncestorDirs(resolved); err != nil {
+				t.Errorf("checkAncestorDirs(%s) = %v, want nil", resolved, err)
+			}
+		})
+	}
+}
+
+// skipUnlessRootOwned skips when path does not show as owned by uid 0, as
+// happens to every host file inside a user namespace that leaves root
+// unmapped.
+func skipUnlessRootOwned(t *testing.T, path string) {
+	t.Helper()
+	fi, err := os.Lstat(path)
+	if err != nil {
+		t.Skipf("cannot stat %s: %v", path, err)
+	}
+	if st, ok := fi.Sys().(*syscall.Stat_t); !ok || st.Uid != 0 {
+		t.Skipf("%s is not root-owned on this host; cannot exercise this case", path)
 	}
 }
 

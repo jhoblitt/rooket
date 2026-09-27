@@ -14,11 +14,6 @@ import (
 // sudoersPath is the file rooket generates and reads back to detect drift.
 const sudoersPath = "/etc/sudoers.d/rooket"
 
-// readInstalledSudoersFunc is a package-level variable so tests can inject the
-// installed rule's content (and its "is it live" state) without root or a
-// real file on disk; restore it via t.Cleanup after overriding.
-var readInstalledSudoersFunc = readInstalledSudoers
-
 // readInstalledSudoers returns the installed rule's exact bytes. It goes
 // through the pinned `cat` the rule grants, because /etc/sudoers.d is mode
 // 0750 and the file is therefore unreadable directly.

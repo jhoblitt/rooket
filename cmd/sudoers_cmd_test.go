@@ -2,7 +2,10 @@ package cmd
 
 import (
 	"errors"
+	"fmt"
 	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -55,112 +58,127 @@ func TestSudoersInstallRejectsBadUser(t *testing.T) {
 // This drives a runnable leaf ("status") rather than "--help": in cobra
 // v1.10.2, "--help" returns flag.ErrHelp before PersistentPreRunE ever runs,
 // and sudoersCmd itself is non-Runnable, so a "--help" invocation would pass
-// even with the PersistentPreRunE override deleted outright. "status"
-// legitimately exits non-zero when no rule is installed (or the vocabulary's
-// binaries aren't on $PATH), so this tolerates any error EXCEPT the specific
-// one engine.Parse produces — that's the one signal that the override was
+// even with the PersistentPreRunE override deleted outright. An explicit
+// --user and an empty $PATH make "status" fail resolving the vocabulary
+// before it consults the host's user database or reads the installed rule
+// back through sudo, so this tolerates any error EXCEPT the specific one
+// engine.Parse produces — that's the one signal that the override was
 // bypassed and the root engine probe ran.
 func TestSudoersSkipsEngineResolution(t *testing.T) {
-	oldFlag := engineFlag
+	t.Setenv("PATH", t.TempDir())
+	oldFlag, oldUser := engineFlag, sudoersUser
 	engineFlag = "bogus-engine"
 	defer func() {
-		engineFlag = oldFlag
+		engineFlag, sudoersUser = oldFlag, oldUser
 		rootCmd.SetArgs(nil)
 		rootCmd.SetOut(nil)
 	}()
 
 	var out strings.Builder
 	rootCmd.SetOut(&out)
-	rootCmd.SetArgs([]string{"sudoers", "status"})
+	rootCmd.SetArgs([]string{"sudoers", "status", "--user", "tester"})
 	err := rootCmd.Execute()
 	if err != nil && strings.Contains(err.Error(), "unsupported container engine") {
 		t.Fatalf("rooket sudoers status with an unusable engine hit the root engine probe: %v", err)
 	}
 }
 
-// sudoersState's three branches are drift detection, this feature's
-// headline claim, so all three need direct coverage rather than relying on
-// a live sudoers file. readInstalledSudoersFunc is overridden to control what
-// sudoersState sees as "installed" without root or a real file on disk.
-func TestSudoersState(t *testing.T) {
-	user, paths, err := grantTarget("")
+// stubGrantedCommands replaces $PATH with a temp dir holding every vocabulary
+// command as a symlink to the host's `true`, so grantTarget resolves on a host
+// without targetcli or iscsiadm. checkTrustedBinary vets a symlink's target,
+// not the link, which is what lets the links live in a user-owned dir. The
+// dir is returned so a test can add a sudo stub beside them.
+func stubGrantedCommands(t *testing.T) string {
+	t.Helper()
+	trueBin, err := exec.LookPath("true")
 	if err != nil {
-		t.Skipf("cannot resolve a grant target on this host: %v", err)
+		t.Skipf("no true on $PATH to stand in for the granted commands: %v", err)
 	}
-	rendered, err := renderSudoers(user, paths)
+	if _, err := checkTrustedBinary(trueBin); err != nil {
+		t.Skipf("%s cannot stand in for the granted commands: %v", trueBin, err)
+	}
+	dir := t.TempDir()
+	for _, c := range privilegedCommands {
+		if err := os.Symlink(trueBin, filepath.Join(dir, c.name)); err != nil && !errors.Is(err, os.ErrExist) {
+			t.Fatal(err)
+		}
+	}
+	t.Setenv("PATH", dir)
+	return dir
+}
+
+// sudoersState's three branches are drift detection, this feature's
+// headline claim. A stub sudo answers only the exact read-back of the
+// installed rule through the cat the rule grants, so each branch is reached
+// through readInstalledSudoers without root or a rule on disk.
+func TestSudoersState(t *testing.T) {
+	dir := stubGrantedCommands(t)
+	_, paths, err := grantTarget("tester")
+	if err != nil {
+		t.Fatalf("grantTarget: %v", err)
+	}
+	rendered, err := renderSudoers("tester", paths)
 	if err != nil {
 		t.Fatalf("renderSudoers: %v", err)
 	}
 
-	restore := readInstalledSudoersFunc
-	t.Cleanup(func() { readInstalledSudoersFunc = restore })
-
-	t.Run("not installed", func(t *testing.T) {
-		readInstalledSudoersFunc = func() (string, bool) { return "", false }
-		msg, ok, err := sudoersState("")
-		if err != nil {
-			t.Fatalf("sudoersState: %v", err)
-		}
-		if ok {
-			t.Error("ok = true, want false when nothing is installed")
-		}
-		if msg != "not installed" {
-			t.Errorf("msg = %q, want %q", msg, "not installed")
-		}
-	})
-
-	t.Run("stale", func(t *testing.T) {
-		readInstalledSudoersFunc = func() (string, bool) { return rendered + "# drift\n", true }
-		msg, ok, err := sudoersState("")
-		if err != nil {
-			t.Fatalf("sudoersState: %v", err)
-		}
-		if ok {
-			t.Error("ok = true, want false for a rule that no longer matches a fresh render")
-		}
-		if msg != "stale" {
-			t.Errorf("msg = %q, want %q", msg, "stale")
-		}
-	})
-
-	t.Run("up to date", func(t *testing.T) {
-		readInstalledSudoersFunc = func() (string, bool) { return rendered, true }
-		msg, ok, err := sudoersState("")
-		if err != nil {
-			t.Fatalf("sudoersState: %v", err)
-		}
-		if !ok {
-			t.Error("ok = false, want true when installed matches a fresh render byte-for-byte")
-		}
-		if msg != "up to date" {
-			t.Errorf("msg = %q, want %q", msg, "up to date")
-		}
-	})
+	cases := []struct {
+		name      string
+		installed string
+		exit      int // sudo's exit for the read-back; a missing rule denies it
+		wantMsg   string
+		wantOK    bool
+	}{
+		{name: "not installed", exit: 1, wantMsg: "not installed"},
+		{name: "stale", installed: rendered + "# drift\n", wantMsg: "stale"},
+		{name: "up to date", installed: rendered, wantMsg: "up to date", wantOK: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			stub := fmt.Sprintf(`#!/bin/sh
+if [ "$#" = 3 ] && [ "$1" = -n ] && [ "$2" = %s ] && [ "$3" = %s ]; then
+  printf '%%s' %s
+  exit %d
+fi
+exit 1
+`, shQuote(paths["cat"]), shQuote(sudoersPath), shQuote(tc.installed), tc.exit)
+			if err := os.WriteFile(filepath.Join(dir, "sudo"), []byte(stub), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			msg, ok, err := sudoersState("tester")
+			if err != nil {
+				t.Fatalf("sudoersState: %v", err)
+			}
+			if msg != tc.wantMsg || ok != tc.wantOK {
+				t.Errorf("sudoersState = %q, %v; want %q, %v", msg, ok, tc.wantMsg, tc.wantOK)
+			}
+		})
+	}
 }
 
 // print must write through cmd.OutOrStdout() rather than fmt.Print, so its
 // output is testable via cobra the same way version's is.
 func TestSudoersPrintWritesThroughCobraWriter(t *testing.T) {
+	stubGrantedCommands(t)
 	oldUser := sudoersUser
-	sudoersUser = ""
 	defer func() {
 		sudoersUser = oldUser
 		rootCmd.SetArgs(nil)
 		rootCmd.SetOut(nil)
 	}()
 
-	user, paths, err := grantTarget("")
+	_, paths, err := grantTarget("tester")
 	if err != nil {
-		t.Skipf("cannot resolve a grant target on this host: %v", err)
+		t.Fatalf("grantTarget: %v", err)
 	}
-	want, err := renderSudoers(user, paths)
+	want, err := renderSudoers("tester", paths)
 	if err != nil {
 		t.Fatalf("renderSudoers: %v", err)
 	}
 
 	var out strings.Builder
 	rootCmd.SetOut(&out)
-	rootCmd.SetArgs([]string{"sudoers", "print"})
+	rootCmd.SetArgs([]string{"sudoers", "print", "--user", "tester"})
 	if err := rootCmd.Execute(); err != nil {
 		t.Fatalf("rooket sudoers print: %v", err)
 	}
