@@ -15,7 +15,8 @@ var _ = Describe("rooket krbd", Ordered, func() {
 	// spec can't assume the up/down suite already brought up (and hasn't yet
 	// torn down) the cluster — it must ensure one itself.
 	BeforeAll(func() {
-		args := []string{"up", "--dir", rookDir, "--workers", workers, "--name", clusterName}
+		args := append([]string{"up"}, sourceArgs()...)
+		args = append(args, "--workers", workers, "--name", clusterName)
 		if skipBlock {
 			args = append(args, "--skip-block")
 		}

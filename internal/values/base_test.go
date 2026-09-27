@@ -1,6 +1,7 @@
 package values
 
 import (
+	"fmt"
 	"reflect"
 	"testing"
 
@@ -17,6 +18,16 @@ func TestOperatorBase(t *testing.T) {
 			},
 			"csi": map[string]any{"provisionerReplicas": 1},
 		}
+		if !reflect.DeepEqual(got, want) {
+			t.Errorf("got  %#v\nwant %#v", got, want)
+		}
+	})
+
+	// A released chart pins its own operator image by tag, and a released tag
+	// does not move, so there is nothing to override or roll.
+	t.Run("without an image leaves the chart's own", func(t *testing.T) {
+		got := OperatorBase(OperatorInput{})
+		want := map[string]any{"csi": map[string]any{"provisionerReplicas": 1}}
 		if !reflect.DeepEqual(got, want) {
 			t.Errorf("got  %#v\nwant %#v", got, want)
 		}
@@ -108,7 +119,8 @@ func TestClusterBase(t *testing.T) {
 }
 
 // chartPools mirrors the pool lists of rook-ceph-cluster's values.yaml, down
-// to a StorageClass parameter and the object store's erasure-coded data pool.
+// to a StorageClass parameter, the object store's erasure-coded data pool, and
+// the resources of the MDS and RGW daemons.
 const chartPools = `
 cephBlockPools:
   - name: ceph-blockpool
@@ -131,6 +143,16 @@ cephFileSystems:
           replicated:
             size: 3
           name: data0
+      metadataServer:
+        activeCount: 1
+        activeStandby: true
+        resources:
+          limits:
+            memory: "4Gi"
+          requests:
+            cpu: "1000m"
+            memory: "4Gi"
+        priorityClassName: system-cluster-critical
     storageClass:
       name: ceph-filesystem
 cephObjectStores:
@@ -147,6 +169,16 @@ cephObjectStores:
           codingChunks: 1
         parameters:
           bulk: "true"
+      gateway:
+        port: 80
+        resources:
+          limits:
+            memory: "2Gi"
+          requests:
+            cpu: "1000m"
+            memory: "1Gi"
+        instances: 1
+        priorityClassName: system-cluster-critical
     storageClass:
       name: ceph-bucket
 `
@@ -254,6 +286,79 @@ func TestClusterBaseNeverGrowsAPool(t *testing.T) {
 	}
 }
 
+// A kind node advertises all of the host's cpus, so a cluster of few workers
+// has only a few cpus of request budget, and the chart's MDS pair and RGW, at a
+// full cpu each and system-cluster-critical, preempt the operator out of it.
+func TestClusterBaseFitsTheDaemonsOfFewHosts(t *testing.T) {
+	for _, hosts := range []int{1, 2} {
+		t.Run(fmt.Sprintf("%d hosts", hosts), func(t *testing.T) {
+			defaults := loadChartPools(t)
+			got := ClusterBase(ClusterInput{OperatorNamespace: "rook-ceph", Hosts: hosts, ChartDefaults: defaults})
+
+			mds := map[string]any{
+				"activeCount":   1,
+				"activeStandby": false,
+				"resources": map[string]any{
+					"limits":   map[string]any{"memory": "4Gi"},
+					"requests": map[string]any{"cpu": "500m", "memory": "4Gi"},
+				},
+				"priorityClassName": "system-cluster-critical",
+			}
+			if got := dig(t, got, "cephFileSystems", 0, "spec", "metadataServer"); !reflect.DeepEqual(got, mds) {
+				t.Errorf("metadataServer = %#v, want %#v", got, mds)
+			}
+			rgw := map[string]any{
+				"port": 80,
+				"resources": map[string]any{
+					"limits":   map[string]any{"memory": "2Gi"},
+					"requests": map[string]any{"cpu": "500m", "memory": "1Gi"},
+				},
+				"instances":         1,
+				"priorityClassName": "system-cluster-critical",
+			}
+			if got := dig(t, got, "cephObjectStores", 0, "spec", "gateway"); !reflect.DeepEqual(got, rgw) {
+				t.Errorf("gateway = %#v, want %#v", got, rgw)
+			}
+			if !reflect.DeepEqual(defaults, loadChartPools(t)) {
+				t.Error("ClusterBase modified the chart defaults it was given")
+			}
+		})
+	}
+}
+
+// A daemon the chart leaves unsized still gets its cpu request, and an entry
+// that declares no daemon is not given one.
+func TestClusterBaseFitsOnlyTheDaemonsTheChartDeclares(t *testing.T) {
+	defaults := map[string]any{
+		"cephFileSystems": []any{
+			map[string]any{"name": "bare", "spec": map[string]any{"metadataServer": map[string]any{"activeCount": 1}}},
+			map[string]any{"name": "none", "spec": map[string]any{}},
+		},
+		"cephObjectStores": []any{
+			map[string]any{"name": "bare", "spec": map[string]any{"gateway": map[string]any{"instances": 1}}},
+			map[string]any{"name": "none", "spec": map[string]any{}},
+		},
+	}
+	got := ClusterBase(ClusterInput{OperatorNamespace: "rook-ceph", Hosts: 1, ChartDefaults: defaults})
+
+	cpu := map[string]any{"requests": map[string]any{"cpu": "500m"}}
+	mds := map[string]any{"activeCount": 1, "activeStandby": false, "resources": cpu}
+	if got := dig(t, got, "cephFileSystems", 0, "spec", "metadataServer"); !reflect.DeepEqual(got, mds) {
+		t.Errorf("unsized metadataServer = %#v, want %#v", got, mds)
+	}
+	rgw := map[string]any{"instances": 1, "resources": cpu}
+	if got := dig(t, got, "cephObjectStores", 0, "spec", "gateway"); !reflect.DeepEqual(got, rgw) {
+		t.Errorf("unsized gateway = %#v, want %#v", got, rgw)
+	}
+	for _, list := range []string{"cephFileSystems", "cephObjectStores"} {
+		if spec := dig(t, got, list, 1, "spec"); !reflect.DeepEqual(spec, map[string]any{}) {
+			t.Errorf("%s entry with no daemon spec = %#v, want it left empty", list, spec)
+		}
+	}
+}
+
+// The chart's MDS standby and daemon requests live inside its pool lists, so
+// leaving the lists alone leaves them alone too.
 func TestClusterBaseLeavesThreeHostsToTheChart(t *testing.T) {
 	got := ClusterBase(ClusterInput{OperatorNamespace: "rook-ceph", Hosts: 3, ChartDefaults: loadChartPools(t)})
 

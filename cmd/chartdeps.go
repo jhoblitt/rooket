@@ -23,34 +23,31 @@ type chartDep struct {
 	condition  string
 }
 
-// chartDeps parses the dependency entries of a helm Chart.yaml: entries
-// begin at "- name:" lines and carry the version/repository/condition
-// fields that follow, until the next "- name:" line.
+// chartDeps reads the dependencies list of a helm Chart.yaml.
 func chartDeps(chartYAML string) ([]chartDep, error) {
 	data, err := os.ReadFile(chartYAML)
 	if err != nil {
 		return nil, fmt.Errorf("read %s: %w", chartYAML, err)
 	}
+	var chart struct {
+		Dependencies []struct {
+			Name       string `yaml:"name"`
+			Version    string `yaml:"version"`
+			Repository string `yaml:"repository"`
+			Condition  string `yaml:"condition"`
+		} `yaml:"dependencies"`
+	}
+	if err := yaml.Unmarshal(data, &chart); err != nil {
+		return nil, fmt.Errorf("parse %s: %w", chartYAML, err)
+	}
 	var deps []chartDep
-	for _, line := range strings.Split(string(data), "\n") {
-		t := strings.TrimSpace(line)
-		if n, ok := strings.CutPrefix(t, "- name:"); ok {
-			deps = append(deps, chartDep{name: strings.TrimSpace(n)})
-			continue
-		}
-		if len(deps) == 0 {
-			continue
-		}
-		cur := &deps[len(deps)-1]
-		if v, ok := strings.CutPrefix(t, "version:"); ok {
-			cur.version = strings.Trim(strings.TrimSpace(v), `"'`)
-		}
-		if r, ok := strings.CutPrefix(t, "repository:"); ok {
-			cur.repository = strings.Trim(strings.TrimSpace(r), `"'`)
-		}
-		if c, ok := strings.CutPrefix(t, "condition:"); ok {
-			cur.condition = strings.TrimSpace(c)
-		}
+	for _, d := range chart.Dependencies {
+		deps = append(deps, chartDep{
+			name:       d.Name,
+			version:    d.Version,
+			repository: d.Repository,
+			condition:  d.Condition,
+		})
 	}
 	return deps, nil
 }

@@ -180,6 +180,12 @@ func TestEditValuesReopenMessageNamesTargetFile(t *testing.T) {
 // must name the chart that failed and make clear that the operator chart's
 // edit, which runs first, was already committed.
 func TestValuesEditMultiChartFailureNamesChartAndNotesEarlierSaves(t *testing.T) {
+	// edit follows the cluster's source record; the developer's own records
+	// could otherwise point it at a released version or at their real
+	// configuration directory, which it would then write into.
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("ROOKET_CONFIG_DIR", "")
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
 	dir := t.TempDir()
 
 	script := filepath.Join(t.TempDir(), "fake-editor.sh")

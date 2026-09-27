@@ -318,6 +318,47 @@ func TestLoadProfilesDuplicateNames(t *testing.T) {
 	})
 }
 
+// The sticky layer is labeled by where it actually came from: a clone's own
+// .rooket keeps the familiar name, but a named --config-dir must not be told
+// it came from a .rooket the user does not have.
+func TestComposeChartLabelsTheStickyLayerByItsSource(t *testing.T) {
+	t.Run("a clone's own .rooket", func(t *testing.T) {
+		d := clone.Open(t.TempDir())
+		if err := d.Ensure(); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(d.ValuesPath(chartCluster), []byte("a: 1\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+
+		got, err := composeChart(chartCluster, map[string]any{}, d, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.Provenance["a"] != ".rooket/values" {
+			t.Errorf("provenance[a] = %q, want .rooket/values", got.Provenance["a"])
+		}
+	})
+
+	t.Run("a named --config-dir", func(t *testing.T) {
+		d := clone.At(t.TempDir())
+		if err := os.MkdirAll(filepath.Join(d.Path(), "values"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(d.ValuesPath(chartCluster), []byte("a: 1\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+
+		got, err := composeChart(chartCluster, map[string]any{}, d, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.Provenance["a"] != "--config-dir values" {
+			t.Errorf("provenance[a] = %q, want \"--config-dir values\"", got.Provenance["a"])
+		}
+	})
+}
+
 func TestActiveProfileNamesRejectsStickyPath(t *testing.T) {
 	d := cloneWithConfig(t, "profiles: [rbd, ./mytest]\n")
 

@@ -10,6 +10,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/jhoblitt/rooket/internal/chartcache"
 	"github.com/jhoblitt/rooket/internal/clone"
 	"github.com/jhoblitt/rooket/internal/cluster"
 	"github.com/jhoblitt/rooket/internal/run"
@@ -34,6 +35,8 @@ var (
 	upNodeImage       string
 	upWith            []string
 	upWithOnly        []string
+	upRookVersion     string
+	upConfigDir       string
 )
 
 var upCmd = &cobra.Command{
@@ -49,6 +52,13 @@ var upCmd = &cobra.Command{
 Use --skip-block, --skip-build, or --skip-deploy to omit individual steps.
 Setting --disk-count 0 also skips the block-setup step automatically.
 
+With --rook-version, up deploys that released Rook version instead of a rook
+clone: its published charts from the Rook chart repository, running the
+images those charts name, so no clone is needed and the build step is
+skipped. The version is recorded for the cluster, so later commands use it
+without repeating the flag. Outside a rook clone, name the cluster with
+--name or $ROOKET_NAME.
+
 Re-running up against an existing cluster resumes it, starting its nodes again
 if a reboot stopped them. It keeps the worker count, disks per worker, and IQN
 date the cluster was created with, including across a plain 'rooket down',
@@ -60,22 +70,13 @@ than rebuilt. Any other state it cannot resume — missing nodes, an unreachable
 apiserver, nodes that never come back — is reported for you to decide on.
 
 Example:
-  rooket up --dir ~/github/rook
+  rooket up --dir ~/github/rook                  # from a rook clone
+  rooket up --name rgw-go --rook-version v1.20.7 # released Rook, no clone
 `,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		upStart := time.Now()
-		// Resolve the rook source dir up front so a missing clone fails fast,
-		// before we stand up a cluster. Only build and deploy consume it.
-		var rookDir string
-		if !upSkipBuild || !upSkipDeploy {
-			var err error
-			rookDir, err = resolveRookDir(upRookDir)
-			if err != nil {
-				return err
-			}
-		}
-		if !upSkipDeploy {
-			if err := checkProfileSelection(rookDir, cmd.Flags().Changed("with-only")); err != nil {
+		if cmd.Flags().Changed("rook-version") {
+			if err := releasedName(upName); err != nil {
 				return err
 			}
 		}
@@ -107,6 +108,12 @@ Example:
 		if err := validateIQNDate(upIQNDate); err != nil {
 			return err
 		}
+
+		src, rookDir, err := upSource(cmd, name)
+		if err != nil {
+			return err
+		}
+		released := src.RookVersion != ""
 
 		// The infra that cluster create depends on — block setup (the iSCSI OSD
 		// devices create bind-mounts into the nodes) and the kind node-image
@@ -157,7 +164,7 @@ Example:
 			return nil
 		}
 
-		if upSkipBuild {
+		if upSkipBuild || released {
 			if err := upStep("[1/4] block setup + node image", false, func() error {
 				return infra(os.Stdout)
 			}); err != nil {
@@ -172,7 +179,11 @@ Example:
 			if p := readRegistryPort(upName); p != 0 {
 				upRegistryPort = p
 			}
-			run.Printf("==> [3/4] build (skipped)\n")
+			if released {
+				run.Printf("==> [3/4] build (skipped: deploying released Rook %s)\n", src.RookVersion)
+			} else {
+				run.Printf("==> [3/4] build (skipped)\n")
+			}
 		} else if err := upCreateAndBuild(createRun, infra, infraOverlapSafe, rookDir); err != nil {
 			return err
 		}
@@ -213,16 +224,85 @@ func applyUpValueFlags(withOnlySet bool) {
 	deployWithOnlySet = withOnlySet
 }
 
-// checkProfileSelection resolves and loads the profiles 'up' would deploy and
-// discards them; deploy resolves them again for real. It lets a bad selection
-// fail before block setup, cluster create, and build rather than at deploy.
-func checkProfileSelection(rookDir string, withOnlySet bool) error {
-	names, err := activeProfileNames(clone.Open(rookDir), upWith, upWithOnly, withOnlySet)
+// checkProfileSelection resolves and loads the profiles 'up' would deploy
+// from the configuration home config, and discards them; deploy resolves them
+// again for real. It lets a bad selection fail before block setup, cluster
+// create, and build rather than at deploy.
+func checkProfileSelection(config clone.Dir, withOnlySet bool) error {
+	names, err := activeProfileNames(config, upWith, upWithOnly, withOnlySet)
 	if err != nil {
 		return err
 	}
 	_, err = loadProfiles(names)
 	return err
+}
+
+// releasedBuildConflict refuses --force-build for a cluster deployed from a
+// released Rook, whose images are published rather than built.
+func releasedBuildConflict(released, forceBuild bool) error {
+	if released && forceBuild {
+		return fmt.Errorf("--force-build has nothing to build: a released Rook is deployed from its published images")
+	}
+	return nil
+}
+
+// upSource settles where the cluster's Rook comes from before anything is
+// stood up, so a missing clone, an unreachable chart repository, or a bad
+// profile selection fails fast. The rook directory it returns is the clone to
+// build and deploy; for a released Rook it only locates the configuration
+// home, as deploy's --dir does. The source is recorded here because deploy,
+// which up runs with none of its own flags set, takes it from the record, and
+// last, so an up refused here leaves the record as it was.
+func upSource(cmd *cobra.Command, name string) (clusterSource, string, error) {
+	src, changed, err := resolveSource(name, upRookVersion, cmd.Flags().Changed("rook-version"),
+		upConfigDir, cmd.Flags().Changed("config-dir"))
+	if err != nil {
+		return clusterSource{}, "", err
+	}
+	released := src.RookVersion != ""
+	if err := releasedBuildConflict(released, upForceBuild); err != nil {
+		return clusterSource{}, "", err
+	}
+	var rookDir string
+	switch {
+	case released:
+		rookDir = upRookDir
+		if rookDir == "" {
+			if wd, err := os.Getwd(); err == nil {
+				rookDir = findRookRoot(wd)
+			}
+		} else if src.ConfigDir == "" {
+			// Otherwise rookDir never reaches configHome below (src.ConfigDir
+			// wins), and refusing it would refuse a --dir a --config-dir made
+			// irrelevant.
+			if err := checkConfigDir(rookDir); err != nil {
+				return clusterSource{}, "", err
+			}
+		}
+	case !upSkipBuild || !upSkipDeploy:
+		if rookDir, err = resolveRookDir(upRookDir); err != nil {
+			return clusterSource{}, "", err
+		}
+	}
+	// Pulled even when deploy is skipped: the record is written below, and one
+	// naming a version that was never published would steer every later
+	// command to it.
+	if released {
+		if _, err := releasedCharts(src.RookVersion); err != nil {
+			return clusterSource{}, "", err
+		}
+	}
+	if !upSkipDeploy {
+		if err := checkProfileSelection(configHome(src, rookDir), cmd.Flags().Changed("with-only")); err != nil {
+			return clusterSource{}, "", err
+		}
+	}
+	if changed {
+		if err := writeSource(name, src); err != nil {
+			return clusterSource{}, "", err
+		}
+	}
+	return src, rookDir, nil
 }
 
 // upCreateAndBuild runs the infra-plus-create side concurrently with the make
@@ -414,7 +494,9 @@ func init() {
 	upCmd.Flags().IntVar(&upDiskSizeGB, "disk-size", 10, "disk size in GiB")
 	upCmd.Flags().IntVar(&upRegistryPort, "registry-port", 5001, "host port for the local OCI registry")
 	upCmd.Flags().StringVar(&upIQNDate, "iqn-date", "2003-01", "IQN date component (YYYY-MM); unset, an existing cluster's recorded value")
-	upCmd.Flags().StringVar(&upRookDir, "dir", "", "path to the rook source directory (default: $ROOK_DIR, else the rook clone found by walking up from the current directory)")
+	upCmd.Flags().StringVar(&upRookDir, "dir", "", "path to the rook source directory (default: $ROOK_DIR, else the rook clone found by walking up from the current directory); for a released Rook version it only locates the configuration home, its .rooket (default: the rook clone enclosing the current directory, if any)")
+	upCmd.Flags().StringVar(&upRookVersion, "rook-version", "", "deploy this released Rook version from "+chartcache.Repo+", skipping the build (default: the cluster's recorded version, else a rook clone)")
+	upCmd.Flags().StringVar(&upConfigDir, "config-dir", "", "configuration directory laid out like .rooket/ (default: $ROOKET_CONFIG_DIR, else the cluster's recorded one, else the rook clone's .rooket)")
 	upCmd.Flags().StringVar(&upPromVersion, "prometheus-operator-crds-version", "29.0.0", "version of the prometheus-operator-crds helm chart (exact versions enable the reinstall skip)")
 	upCmd.Flags().StringVar(&upPromRelease, "prometheus-operator-crds-release", cluster.DefaultPromCRDsRelease, "helm release name for prometheus-operator-crds")
 	upCmd.Flags().StringVar(&upOperatorRelease, "operator-release", "rook-ceph", "rook-ceph operator helm release name")
@@ -424,7 +506,7 @@ func init() {
 	upCmd.Flags().BoolVar(&upSkipDeploy, "skip-deploy", false, "skip 'deploy'")
 	upCmd.Flags().BoolVar(&upForceBuild, "force-build", false, "run make even when the rook tree is unchanged since the last push")
 	upCmd.Flags().StringVar(&upNodeImage, "node-image", defaultNodeImage, "kindest/node image for the cluster, pre-pulled before create (pin tag@digest for a reproducible Kubernetes version)")
-	upCmd.Flags().StringArrayVar(&upWith, "with", nil, "profile to enable, by name or by directory path (./dir), in addition to the clone's sticky list (repeatable)")
-	upCmd.Flags().StringArrayVar(&upWithOnly, "with-only", nil, "profile to enable, by name or by directory path (./dir), replacing the clone's sticky list (repeatable)")
+	upCmd.Flags().StringArrayVar(&upWith, "with", nil, "profile to enable, by name or by directory path (./dir), in addition to the configuration home's sticky list (repeatable)")
+	upCmd.Flags().StringArrayVar(&upWithOnly, "with-only", nil, "profile to enable, by name or by directory path (./dir), replacing the configuration home's sticky list (repeatable)")
 	upCmd.MarkFlagsMutuallyExclusive("skip-build", "force-build")
 }

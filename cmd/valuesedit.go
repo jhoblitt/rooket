@@ -10,17 +10,16 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/jhoblitt/rooket/internal/clone"
 	"github.com/jhoblitt/rooket/internal/run"
 	"github.com/jhoblitt/rooket/internal/values"
 )
 
 var valuesEditCmd = &cobra.Command{
 	Use:   "edit [chart]",
-	Short: "Edit this clone's values overrides in $EDITOR",
+	Short: "Edit the configuration home's values overrides in $EDITOR",
 	Args:  cobra.MaximumNArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
-		dir, err := resolveRookDir(valuesDir)
+		src, err := valuesSource(cmd)
 		if err != nil {
 			return err
 		}
@@ -33,16 +32,18 @@ var valuesEditCmd = &cobra.Command{
 			charts = []string{c}
 		}
 
-		cloneDir := clone.Open(dir)
-		if err := cloneDir.Ensure(); err != nil {
+		if src.config.ValuesPath(chartOperator) == "" {
+			return fmt.Errorf("no configuration to edit: pass --config-dir or --dir <rook clone>, set $ROOKET_CONFIG_DIR, or run inside a rook clone")
+		}
+		if err := src.config.Ensure(); err != nil {
 			return err
 		}
 		for _, chart := range charts {
-			seed, err := seedFor(chart, dir)
+			seed, err := seedFor(chart, src)
 			if err != nil {
 				return err
 			}
-			if err := editValues(cloneDir.ValuesPath(chart), seed, launchEditor); err != nil {
+			if err := editValues(src.config.ValuesPath(chart), seed, launchEditor); err != nil {
 				return fmt.Errorf("editing %s (earlier charts in this run, if any, were already saved): %w", chart, err)
 			}
 		}
@@ -53,8 +54,8 @@ var valuesEditCmd = &cobra.Command{
 // seedFor renders rooket's generated layer as commented YAML. Knowing which of
 // the chart's keys exist and what rooket already set is the hard part of
 // overriding one, so a new file starts as the answer to both.
-func seedFor(chart, rookDir string) ([]byte, error) {
-	base, err := showBase(chart, rookDir)
+func seedFor(chart string, src rookSource) ([]byte, error) {
+	base, err := showBase(chart, src)
 	if err != nil {
 		return nil, err
 	}
@@ -63,7 +64,7 @@ func seedFor(chart, rookDir string) ([]byte, error) {
 		return nil, err
 	}
 	var b strings.Builder
-	fmt.Fprintf(&b, "# %s overrides for this clone.\n", chart)
+	fmt.Fprintf(&b, "# %s overrides for this configuration.\n", chart)
 	b.WriteString("# Uncomment and edit to override; delete everything to drop this layer.\n")
 	b.WriteString("# Below is rooket's generated base — your values merge on top of it.\n#\n")
 	for _, line := range strings.Split(strings.TrimRight(string(data), "\n"), "\n") {

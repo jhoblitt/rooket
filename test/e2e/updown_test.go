@@ -21,7 +21,8 @@ var reOsdUp = regexp.MustCompile(`osd:\s+(\d+)\s+osds:\s+(\d+)\s+up`)
 
 var _ = Describe("rooket up/down", Ordered, func() {
 	It("brings up a healthy rook-ceph cluster that settles", func() {
-		args := []string{"up", "--dir", rookDir, "--workers", workers, "--name", clusterName}
+		args := append([]string{"up"}, sourceArgs()...)
+		args = append(args, "--workers", workers, "--name", clusterName)
 		if skipBlock {
 			args = append(args, "--skip-block")
 		}
@@ -178,7 +179,8 @@ spec:
 	It("stays healthy when up is re-run (idempotent)", func() {
 		// --skip-build: the image is already in the registry from the first up;
 		// this exercises re-running create+deploy against a live cluster.
-		args := []string{"up", "--skip-build", "--dir", rookDir, "--workers", workers, "--name", clusterName}
+		args := append([]string{"up", "--skip-build"}, sourceArgs()...)
+		args = append(args, "--workers", workers, "--name", clusterName)
 		if skipBlock {
 			args = append(args, "--skip-block")
 		}
@@ -201,6 +203,7 @@ spec:
 	})
 
 	It("auto-skips the build on an unchanged tree and rebuilds on change", func() {
+		needsClone()
 		operatorImageID := func() string {
 			out, err := kubectlNS("get", "pod", "-l", "app=rook-ceph-operator",
 				"-o", "jsonpath={.items[0].status.containerStatuses[0].imageID}")

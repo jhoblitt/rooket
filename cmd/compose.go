@@ -54,9 +54,10 @@ func userProfileDir() (string, error) {
 	return filepath.Join(cfg, "rooket", "profiles"), nil
 }
 
-// activeProfileNames resolves the clone's sticky list against the flags:
-// --with appends to it, --with-only replaces it. withOnlySet distinguishes an
-// unset flag from --with-only "", which clears the selection.
+// activeProfileNames resolves the configuration home's sticky list against
+// the flags: --with appends to it, --with-only replaces it. withOnlySet
+// distinguishes an unset flag from --with-only "", which clears the
+// selection.
 //
 // pflag's StringArray has no syntax for an empty list, so `--with-only ""`
 // arrives here as []string{""} rather than nil; empty entries are dropped so
@@ -143,19 +144,21 @@ type composed struct {
 }
 
 // composeChart stacks every layer for one chart, lowest first: rooket's
-// generated base, the clone's sticky file, then each active profile in
-// selection order.
+// generated base, the configuration home's sticky file if there is one, then
+// each active profile in selection order.
 func composeChart(chart string, base map[string]any, cloneDir clone.Dir,
 	active []profiles.Profile) (composed, error) {
 
 	layers := []values.Layer{{Name: "rooket base", Values: base}}
 
-	sticky, err := values.LoadFile(cloneDir.ValuesPath(chart))
-	if err != nil {
-		return composed{}, err
-	}
-	if sticky != nil {
-		layers = append(layers, values.Layer{Name: ".rooket/values", Values: sticky})
+	if p := cloneDir.ValuesPath(chart); p != "" {
+		sticky, err := values.LoadFile(p)
+		if err != nil {
+			return composed{}, err
+		}
+		if sticky != nil {
+			layers = append(layers, values.Layer{Name: stickyLayerName(cloneDir), Values: sticky})
+		}
 	}
 
 	for _, p := range active {
@@ -166,6 +169,17 @@ func composeChart(chart string, base map[string]any, cloneDir clone.Dir,
 
 	merged, prov := values.Merge(layers)
 	return composed{Merged: merged, Provenance: prov}, nil
+}
+
+// stickyLayerName labels composeChart's sticky-values layer by where it came
+// from: a clone's own .rooket keeps that familiar name, while a user-named
+// --config-dir is labeled by its role instead, so 'values show --layers'
+// never attributes a key to a .rooket the user does not have.
+func stickyLayerName(cloneDir clone.Dir) string {
+	if cloneDir.Named() {
+		return "--config-dir values"
+	}
+	return ".rooket/values"
 }
 
 func (c composed) write(path string) error {

@@ -26,19 +26,25 @@ var (
 var pruneCmd = &cobra.Command{
 	Use:   "prune",
 	Short: "Remove state directories of clusters that no longer exist, and their iSCSI targets",
-	Long: `prune deletes ~/.local/share/rooket/<name> directories left behind by a clone
-that is gone — removed without 'rooket down' — and removes their iSCSI targets
-first, while the state directory's worker*-disk*.img filenames can still be
-used to reconstruct them. All targets are torn down in one privileged run, so
-the whole prune costs at most a single authentication.
+	Long: `prune deletes ~/.local/share/rooket/<name> directories left behind once
+every owner that created them is gone — removed without 'rooket down' — and
+removes their iSCSI targets first, while the state directory's
+worker*-disk*.img filenames can still be used to reconstruct them. All
+targets are torn down in one privileged run, so the whole prune costs at most
+a single authentication.
 
-A cluster whose rook clone still exists is parked, not abandoned: a plain
+A cluster whose owner still exists is parked, not abandoned: a plain
 'rooket down' keeps its disk images and iSCSI targets on purpose so the next
-'up' reuses them without root. prune reports those and leaves them alone;
-'rooket down --delete-disks' is how you reclaim one, or --include-parked
-sweeps them here too. A directory that records no clone at all — created
-before rooket recorded one, or by a --name run outside any rook tree — counts
-as abandoned.
+'up' reuses them without root. A cluster built from a clone is owned by that
+clone alone; one deploying a released Rook is instead owned by its recorded
+configuration directory and by any clone it happens to have been created in,
+and is abandoned only once every recorded owner is gone. prune reports every
+parked cluster and leaves it alone; 'rooket down --delete-disks' is how you
+reclaim one, or --include-parked sweeps them here too. A clone-built
+directory that records no clone at all — created before rooket recorded one
+— counts as abandoned; a released cluster recording no owner at all is
+instead always kept, since nothing on disk can ever show it was abandoned,
+until 'rooket down --delete-disks' or --include-parked removes it.
 
 prune also sweeps iSCSI targets and backstores left behind by an earlier
 deletion of their state directory, read straight from the kernel's own
@@ -98,9 +104,9 @@ regardless, so this does not add a new restriction there.
 		stranded := strandableClusters(strandedFound, live, hasState)
 
 		for _, p := range parked {
-			run.Printf("keeping %s: its clone %s still exists, so it is parked by 'rooket down', not abandoned "+
+			run.Printf("keeping %s: %s, so it is parked by 'rooket down', not abandoned "+
 				"(remove it with 'rooket down --delete-disks', or sweep it here with --include-parked)\n",
-				filepath.Join(root, p), cloneDir(filepath.Join(root, p)))
+				filepath.Join(root, p), parkedBecause(filepath.Join(root, p)))
 		}
 
 		if len(orphans) == 0 && len(stranded) == 0 {
@@ -218,9 +224,10 @@ func pruneExecute(root string, orphans []string, disks []iscsiDisk, teardown fun
 // Orphaned means more than "not live": a plain 'rooket down' leaves a state
 // dir with no live kind cluster on purpose, its disk images and iSCSI targets
 // preserved so the next 'up' reuses them without root. Sweeping that would
-// destroy the very thing down set out to keep, so a cluster whose rook clone
+// destroy the very thing down set out to keep, so a cluster whose owner —
+// its rook clone, or for a released cluster its configuration directory —
 // still exists is parked and left alone unless includeParked says otherwise;
-// see clonePathFile for how the clone is known.
+// see ownerGone.
 //
 // The by-path union matters because reconstruction alone can miss real
 // targets: a state dir whose worker*-disk*.img files were already removed
@@ -241,7 +248,7 @@ func prunePlan(root string, stateNames []string, live map[string][]engine.Engine
 		if _, ok := live[n]; ok {
 			continue
 		}
-		if !includeParked && !cloneGone(filepath.Join(root, n)) {
+		if !includeParked && !ownerGone(filepath.Join(root, n)) {
 			parked = append(parked, n)
 			continue
 		}
@@ -348,6 +355,6 @@ func init() {
 	pruneCmd.Flags().BoolVar(&pruneDryRun, "dry-run", false, "list what would be removed without removing it")
 	pruneCmd.Flags().BoolVar(&pruneForce, "force", false, "remove without prompting")
 	pruneCmd.Flags().BoolVar(&pruneInclParked, "include-parked", false,
-		"also remove clusters whose rook clone still exists (parked by 'rooket down', not abandoned)")
+		"also remove clusters whose owner still exists (parked by 'rooket down', not abandoned)")
 	pruneCmd.Flags().StringVar(&pruneIQNDate, "iqn-date", "2003-01", "date component for reconstructing an orphan's IQNs (YYYY-MM)")
 }

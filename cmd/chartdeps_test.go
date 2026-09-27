@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -132,6 +133,72 @@ type: library
 			t.Fatal("got nil error for missing file")
 		}
 	})
+
+	t.Run("malformed file errors naming it", func(t *testing.T) {
+		p := writeChartYAML(t, `apiVersion: v2
+name: rook-ceph
+dependencies:
+  - name: library
+    version: "0.0.1
+`)
+		_, err := chartDeps(p)
+		if err == nil || !strings.Contains(err.Error(), p) {
+			t.Fatalf("got %v, want an error naming %s", err, p)
+		}
+	})
+}
+
+// A released Rook's rook-ceph chart is the one helm package wrote, which sorts
+// each dependency's keys, so its ceph-csi-operator entry opens with alias
+// rather than name. Both layouts must yield the drivers chart's version and
+// the flow its condition names.
+func TestCephCsiOperatorDepChartLayouts(t *testing.T) {
+	for _, tc := range []struct{ name, chartYAML string }{
+		{"published", `apiVersion: v2
+appVersion: v1.20.7
+dependencies:
+- name: library
+  repository: file://../library
+  version: 0.0.1
+- alias: ceph-csi-operator
+  condition: csi.installCsiOperator
+  name: ceph-csi-operator
+  repository: https://ceph.github.io/ceph-csi-operator
+  version: 1.0.4
+description: File, Block, and Object Storage Services for your Cloud-Native Environment
+icon: https://rook.io/images/rook-logo.svg
+name: rook-ceph
+sources:
+- https://github.com/rook/rook
+version: v1.20.7
+`},
+		{"clone", `---
+apiVersion: v2
+description: File, Block, and Object Storage Services for your Cloud-Native Environment
+name: rook-ceph
+version: 0.0.1
+appVersion: 0.0.1
+icon: https://rook.io/images/rook-logo.svg
+sources:
+  - https://github.com/rook/rook
+dependencies:
+  - name: library
+    version: "0.0.1"
+    repository: "file://../library"
+  - name: ceph-csi-operator
+    version: 1.0.4
+    repository: https://ceph.github.io/ceph-csi-operator
+    alias: ceph-csi-operator
+    condition: csi.installCsiOperator
+`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			v, c, err := cephCsiOperatorDep(writeChartYAML(t, tc.chartYAML))
+			if err != nil || v != "1.0.4" || c != "csi.installCsiOperator" {
+				t.Fatalf("got (%q, %q, %v), want (1.0.4, csi.installCsiOperator, nil)", v, c, err)
+			}
+		})
+	}
 }
 
 // writeChartTree builds <root>/deploy/charts/<chart>/ with an optional

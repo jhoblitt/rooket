@@ -13,7 +13,11 @@ type OperatorInput struct {
 // One provisioner per driver is plenty for a dev cluster, and the HA pair
 // starves small hosts. Consumed only by refs where rook manages the CSI drivers
 // itself (<= v1.19); newer refs take the drivers chart's default of one replica.
+// An empty ImageRepo leaves the chart's own image, as a released chart pins one.
 func OperatorBase(in OperatorInput) map[string]any {
+	if in.ImageRepo == "" {
+		return map[string]any{"csi": map[string]any{"provisionerReplicas": 1}}
+	}
 	image := map[string]any{
 		"repository": in.ImageRepo,
 		"tag":        in.ImageTag,
@@ -60,9 +64,10 @@ const replicaHosts = 3
 // The cpu trims replace the chart's production-HA requests (1 cpu per mon and
 // per OSD): on a small host those fill each node's request budget until later
 // components — the detect-version jobs, the mds — cannot schedule at all, seen
-// as a wedged cluster on 4-vCPU CI runners. Memory requests are left alone
-// (rook derives osd_memory_target from them). A standby mgr adds nothing to a
-// disposable dev cluster and its requests eat a node's budget.
+// as a wedged cluster on 4-vCPU CI runners. Memory requests and limits are left
+// alone (rook derives osd_memory_target and the MDS cache limit from them). A
+// standby mgr adds nothing to a disposable dev cluster and its requests eat a
+// node's budget.
 //
 // Naming a device per node keeps rook from mis-attributing OSDs — every
 // privileged kind node sees every host disk — so each worker gets exactly one
@@ -70,7 +75,11 @@ const replicaHosts = 3
 // loop.
 //
 // A cluster of fewer than replicaHosts hosts gets one mon and its pools fitted
-// to the hosts it has (see fitPools); without them it never settles.
+// to the hosts it has; without them it never settles. Its MDS and RGW get the
+// same cpu trim and it runs no standby MDS (see fitPools): a kind node offers
+// the whole host's cpus as its request budget, so one worker has a third of
+// what three have, and there the chart's system-cluster-critical MDS pair and
+// RGW preempt the operator itself.
 func ClusterBase(in ClusterInput) map[string]any {
 	spec := map[string]any{
 		"mgr": map[string]any{"count": 1},
@@ -132,9 +141,9 @@ func configOverride(hosts int) string {
 var chartPoolLists = []string{"cephBlockPools", "cephFileSystems", "cephObjectStores"}
 
 // fitPools returns a copy of one of the chart's pool lists with every pool
-// fitted to hosts (see fitPool). The entries are copied whole because Helm
-// replaces a list rather than merging it: an entry missing its StorageClass
-// would deploy none.
+// fitted to hosts (see fitPool) and every daemon to a small cluster (see
+// fitDaemon). The entries are copied whole because Helm replaces a list rather
+// than merging it: an entry missing its StorageClass would deploy none.
 func fitPools(list string, entries []any, hosts int) []any {
 	out := deepCopy(entries).([]any)
 	for _, e := range out {
@@ -145,6 +154,7 @@ func fitPools(list string, entries []any, hosts int) []any {
 		for _, pool := range poolSpecs(list, entry) {
 			fitPool(pool, hosts)
 		}
+		fitDaemon(list, entry)
 	}
 	return out
 }
@@ -196,6 +206,43 @@ func fitPool(pool map[string]any, hosts int) {
 		rep["requireSafeReplicaSize"] = false
 	}
 	pool["replicated"] = rep
+}
+
+// fitDaemon trims, in place, the cpu request of the daemon one entry of a
+// chart pool list runs: a CephFilesystem's MDS, which also loses its standby,
+// and a CephObjectStore's RGW. An entry that declares no daemon is left alone.
+func fitDaemon(list string, entry map[string]any) {
+	spec, _ := entry["spec"].(map[string]any)
+	if spec == nil {
+		return
+	}
+	switch list {
+	case "cephFileSystems":
+		if mds, ok := spec["metadataServer"].(map[string]any); ok {
+			mds["activeStandby"] = false
+			requestCPU(mds, "500m")
+		}
+	case "cephObjectStores":
+		if rgw, ok := spec["gateway"].(map[string]any); ok {
+			requestCPU(rgw, "500m")
+		}
+	}
+}
+
+// requestCPU sets a daemon spec's cpu request in place, keeping the rest of its
+// resources.
+func requestCPU(daemon map[string]any, cpu string) {
+	res, _ := daemon["resources"].(map[string]any)
+	if res == nil {
+		res = map[string]any{}
+	}
+	req, _ := res["requests"].(map[string]any)
+	if req == nil {
+		req = map[string]any{}
+	}
+	req["cpu"] = cpu
+	res["requests"] = req
+	daemon["resources"] = res
 }
 
 // CSIBase builds rooket's generated layer for the ceph-csi-drivers chart. The

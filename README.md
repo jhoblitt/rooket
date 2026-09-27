@@ -19,8 +19,8 @@ source checkout.
   `rooket down --delete-disks`. See "Passwordless iSCSI setup" below for how
   that privilege is obtained. Day-to-day `up`/`down` cycles reuse the existing
   targets and never prompt.
-- A Go toolchain (to build rooket) and a [rook](https://github.com/rook/rook)
-  source checkout.
+- A Go toolchain (to build rooket) and, unless you deploy a released Rook
+  (see below), a [rook](https://github.com/rook/rook) source checkout.
 
 ### Passwordless iSCSI setup
 
@@ -128,6 +128,39 @@ host.
 `rooket up` finds the rook source via `--dir`, `$ROOK_DIR`, or by walking up
 from the current directory to the enclosing rook clone.
 
+## Released Rook
+
+To use rooket as a test harness for something that consumes Rook rather than
+develops it, deploy a published release. No rook checkout is needed and
+nothing is built:
+
+```console
+$ export ROOKET_NAME=rgw-test
+$ rooket up --rook-version v1.20.7 --workers 1
+```
+
+The charts are pulled from `https://charts.rook.io/release` once per version
+into `~/.cache/rooket/charts/` and reused by every cluster after that; the
+images are the ones the release pins. The version is an exact tag, never a
+range, and is recorded with the cluster, so a later `rooket deploy` or
+`rooket values show` needs no `--rook-version` or `--config-dir` flag.
+Passing a different `--rook-version` to `up` or `deploy` upgrades the
+cluster to it.
+
+Outside a rook clone the cluster name still comes from `--name` (on the
+commands that take it) or `$ROOKET_NAME` — `values` has no `--name` flag, so
+`$ROOKET_NAME` is its only way to reach such a cluster. Sticky configuration
+lives in any directory laid out like `.rooket/` (`values/<chart>.yaml`,
+`templates/`, `config.yaml`), named with `--config-dir` or
+`$ROOKET_CONFIG_DIR` and recorded with the cluster; it must already exist,
+since rooket refuses a missing one and never creates a named directory.
+rooket never writes a `.gitignore` into it, so it can live in your own
+repository.
+
+A released cluster made outside a clone with no `--config-dir` records no
+owner, so `rooket prune` always keeps it; remove it with `rooket down
+--delete-disks`.
+
 ## Clusters and state
 
 Each rook clone gets its own cluster. The cluster name is derived from the
@@ -144,7 +177,9 @@ Per-cluster state lives in `~/.local/share/rooket/<name>/`:
   date). Any of `--workers`, `--disk-count`, and `--iqn-date` you leave unset
   takes the recorded value. A flag you set that contradicts it is refused by
   `deploy`, `down`, and `block teardown`, and taken as the new shape by `up`,
-  `cluster create`, and `block setup`.
+  `cluster create`, and `block setup`,
+- the Rook version it deploys, when released, and the configuration directory
+  it was given, so later commands need neither flag.
 
 Use the cluster from outside rooket with:
 
@@ -158,8 +193,10 @@ $ export KUBECONFIG="$(rooket kubeconfig --path)"    # or point your own tools a
 rooket composes the Helm values for each chart from layers, lowest first:
 
 1. the chart's own `values.yaml`
-2. rooket's generated base (image refs, OSD device pinning, dev-host cpu trims)
-3. `<rook clone>/.rooket/values/<chart>.yaml` — sticky, this clone
+2. rooket's generated base (image refs when built from a clone, OSD device
+   pinning, dev-host cpu trims)
+3. the configuration home's `values/<chart>.yaml` — sticky; a named
+   `--config-dir` when one is recorded, else `<rook clone>/.rooket`
 4. active profiles, in selection order
 
 Nothing is locked: a values file can retarget the operator image or add to the
@@ -263,15 +300,15 @@ another chart. These are errors: a values file named for no chart
 fine in a `.yaml` file); two different profiles with the same name, such as
 `./rbd` alongside the built-in `rbd`, or two directories both named
 `mytest`; a profile directory whose name starts with `_`; and a path in
-`.rooket/config.yaml`'s `profiles:` list. `--with-only` replaces the clone's
-sticky profile list, so that list is not read, but the clone's
-`.rooket/values/` still applies.
+`.rooket/config.yaml`'s `profiles:` list. `--with-only` replaces the
+configuration home's sticky profile list, so that list is not read, but its
+`values/` still applies.
 
 ## Commands
 
 | Command | Purpose |
 |---|---|
-| `rooket up` / `rooket down` | full bring-up / teardown; `down --delete-disks` also removes targets, images, and state; `down --all` sweeps every cluster |
+| `rooket up` / `rooket down` | full bring-up / teardown; `up --rook-version` deploys a released Rook with no checkout; `down --delete-disks` also removes targets, images, and state; `down --all` sweeps every cluster |
 | `rooket block setup` / `teardown` | create/remove the iSCSI disk images and targets |
 | `rooket cluster create` / `delete` | create/delete the kind cluster + registry |
 | `rooket build` | `make` in the rook source, tag + push the image to the registry |
@@ -298,15 +335,18 @@ for the dependency graph, the primitives, and the invariants that bound it.
 ## Tests
 
 Unit tests: `go test ./...`. The end-to-end suite
-(`go test -tags e2e ./test/e2e/ -timeout 60m`, needs `ROOK_DIR` and existing
-block devices) drives a real `rooket up`/`down` and asserts one OSD per
+(`go test -tags e2e ./test/e2e/ -timeout 60m`) needs existing block devices,
+and either `ROOK_DIR` (a rook checkout) or `ROOKET_ROOK_VERSION` (a released
+version, no checkout; specs that build or edit a checkout skip themselves in
+that mode). It drives a real `rooket up`/`down` and asserts one OSD per
 worker, no loop devices, a settled healthy cluster, RADOS I/O, CSI block-PVC
 provisioning and reclaim, krbd-mounted RBD I/O, CephFS-PVC I/O, the
 `list`/`kubectl`/`kubeconfig`/`prune` surfaces,
 registry-port reuse across re-ups, `down --all` ownership scoping against a
 foreign kind cluster, and clean teardown. CI runs the suite under docker on
 every PR against rook master, release-1.20, and release-1.19 — covering both
-the ceph-csi-drivers and rook-managed CSI flows — alongside a fast unit + vet
+the ceph-csi-drivers and rook-managed CSI flows. A released Rook v1.20.7
+entry also runs with no checkout, on one worker, alongside a fast unit + vet
 job.
 
 ## Upgrading from older rooket

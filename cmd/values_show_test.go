@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/jhoblitt/rooket/internal/chartcache"
 )
 
 // TestValuesShowInheritsWithOnlyFlag exercises the real command tree so a
@@ -15,12 +17,30 @@ import (
 func TestValuesShowInheritsWithOnlyFlag(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	prevValuesDir := valuesDir
 	t.Cleanup(func() {
 		deployWith, deployWithOnly = nil, nil
 		deployWithOnlySet = false
 		rootCmd.SetArgs(nil)
 		rootCmd.SetOut(nil)
+		dirFlag := valuesCmd.PersistentFlags().Lookup("dir")
+		_ = dirFlag.Value.Set(dirFlag.DefValue)
+		dirFlag.Changed = false
+		// with-only's Value is already reset by the deployWithOnly assignment
+		// above (the same *[]string the flag binds); routing its DefValue
+		// "[]" through Set would instead append a stray "[]" element —
+		// stringArrayValue.Set appends rather than replaces once its private
+		// "already set" latch trips, which happened above when --with-only
+		// rbd ran in the second subtest.
+		valuesCmd.PersistentFlags().Lookup("with-only").Changed = false
+		// Last, since resetting "dir" above writes valuesDir through its
+		// bound flag.Value; this restore must win.
+		valuesDir = prevValuesDir
 	})
+	// show follows the cluster's source record; the developer's own records
+	// could otherwise point it at a released version or a missing directory.
+	t.Setenv("ROOKET_CONFIG_DIR", "")
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
 
 	dir := t.TempDir()
 
@@ -132,11 +152,162 @@ func TestShowBaseUsesTheRecordedShape(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	base, err := showBase(chartCluster, rookCloneWithBlockPool(t))
+	base, err := showBase(chartCluster, rookSource{charts: rookCloneWithBlockPool(t)})
 	if err != nil {
 		t.Fatalf("showBase: %v", err)
 	}
 	if size := blockPoolSize(t, base); size != 1 {
 		t.Errorf("block pool size = %#v, want 1 for the recorded single worker", size)
+	}
+}
+
+func TestShowBaseOfAReleasedOperatorKeepsTheChartsImage(t *testing.T) {
+	base, err := showBase(chartOperator, rookSource{released: "v1.20.7"})
+	if err != nil {
+		t.Fatalf("showBase: %v", err)
+	}
+	if _, ok := base["image"]; ok {
+		t.Errorf("image = %#v, want none: a released chart pins its own", base["image"])
+	}
+}
+
+// values show renders what a deploy of the cluster in scope would: for a
+// released cluster, the recorded version's cached charts.
+func TestValuesSourceOfAReleasedCluster(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("ROOKET_NAME", "released")
+	t.Setenv("ROOKET_CONFIG_DIR", "")
+	stubChartPuller(t)
+	cfg := t.TempDir()
+	if err := writeSource("released", clusterSource{RookVersion: "v1.20.7", ConfigDir: cfg}); err != nil {
+		t.Fatal(err)
+	}
+
+	src, err := valuesSource(valuesShowCmd)
+	if err != nil {
+		t.Fatalf("valuesSource: %v", err)
+	}
+	if src.released != "v1.20.7" {
+		t.Errorf("released = %q, want the recorded v1.20.7", src.released)
+	}
+	root, err := chartcache.DefaultRoot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := filepath.Join(root, "v1.20.7"); src.charts != want {
+		t.Errorf("charts = %q, want the chart cache entry %s", src.charts, want)
+	}
+	if got := src.config.ValuesPath(chartCluster); got != filepath.Join(cfg, "values", chartCluster+".yaml") {
+		t.Errorf("config ValuesPath = %q, want the recorded directory's", got)
+	}
+}
+
+// Unchecked, clone.Open(dir).Ensure() would MkdirAll a typo'd --dir into a
+// fresh, empty .rooket tree and values would render with no sticky
+// configuration, silently.
+func TestValuesSourceReleasedRefusesAMissingDir(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("ROOKET_NAME", "released")
+	t.Setenv("ROOKET_CONFIG_DIR", "")
+	stubChartPuller(t)
+	if err := writeSource("released", clusterSource{RookVersion: "v1.20.7"}); err != nil {
+		t.Fatal(err)
+	}
+	prev := valuesDir
+	t.Cleanup(func() { valuesDir = prev })
+	missing := filepath.Join(t.TempDir(), "typo")
+	valuesDir = missing
+
+	if _, err := valuesSource(valuesShowCmd); err == nil || !strings.Contains(err.Error(), missing) {
+		t.Fatalf("valuesSource = %v, want the missing --dir refused, naming %s", err, missing)
+	}
+	if _, err := os.Stat(missing); err == nil {
+		t.Errorf("a typo'd --dir got created rather than refused")
+	}
+}
+
+// parseValuesFlags parses args into valuesShowCmd's flags (which inherit
+// valuesCmd's persistent ones, cobra's own reuse of --dir/--rook-version/
+// --config-dir across every values subcommand), and resets every flag these
+// tests set when the test ends.
+func parseValuesFlags(t *testing.T, args ...string) {
+	t.Helper()
+	if err := valuesShowCmd.ParseFlags(args); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		for _, name := range []string{"rook-version", "config-dir"} {
+			f := valuesShowCmd.Flags().Lookup(name)
+			_ = f.Value.Set(f.DefValue)
+			f.Changed = false
+		}
+	})
+}
+
+// values has no --name flag of its own, so a released --rook-version outside
+// a clone must still be refused the fallback name deploy and up refuse: two
+// unrelated consumers on the host would otherwise share the "rook" cluster.
+func TestValuesSourceReleasedRefusesTheFallbackName(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("ROOKET_NAME", "")
+	t.Chdir(t.TempDir())
+	stubChartPuller(t)
+	parseValuesFlags(t, "--rook-version=v1.20.7")
+
+	if _, err := valuesSource(valuesShowCmd); err == nil || !strings.Contains(err.Error(), "--name") {
+		t.Fatalf("valuesSource = %v, want the fallback name refused, pointing at --name", err)
+	}
+}
+
+// A mutation turning configHome(rec, dir) into an unconditional clone.Open(dir)
+// would send a clone-mode values command back to the clone's own .rooket even
+// when a configuration directory is named; nothing else exercises this branch
+// with a real clone in scope.
+func TestValuesSourceCloneModeHonorsNamedConfigDir(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("ROOKET_NAME", "clone-with-config")
+	t.Setenv("ROOK_DIR", "")
+	prev := valuesDir
+	t.Cleanup(func() { valuesDir = prev })
+	valuesDir = ""
+	rookDir := t.TempDir()
+	writeGoMod(t, rookDir, rookModulePath)
+	t.Chdir(rookDir)
+	config := t.TempDir()
+	t.Setenv("ROOKET_CONFIG_DIR", config)
+
+	src, err := valuesSource(valuesShowCmd)
+	if err != nil {
+		t.Fatalf("valuesSource: %v", err)
+	}
+	if got, want := src.config.ValuesPath(chartCluster), filepath.Join(config, "values", chartCluster+".yaml"); got != want {
+		t.Errorf("config ValuesPath = %q, want %q under the named --config-dir, not the clone's own .rooket", got, want)
+	}
+}
+
+// A released cluster run outside any clone, with no directory named, has
+// nowhere to keep overrides.
+func TestValuesEditRefusesWithoutAConfigurationHome(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("ROOKET_NAME", "released")
+	t.Setenv("ROOKET_CONFIG_DIR", "")
+	t.Setenv("VISUAL", "false")
+	t.Chdir(t.TempDir())
+	stubChartPuller(t)
+	prev := valuesDir
+	valuesDir = ""
+	t.Cleanup(func() { valuesDir = prev })
+	if err := writeSource("released", clusterSource{RookVersion: "v1.20.7"}); err != nil {
+		t.Fatal(err)
+	}
+
+	err := valuesEditCmd.RunE(valuesEditCmd, []string{"operator"})
+	if err == nil || !strings.Contains(err.Error(), "no configuration to edit") {
+		t.Fatalf("values edit = %v, want a refusal naming the missing configuration", err)
+	}
+	for _, way := range []string{"--config-dir", "--dir", "$ROOKET_CONFIG_DIR"} {
+		if !strings.Contains(err.Error(), way) {
+			t.Errorf("refusal %q does not offer %s as a way to supply a configuration home", err, way)
+		}
 	}
 }

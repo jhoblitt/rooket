@@ -46,13 +46,13 @@ func profilesReleaseArgs(any bool, kubeContext, chartDir string) []string {
 	}
 }
 
-// installProfilesChart installs the resources contributed by the clone and the
-// active profiles as their own release, so disabling a profile prunes what it
-// owned on the next deploy. active is the deploy's profile set, resolved once
-// by deploySetup, so this release matches whatever the chart installs saw.
-func installProfilesChart(rookDir string, active []profiles.Profile) error {
-	cloneDir := clone.Open(rookDir)
-	sources, err := profileSources(cloneDir, active)
+// installProfilesChart installs the resources contributed by the configuration
+// home and the active profiles as their own release, so disabling a profile
+// prunes what it owned on the next deploy. active is the deploy's profile set,
+// resolved once by deploySetup, so this release matches whatever the chart
+// installs saw.
+func installProfilesChart(config clone.Dir, active []profiles.Profile) error {
+	sources, err := profileSources(config, active)
 	if err != nil {
 		return err
 	}
