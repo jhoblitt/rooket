@@ -1,0 +1,1 @@
+description: Host network — Ceph binds the node's IPs instead of pod IPs, so host-side clients can reach mons, OSDs, and the RGW

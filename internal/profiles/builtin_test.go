@@ -24,8 +24,13 @@ func TestBuiltInProfilesLoad(t *testing.T) {
 			if p.Description == "" {
 				t.Error("want a description")
 			}
-			if len(p.Templates) == 0 {
-				t.Error("want at least one template")
+			if len(p.Templates) == 0 && len(p.Values) == 0 {
+				t.Error("want at least one template or values overlay")
+			}
+			for chart, overlay := range p.Values {
+				if len(overlay) == 0 {
+					t.Errorf("%s has an empty values overlay", chart)
+				}
 			}
 			for file, data := range p.Templates {
 				if !strings.Contains(string(data), "kind:") {
@@ -57,6 +62,39 @@ func TestNFSProfileEnablesTheDriver(t *testing.T) {
 	}
 	if drivers["nfs"].(map[string]any)["enabled"] != true {
 		t.Errorf("nfs driver not enabled: %#v", drivers["nfs"])
+	}
+}
+
+// TestHostNetworkProfileSetsNetworkProvider pins that the host-network
+// profile adds no templates and overlays only the cluster chart, setting its
+// network provider to "host", since a librados client on the host can only
+// reach mons and OSDs that bind the node's network rather than a pod IP.
+func TestHostNetworkProfileSetsNetworkProvider(t *testing.T) {
+	p, err := Load(t.TempDir(), "host-network")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if len(p.Templates) != 0 {
+		t.Errorf("p.Templates = %#v, want none", p.Templates)
+	}
+	if len(p.Values) != 1 {
+		t.Fatalf("p.Values = %#v, want exactly one chart", p.Values)
+	}
+	if _, ok := p.Values["rook-ceph-cluster"]; !ok {
+		t.Fatalf("p.Values = %#v, want the rook-ceph-cluster chart", p.Values)
+	}
+
+	spec, ok := p.Values["rook-ceph-cluster"]["cephClusterSpec"].(map[string]any)
+	if !ok {
+		t.Fatalf("values = %#v", p.Values)
+	}
+	network, ok := spec["network"].(map[string]any)
+	if !ok {
+		t.Fatalf("cephClusterSpec.network = %#v", spec["network"])
+	}
+	if network["provider"] != "host" {
+		t.Errorf("cephClusterSpec.network.provider = %#v, want %q", network["provider"], "host")
 	}
 }
 
