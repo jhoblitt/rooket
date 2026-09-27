@@ -29,6 +29,8 @@ func TestPgsSettledEnough(t *testing.T) {
 		{"three short exceeds ~1% tolerance", "265 pgs: 3 peering, 262 active+clean", false},
 		{"small cluster, one short is tolerated", "64 pgs: 1 peering, 63 active+clean", true},
 		{"small cluster, two short is not", "64 pgs: 2 peering, 62 active+clean", false},
+		{"large cluster, six short is ~1% and tolerated", "600 pgs: 6 peering, 594 active+clean", true},
+		{"large cluster, seven short is not", "600 pgs: 7 peering, 593 active+clean", false},
 		{"half the cluster stuck is a real failure", "265 pgs: 130 peering, 135 active+clean", false},
 		{"nothing clean yet", "265 pgs: 265 creating", false},
 		{"no pg total", "waiting for the mgr", false},
@@ -43,18 +45,5 @@ func TestPgsSettledEnough(t *testing.T) {
 				t.Errorf("a not-settled result must carry a detail message for the assertion")
 			}
 		})
-	}
-}
-
-// TestPgSettleTolerance pins the ~1%-but-at-least-1 scaling, so the tolerance
-// stays proportional rather than a fixed count that means different things on a
-// 60-PG versus a 600-PG cluster.
-func TestPgSettleTolerance(t *testing.T) {
-	for _, c := range []struct{ total, want int }{
-		{0, 1}, {64, 1}, {100, 1}, {200, 2}, {265, 2}, {600, 6},
-	} {
-		if got := pgSettleTolerance(c.total); got != c.want {
-			t.Errorf("pgSettleTolerance(%d) = %d, want %d", c.total, got, c.want)
-		}
 	}
 }
