@@ -62,9 +62,11 @@ func TestClusterBase(t *testing.T) {
 			"cephClusterSpec": map[string]any{
 				"mgr": map[string]any{"count": 1},
 				"resources": map[string]any{
-					"mon": map[string]any{"requests": map[string]any{"cpu": "500m"}},
-					"osd": map[string]any{"requests": map[string]any{"cpu": "500m"}},
-					"mgr": map[string]any{"requests": map[string]any{"cpu": "300m"}},
+					"mon":          map[string]any{"requests": map[string]any{"cpu": "500m"}},
+					"osd":          map[string]any{"requests": map[string]any{"cpu": "500m"}},
+					"mgr":          map[string]any{"requests": map[string]any{"cpu": "300m"}},
+					"cmd-reporter": map[string]any{"requests": map[string]any{"cpu": "100m"}},
+					"logcollector": map[string]any{"requests": map[string]any{"cpu": "50m"}},
 				},
 			},
 		}
@@ -88,9 +90,11 @@ func TestClusterBase(t *testing.T) {
 			"cephClusterSpec": map[string]any{
 				"mgr": map[string]any{"count": 1},
 				"resources": map[string]any{
-					"mon": map[string]any{"requests": map[string]any{"cpu": "500m"}},
-					"osd": map[string]any{"requests": map[string]any{"cpu": "500m"}},
-					"mgr": map[string]any{"requests": map[string]any{"cpu": "300m"}},
+					"mon":          map[string]any{"requests": map[string]any{"cpu": "500m"}},
+					"osd":          map[string]any{"requests": map[string]any{"cpu": "500m"}},
+					"mgr":          map[string]any{"requests": map[string]any{"cpu": "300m"}},
+					"cmd-reporter": map[string]any{"requests": map[string]any{"cpu": "100m"}},
+					"logcollector": map[string]any{"requests": map[string]any{"cpu": "50m"}},
 				},
 				"storage": map[string]any{
 					"useAllNodes":   false,
