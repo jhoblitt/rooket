@@ -214,6 +214,26 @@ store's realm, zonegroup, and zone after the store, and the example names all
 three; without them, `radosgw-admin` works in a `default` zone the RGW never
 reads.
 
+Rook's operator writes the store's realm, zonegroup, zone, and period with the
+`radosgw-admin` in its own container, so they are encoded by the operator
+image's Ceph, not by `cephImage`'s. Rook v1.20.7's operator image, like
+v1.19.9's, is built on Ceph v20.2.4, which encodes the zone (`zone_info.<id>`
+in `.rgw.root`) as `RGWZoneParams` struct version 18; every Squid release
+writes 15. A client that decodes the zone itself meets version 18 even on a
+cluster pinned to Squid, and must skip the trailing fields it does not know,
+as Ceph's own decoders do.
+
+The cluster adds users and a bucket of its own to the zone, which a client
+listing them will find:
+
+- `dashboard-admin`, a system user Rook's operator creates for the Ceph
+  dashboard while `cephClusterSpec.dashboard.enabled` is true, the chart's
+  default, unless the store's `gateway.dashboardEnabled` is false.
+- With the `rgw` profile, `rooket-rgw-user` from its CephObjectStoreUser, and
+  from its ObjectBucketClaim the user
+  `obc-rook-ceph-rooket-rgw-bucket-<claim UID>` and a bucket `rooket-<UUID>`.
+  Rook's operator creates `rgw-admin-ops-user` to provision both.
+
 From the host, reach the RGW at its node's IP on the gateway port, 80 by the
 chart's default. The Service name in the CephObjectStore's status is where the
 RGW serves inside the cluster, and what `rooket wait` probes, but it does not
