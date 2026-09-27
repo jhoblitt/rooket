@@ -1,7 +1,10 @@
 package chartcache
 
 import (
+	"bytes"
 	"errors"
+	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -57,7 +60,7 @@ func TestEnsurePullsEachChartOnce(t *testing.T) {
 	root := t.TempDir()
 	calls := map[string]int{}
 
-	entry, err := Ensure(root, "v1.20.7", fakePull(calls))
+	entry, err := Ensure(io.Discard, root, "v1.20.7", fakePull(calls))
 	if err != nil {
 		t.Fatalf("Ensure: %v", err)
 	}
@@ -69,7 +72,7 @@ func TestEnsurePullsEachChartOnce(t *testing.T) {
 			t.Errorf("chart %s not laid out like a clone's: %v", c, err)
 		}
 	}
-	if _, err := Ensure(root, "v1.20.7", fakePull(calls)); err != nil {
+	if _, err := Ensure(io.Discard, root, "v1.20.7", fakePull(calls)); err != nil {
 		t.Fatalf("second Ensure: %v", err)
 	}
 	for _, c := range Charts {
@@ -90,7 +93,7 @@ func TestEnsureLeavesNoEntryAfterAFailedPull(t *testing.T) {
 		return fakePull(map[string]int{})(dir, chart, version)
 	}
 
-	if _, err := Ensure(root, "v1.20.7", pull); !errors.Is(err, boom) {
+	if _, err := Ensure(io.Discard, root, "v1.20.7", pull); !errors.Is(err, boom) {
 		t.Fatalf("Ensure = %v, want the pull's error", err)
 	}
 	if left := entriesIn(t, root); len(left) != 0 {
@@ -118,7 +121,7 @@ func TestEnsureYieldsToAConcurrentWinner(t *testing.T) {
 		return fakePull(map[string]int{})(dir, chart, version)
 	}
 
-	entry, err := Ensure(root, "v1.20.7", pull)
+	entry, err := Ensure(io.Discard, root, "v1.20.7", pull)
 	if err != nil {
 		t.Fatalf("Ensure: %v", err)
 	}
@@ -135,7 +138,7 @@ func TestEnsureRejectsAnIncompleteEntry(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(root, "v1.20.7", "deploy", "charts", "rook-ceph"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	_, err := Ensure(root, "v1.20.7", fakePull(map[string]int{}))
+	_, err := Ensure(io.Discard, root, "v1.20.7", fakePull(map[string]int{}))
 	if err == nil {
 		t.Fatal("Ensure = nil error, want the incomplete entry reported")
 	}
@@ -211,14 +214,22 @@ func ensureAll(root string, pull Puller, versions ...string) ([]string, []error)
 	errs := make([]error, len(versions))
 	var wg sync.WaitGroup
 	for i, v := range versions {
-		wg.Go(func() { entries[i], errs[i] = Ensure(root, v, pull) })
+		wg.Go(func() { entries[i], errs[i] = Ensure(io.Discard, root, v, pull) })
 	}
 	wg.Wait()
 	return entries, errs
 }
 
-// holdLock takes the pull lock as another process would, until the test ends.
-func holdLock(t *testing.T, root string) {
+// holder is the record another rooket keeps in the pull lock while it holds
+// it, and holderClause is how Ensure names that rooket.
+const (
+	holder       = "4242 rooket up --name w6-holder\n"
+	holderClause = "(pid 4242: rooket up --name w6-holder)"
+)
+
+// holdLock takes the pull lock as another rooket would, recording itself as
+// holder, until the test ends or it closes the returned file.
+func holdLock(t *testing.T, root string) *os.File {
 	t.Helper()
 	f, err := os.OpenFile(filepath.Join(root, lockName), os.O_CREATE|os.O_RDWR, 0o644)
 	if err != nil {
@@ -228,6 +239,10 @@ func holdLock(t *testing.T, root string) {
 	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
 		t.Fatalf("take the pull lock: %v", err)
 	}
+	if _, err := f.WriteString(holder); err != nil {
+		t.Fatal(err)
+	}
+	return f
 }
 
 func shortenLockWait(t *testing.T, d time.Duration) {
@@ -319,13 +334,13 @@ func TestEnsurePullsAfterTheHolderFails(t *testing.T) {
 // already here never queues behind another's pull.
 func TestEnsureHitTakesNoLock(t *testing.T) {
 	root := t.TempDir()
-	if _, err := Ensure(root, "v1.20.7", fakePull(map[string]int{})); err != nil {
+	if _, err := Ensure(io.Discard, root, "v1.20.7", fakePull(map[string]int{})); err != nil {
 		t.Fatalf("seed the entry: %v", err)
 	}
 	holdLock(t, root)
 	shortenLockWait(t, 50*time.Millisecond)
 
-	entry, err := Ensure(root, "v1.20.7", func(dir, chart, version string) error {
+	entry, err := Ensure(io.Discard, root, "v1.20.7", func(dir, chart, version string) error {
 		t.Errorf("pulled %s %s, which is cached", chart, version)
 		return nil
 	})
@@ -342,7 +357,7 @@ func TestEnsureGivesUpOnAPullThatNeverFinishes(t *testing.T) {
 	holdLock(t, root)
 	shortenLockWait(t, 50*time.Millisecond)
 
-	_, err := Ensure(root, "v1.20.7", func(dir, chart, version string) error {
+	_, err := Ensure(io.Discard, root, "v1.20.7", func(dir, chart, version string) error {
 		t.Errorf("pulled %s %s while another held the lock", chart, version)
 		return nil
 	})
@@ -352,7 +367,132 @@ func TestEnsureGivesUpOnAPullThatNeverFinishes(t *testing.T) {
 	if lock := filepath.Join(root, lockName); !strings.Contains(err.Error(), lock) {
 		t.Errorf("error %q does not name the lock file %s", err, lock)
 	}
+	if !strings.Contains(err.Error(), holderClause) {
+		t.Errorf("error %q does not name the rooket holding the lock, %s", err, holderClause)
+	}
 	if left := entriesIn(t, root); len(left) != 0 {
 		t.Errorf("root holds %v after giving up, want nothing", left)
+	}
+}
+
+// While it pulls, Ensure records itself in the pull lock, replacing whatever
+// an earlier holder left there, so a run that waits on it can say which rooket
+// it waits for.
+func TestEnsureRecordsItselfWhileItPulls(t *testing.T) {
+	root := t.TempDir()
+	stale := "999999 rooket up --name " + strings.Repeat("x", 1000) + "\n"
+	if err := os.WriteFile(filepath.Join(root, lockName), []byte(stale), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var recorded []string
+	pull := func(dir, chart, version string) error {
+		b, err := os.ReadFile(filepath.Join(root, lockName))
+		if err != nil {
+			return err
+		}
+		recorded = append(recorded, string(b))
+		return fakePull(map[string]int{})(dir, chart, version)
+	}
+
+	if _, err := Ensure(io.Discard, root, "v1.20.7", pull); err != nil {
+		t.Fatalf("Ensure: %v", err)
+	}
+	want := fmt.Sprintf("%d %s\n", os.Getpid(), strings.Join(os.Args, " "))
+	for _, got := range recorded {
+		if got != want {
+			t.Errorf("the pull lock recorded %q while Ensure pulled, want %q", got, want)
+		}
+	}
+	if len(recorded) == 0 {
+		t.Error("Ensure never pulled")
+	}
+}
+
+func TestFormatOwner(t *testing.T) {
+	if got := formatOwner("4321 rooket up --workers 3\n"); got != " (pid 4321: rooket up --workers 3)" {
+		t.Errorf("formatOwner = %q", got)
+	}
+	// Anything unexpected yields no attribution rather than a guess: the read
+	// races the holder's own truncate-and-write.
+	for _, bad := range []string{"", "\n", "4321", "4321 ", "not-a-pid rooket up", "  "} {
+		if got := formatOwner(bad); got != "" {
+			t.Errorf("formatOwner(%q) = %q, want empty", bad, got)
+		}
+	}
+}
+
+// syncBuffer is a bytes.Buffer the test can read while an Ensure writes it.
+type syncBuffer struct {
+	mu sync.Mutex
+	b  bytes.Buffer
+}
+
+func (s *syncBuffer) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.b.Write(p)
+}
+
+func (s *syncBuffer) String() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.b.String()
+}
+
+// waitingLine is how Ensure says it is queued behind another rooket's pull.
+const waitingLine = "to finish pulling released Rook charts"
+
+// A first pull that finds another rooket's pull under way says so, once, and
+// names the rooket it waits for and the lock, rather than sitting silent for as
+// long as the other pull takes.
+func TestEnsureSaysWhenItWaitsForAnotherPull(t *testing.T) {
+	root := t.TempDir()
+	f := holdLock(t, root)
+
+	var out syncBuffer
+	done := make(chan error, 1)
+	go func() {
+		_, err := Ensure(&out, root, "v1.20.7", fakePull(map[string]int{}))
+		done <- err
+	}()
+	for deadline := time.Now().Add(5 * time.Second); !strings.Contains(out.String(), waitingLine); {
+		if time.Now().After(deadline) {
+			f.Close()
+			<-done
+			t.Fatalf("Ensure printed %q while another held the pull lock, want a line saying it waits", out.String())
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	// Long enough for several more tries at the lock, each of which must stay
+	// quiet.
+	time.Sleep(200 * time.Millisecond)
+	f.Close()
+	if err := <-done; err != nil {
+		t.Fatalf("Ensure once the lock was let go: %v", err)
+	}
+	got := out.String()
+	if n := strings.Count(got, waitingLine); n != 1 {
+		t.Errorf("Ensure said it was waiting %d times, want once:\n%s", n, got)
+	}
+	if lock := filepath.Join(root, lockName); !strings.Contains(got, lock) {
+		t.Errorf("Ensure printed %q, want it to name the lock file %s", got, lock)
+	}
+	if !strings.Contains(got, "another rooket "+holderClause+" "+waitingLine) {
+		t.Errorf("Ensure printed %q, want it to name the rooket it waits for, %s", got, holderClause)
+	}
+}
+
+// A pull that takes the lock at once, and a hit, which takes none, print
+// nothing.
+func TestEnsureIsQuietWhenNothingHoldsItUp(t *testing.T) {
+	root := t.TempDir()
+	var out bytes.Buffer
+	for _, what := range []string{"miss", "hit"} {
+		if _, err := Ensure(&out, root, "v1.20.7", fakePull(map[string]int{})); err != nil {
+			t.Fatalf("Ensure (%s): %v", what, err)
+		}
+	}
+	if out.Len() != 0 {
+		t.Errorf("Ensure printed %q with nothing holding the lock, want nothing", out.String())
 	}
 }

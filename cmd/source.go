@@ -161,5 +161,5 @@ func releasedCharts(version string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return chartcache.Ensure(root, version, chartPuller(env))
+	return chartcache.Ensure(os.Stdout, root, version, chartPuller(env))
 }

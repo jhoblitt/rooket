@@ -6,12 +6,16 @@ package chartcache
 import (
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
 	"regexp"
+	"strings"
 	"syscall"
 	"time"
+
+	"github.com/jhoblitt/rooket/internal/run"
 )
 
 // Repo is where released Rook charts are published.
@@ -62,8 +66,9 @@ func DefaultRoot() (string, error) {
 // makes it one pull per version rather than one per waiting run. The holder
 // renames its entry into place before it lets go, so a run that waited out a
 // successful pull finds that entry and returns it; it pulls only when the pull
-// it waited on failed or was killed, which leaves no entry.
-func Ensure(root, version string, pull Puller) (string, error) {
+// it waited on failed or was killed, which leaves no entry. A miss that has to
+// wait says so on out.
+func Ensure(out io.Writer, root, version string, pull Puller) (string, error) {
 	if err := ValidVersion(version); err != nil {
 		return "", err
 	}
@@ -75,7 +80,7 @@ func Ensure(root, version string, pull Puller) (string, error) {
 		return "", fmt.Errorf("create chart cache %s: %w", root, err)
 	}
 	afterMiss()
-	release, err := lockPulls(root)
+	release, err := lockPulls(out, root)
 	if err != nil {
 		return "", err
 	}
@@ -141,7 +146,10 @@ var lockWait = 5 * time.Minute
 
 // lockPulls takes the exclusive flock that serializes pulls under root and
 // returns the function that releases it. It polls, since a blocking flock has
-// no timeout.
+// no timeout. When the first try finds the lock held it says, once, on out,
+// that it is waiting: the wait can run to lockWait, and a run that goes quiet
+// for minutes reads as hung. The holder records itself in the lock file, so
+// that message, and the one when the wait runs out, can name it.
 //
 // Unlike cmd's cluster locks, this needs no check after the flock that the
 // path still names the locked file: rooket never deletes or replaces it, so
@@ -149,26 +157,74 @@ var lockWait = 5 * time.Minute
 // removes it, and that also deletes the helm home a running pull is using,
 // which no lock inside the cache could protect. The kernel drops a flock when
 // its holder exits, however it exits, so a killed pull never strands the lock.
-func lockPulls(root string) (release func(), err error) {
+func lockPulls(out io.Writer, root string) (release func(), err error) {
 	path := filepath.Join(root, lockName)
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o644)
 	if err != nil {
 		return nil, fmt.Errorf("open chart cache lock: %w", err)
 	}
 	deadline := time.Now().Add(lockWait)
-	for {
+	for waiting := false; ; waiting = true {
 		err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
 		switch {
 		case err == nil:
+			writeOwner(f)
 			return func() { f.Close() }, nil
 		case !errors.Is(err, syscall.EWOULDBLOCK):
 			f.Close()
 			return nil, fmt.Errorf("lock chart cache %s: %w", path, err)
 		case !time.Now().Before(deadline):
 			f.Close()
-			return nil, fmt.Errorf("another rooket has been pulling released Rook charts for over %s, holding %s; "+
-				"if it is wedged, kill it and retry", lockWait, path)
+			return nil, fmt.Errorf("another rooket%s has been pulling released Rook charts for over %s (lock %s); "+
+				"if it is wedged, kill it and retry", ownerAt(path), lockWait, path)
+		}
+		if !waiting {
+			run.Fprintf(out, "==> waiting for another rooket%s to finish pulling released Rook charts (lock %s)\n", ownerAt(path), path)
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
+}
+
+// writeOwner records this process in the pull lock it has just taken, for the
+// messages of the runs that wait on it: "<pid> <argv>", the record cmd's locks
+// keep. It is diagnostic only: a failure to write costs a clearer message and
+// nothing else, since the flock is what excludes.
+func writeOwner(f *os.File) {
+	if err := f.Truncate(0); err != nil {
+		return
+	}
+	if _, err := f.Seek(0, 0); err != nil {
+		return
+	}
+	fmt.Fprintf(f, "%d %s\n", os.Getpid(), strings.Join(os.Args, " "))
+}
+
+// ownerAt renders the holder recorded in the pull lock at path. Reading needs
+// no lock and races the holder's own write, so anything unexpected yields no
+// attribution rather than a guess.
+func ownerAt(path string) string {
+	f, err := os.Open(path)
+	if err != nil {
+		return ""
+	}
+	defer f.Close()
+	buf := make([]byte, 512)
+	n, _ := f.Read(buf)
+	return formatOwner(string(buf[:n]))
+}
+
+// formatOwner turns a recorded "<pid> <argv>" into a clause for a message
+// about the holder, or "" when there is nothing trustworthy to report.
+func formatOwner(content string) string {
+	line := strings.TrimSpace(strings.SplitN(content, "\n", 2)[0])
+	pid, argv, ok := strings.Cut(line, " ")
+	if !ok || pid == "" || strings.TrimSpace(argv) == "" {
+		return ""
+	}
+	for _, r := range pid {
+		if r < '0' || r > '9' {
+			return ""
+		}
+	}
+	return fmt.Sprintf(" (pid %s: %s)", pid, strings.TrimSpace(argv))
 }
