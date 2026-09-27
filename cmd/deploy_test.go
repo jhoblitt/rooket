@@ -4,7 +4,6 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
-	"reflect"
 	"testing"
 
 	"github.com/jhoblitt/rooket/internal/clone"
@@ -132,24 +131,6 @@ func TestApplyWithOnlyGuardPreservesUpForwardedValue(t *testing.T) {
 	if !deployWithOnlySet {
 		t.Error("deployWithOnlySet was cleared though deploy's own --with-only flag was not changed")
 	}
-}
-
-func TestHelmValueArgs(t *testing.T) {
-	t.Run("no sets", func(t *testing.T) {
-		got := helmValueArgs("/values/operator.yaml", nil)
-		want := []string{"-f", "/values/operator.yaml"}
-		if !reflect.DeepEqual(got, want) {
-			t.Fatalf("got %#v, want %#v", got, want)
-		}
-	})
-
-	t.Run("sets follow -f as separate pairs", func(t *testing.T) {
-		got := helmValueArgs("/values/operator.yaml", []string{"a.b=1", "c=2"})
-		want := []string{"-f", "/values/operator.yaml", "--set", "a.b=1", "--set", "c=2"}
-		if !reflect.DeepEqual(got, want) {
-			t.Fatalf("got %#v, want %#v", got, want)
-		}
-	})
 }
 
 func TestWriteComposedEnsuresCloneDir(t *testing.T) {

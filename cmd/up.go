@@ -10,6 +10,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/jhoblitt/rooket/internal/clone"
 	"github.com/jhoblitt/rooket/internal/cluster"
 	"github.com/jhoblitt/rooket/internal/run"
 )
@@ -33,8 +34,6 @@ var (
 	upNodeImage       string
 	upWith            []string
 	upWithOnly        []string
-	upValueFiles      []string
-	upSets            []string
 )
 
 var upCmd = &cobra.Command{
@@ -72,6 +71,11 @@ Example:
 			var err error
 			rookDir, err = resolveRookDir(upRookDir)
 			if err != nil {
+				return err
+			}
+		}
+		if !upSkipDeploy {
+			if err := checkProfileSelection(rookDir, cmd.Flags().Changed("with-only")); err != nil {
 				return err
 			}
 		}
@@ -207,8 +211,18 @@ func applyUpValueFlags(withOnlySet bool) {
 	deployWith = upWith
 	deployWithOnly = upWithOnly
 	deployWithOnlySet = withOnlySet
-	deployValueFiles = upValueFiles
-	deploySets = upSets
+}
+
+// checkProfileSelection resolves and loads the profiles 'up' would deploy and
+// discards them; deploy resolves them again for real. It lets a bad selection
+// fail before block setup, cluster create, and build rather than at deploy.
+func checkProfileSelection(rookDir string, withOnlySet bool) error {
+	names, err := activeProfileNames(clone.Open(rookDir), upWith, upWithOnly, withOnlySet)
+	if err != nil {
+		return err
+	}
+	_, err = loadProfiles(names)
+	return err
 }
 
 // upCreateAndBuild runs the infra-plus-create side concurrently with the make
@@ -410,9 +424,7 @@ func init() {
 	upCmd.Flags().BoolVar(&upSkipDeploy, "skip-deploy", false, "skip 'deploy'")
 	upCmd.Flags().BoolVar(&upForceBuild, "force-build", false, "run make even when the rook tree is unchanged since the last push")
 	upCmd.Flags().StringVar(&upNodeImage, "node-image", defaultNodeImage, "kindest/node image for the cluster, pre-pulled before create (pin tag@digest for a reproducible Kubernetes version)")
-	upCmd.Flags().StringArrayVar(&upWith, "with", nil, "profile to enable, in addition to the clone's sticky list (repeatable)")
-	upCmd.Flags().StringArrayVar(&upWithOnly, "with-only", nil, "profile to enable, replacing the clone's sticky list (repeatable)")
-	upCmd.Flags().StringArrayVarP(&upValueFiles, "values", "f", nil, "additional values file, applied above profiles (repeatable)")
-	upCmd.Flags().StringArrayVar(&upSets, "set", nil, "value passed straight through to helm, applied above every layer (repeatable)")
+	upCmd.Flags().StringArrayVar(&upWith, "with", nil, "profile to enable, by name or by directory path (./dir), in addition to the clone's sticky list (repeatable)")
+	upCmd.Flags().StringArrayVar(&upWithOnly, "with-only", nil, "profile to enable, by name or by directory path (./dir), replacing the clone's sticky list (repeatable)")
 	upCmd.MarkFlagsMutuallyExclusive("skip-build", "force-build")
 }

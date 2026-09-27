@@ -24,7 +24,7 @@ var valuesEditCmd = &cobra.Command{
 		if err != nil {
 			return err
 		}
-		charts := []string{chartOperator, chartCluster, chartCSI}
+		charts := allCharts
 		if len(args) == 1 {
 			c, err := chartName(args[0])
 			if err != nil {

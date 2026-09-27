@@ -161,7 +161,6 @@ rooket composes the Helm values for each chart from layers, lowest first:
 2. rooket's generated base (image refs, OSD device pinning, dev-host cpu trims)
 3. `<rook clone>/.rooket/values/<chart>.yaml` — sticky, this clone
 4. active profiles, in selection order
-5. `-f` files, then `--set`
 
 Nothing is locked: a values file can retarget the operator image or add to the
 storage topology. Named lists such as `cephClusterSpec.storage.nodes` merge by
@@ -223,6 +222,50 @@ ceph-csi-drivers chart, not just the cluster chart — `nfs` does, setting
 `csi.nfs.enabled` for rook refs older than v1.20. `rooket deploy cluster`
 only refreshes the cluster chart, so enabling or disabling such a profile
 needs a full `rooket deploy` or `rooket up` to reach those other releases.
+
+### Per-run chart values (integration tests)
+
+A program that drives rooket, such as an integration test, can give it values
+for each chart without editing the clone's `.rooket/` overrides or
+`~/.config/rooket`: pass a profile directory by path to `--with` or
+`--with-only`. A value containing `/` (or exactly `.` or `..`) is a path; a
+relative one resolves against the directory rooket runs in.
+
+```text
+mytest/
+├── profile.yaml                  # description: my integration test
+├── values/
+│   ├── rook-ceph.yaml            # the rook-ceph (operator) chart only
+│   └── rook-ceph-cluster.yaml    # the rook-ceph-cluster chart only
+└── templates/                    # optional extra manifests
+```
+
+```yaml
+# mytest/values/rook-ceph.yaml
+logLevel: DEBUG
+```
+
+```yaml
+# mytest/values/rook-ceph-cluster.yaml
+cephClusterSpec:
+  dashboard:
+    enabled: false
+```
+
+```console
+$ rooket values show cluster --with-only ./mytest --layers   # preview
+$ rooket up --with-only ./mytest
+```
+
+Each file reaches only the chart it is named for, so no key can leak into
+another chart. These are errors: a values file named for no chart
+(`values/cluster.yaml`) or not ending in `.yaml`/`.yml` (JSON content is
+fine in a `.yaml` file); two different profiles with the same name, such as
+`./rbd` alongside the built-in `rbd`, or two directories both named
+`mytest`; a profile directory whose name starts with `_`; and a path in
+`.rooket/config.yaml`'s `profiles:` list. `--with-only` replaces the clone's
+sticky profile list, so that list is not read, but the clone's
+`.rooket/values/` still applies.
 
 ## Commands
 

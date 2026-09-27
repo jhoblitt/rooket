@@ -29,9 +29,30 @@ type Profile struct {
 	Name        string
 	Description string
 	BuiltIn     bool
-	Values      map[string]map[string]any
-	Templates   map[string][]byte
+	// Path is the directory exactly as the caller gave it, for a profile
+	// loaded by LoadDir; empty for one loaded by name.
+	Path      string
+	Values    map[string]map[string]any
+	Templates map[string][]byte
+
+	// dir is Path made absolute, so two spellings of one directory compare
+	// equal in SameSource.
+	dir string
 }
+
+// Label is how the user selected the profile: its path for one loaded by
+// LoadDir, else its name.
+func (p Profile) Label() string {
+	if p.Path != "" {
+		return p.Path
+	}
+	return p.Name
+}
+
+// SameSource reports whether two profiles of the same name were loaded from
+// the same place. Load always resolves a name to the same profile, so two
+// loaded by name match; a path profile matches only the same directory.
+func (p Profile) SameSource(q Profile) bool { return p.dir == q.dir }
 
 type meta struct {
 	Description string `yaml:"description"`
@@ -55,6 +76,36 @@ func Load(userDir, name string) (Profile, error) {
 		return Profile{}, fmt.Errorf("unknown profile %q: %w", name, err)
 	}
 	return Profile{}, fmt.Errorf("unknown profile %q (available: %s)", name, strings.Join(names, ", "))
+}
+
+// LoadDir loads the profile in the directory at path, naming it for the
+// directory's basename. A relative path resolves against the working
+// directory.
+func LoadDir(path string) (Profile, error) {
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return Profile{}, fmt.Errorf("profile %s: %w", path, err)
+	}
+	fi, err := os.Stat(abs)
+	if err != nil {
+		return Profile{}, fmt.Errorf("profile %s: %w", path, err)
+	}
+	if !fi.IsDir() {
+		return Profile{}, fmt.Errorf("profile %s: not a directory", path)
+	}
+	name := filepath.Base(abs)
+	if name == Reserved {
+		return Profile{}, fmt.Errorf("profile %s: directory name %q is reserved for the clone's own templates", path, Reserved)
+	}
+	if strings.HasPrefix(name, "_") {
+		return Profile{}, fmt.Errorf("profile %s: directory name %q starts with \"_\", which helm skips when rendering the profile's templates", path, name)
+	}
+	p, err := fromFS(os.DirFS(abs), name, false)
+	if err != nil {
+		return Profile{}, fmt.Errorf("profile %s: %w", path, err)
+	}
+	p.Path, p.dir = path, abs
+	return p, nil
 }
 
 func List(userDir string) ([]Profile, error) {
@@ -166,10 +217,19 @@ func fromFS(fsys fs.FS, name string, builtIn bool) (Profile, error) {
 
 	valueFiles, err := fs.ReadDir(fsys, "values")
 	if err == nil {
+		seen := map[string]string{}
 		for _, e := range valueFiles {
-			if e.IsDir() || !isYAML(e.Name()) {
+			if e.IsDir() || strings.HasPrefix(e.Name(), ".") {
 				continue
 			}
+			if !isYAML(e.Name()) {
+				return Profile{}, fmt.Errorf("profile %q: values/%s is not a .yaml or .yml file; JSON content is valid YAML, so give it a .yaml name", name, e.Name())
+			}
+			chart := strings.TrimSuffix(strings.TrimSuffix(e.Name(), ".yaml"), ".yml")
+			if prev, ok := seen[chart]; ok {
+				return Profile{}, fmt.Errorf("profile %q: values/%s and values/%s both target %s", name, prev, e.Name(), chart)
+			}
+			seen[chart] = e.Name()
 			raw, err := fs.ReadFile(fsys, path.Join("values", e.Name()))
 			if err != nil {
 				return Profile{}, fmt.Errorf("profile %q: read %s: %w", name, e.Name(), err)
@@ -178,7 +238,7 @@ func fromFS(fsys fs.FS, name string, builtIn bool) (Profile, error) {
 			if err := yaml.Unmarshal(raw, &v); err != nil {
 				return Profile{}, fmt.Errorf("profile %q: parse %s: %w", name, e.Name(), err)
 			}
-			p.Values[strings.TrimSuffix(strings.TrimSuffix(e.Name(), ".yaml"), ".yml")] = v
+			p.Values[chart] = v
 		}
 	}
 

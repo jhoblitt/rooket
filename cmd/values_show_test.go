@@ -14,7 +14,7 @@ import (
 // a test instead of silently making --with-only a no-op.
 func TestValuesShowInheritsWithOnlyFlag(t *testing.T) {
 	t.Cleanup(func() {
-		deployWith, deployWithOnly, deployValueFiles, deploySets = nil, nil, nil, nil
+		deployWith, deployWithOnly = nil, nil
 		deployWithOnlySet = false
 		rootCmd.SetArgs(nil)
 		rootCmd.SetOut(nil)
@@ -50,24 +50,6 @@ func TestValuesShowInheritsWithOnlyFlag(t *testing.T) {
 		}
 		if len(deployWithOnly) != 1 || deployWithOnly[0] != "rbd" {
 			t.Errorf("deployWithOnly = %#v, want [\"rbd\"]", deployWithOnly)
-		}
-	})
-}
-
-func TestPrintSetsNote(t *testing.T) {
-	t.Run("present when --set is supplied", func(t *testing.T) {
-		var out strings.Builder
-		printSetsNote(&out, []string{"a=b"})
-		if !strings.Contains(out.String(), "--set") {
-			t.Errorf("got %q, want a note mentioning --set", out.String())
-		}
-	})
-
-	t.Run("absent when --set is not supplied", func(t *testing.T) {
-		var out strings.Builder
-		printSetsNote(&out, nil)
-		if out.String() != "" {
-			t.Errorf("got %q, want no output without --set", out.String())
 		}
 	})
 }

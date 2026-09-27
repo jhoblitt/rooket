@@ -24,17 +24,37 @@ var valuesProfilesCmd = &cobra.Command{
 		if err != nil {
 			return err
 		}
-		all, err := profiles.List(userDir)
+		active, err := activeProfileNames(clone.Open(dir), deployWith, deployWithOnly, deployWithOnlySet)
 		if err != nil {
 			return err
 		}
-		active, err := activeProfileNames(clone.Open(dir), deployWith, deployWithOnly, deployWithOnlySet)
+		all, err := listedProfiles(userDir, active)
 		if err != nil {
 			return err
 		}
 		fmt.Print(renderProfileList(all, active))
 		return nil
 	},
+}
+
+// listedProfiles returns every discoverable profile plus each active path
+// profile, which nothing discovers and so is listed only when selected.
+func listedProfiles(userDir string, active []string) ([]profiles.Profile, error) {
+	all, err := profiles.List(userDir)
+	if err != nil {
+		return nil, err
+	}
+	for _, n := range active {
+		if !isProfilePath(n) {
+			continue
+		}
+		p, err := profiles.LoadDir(n)
+		if err != nil {
+			return nil, err
+		}
+		all = append(all, p)
+	}
+	return all, nil
 }
 
 var valuesProfilesForkCmd = &cobra.Command{
@@ -63,14 +83,17 @@ func renderProfileList(all []profiles.Profile, active []string) string {
 	var b strings.Builder
 	for _, p := range all {
 		mark := " "
-		if on[p.Name] {
+		if on[p.Label()] {
 			mark = "*"
 		}
 		origin := "user"
-		if p.BuiltIn {
+		switch {
+		case p.Path != "":
+			origin = "path"
+		case p.BuiltIn:
 			origin = "built-in"
 		}
-		fmt.Fprintf(&b, " %s %-12s (%-8s) %s\n", mark, p.Name, origin, p.Description)
+		fmt.Fprintf(&b, " %s %-12s (%-8s) %s\n", mark, p.Label(), origin, p.Description)
 	}
 	return b.String()
 }
