@@ -533,25 +533,28 @@ done
 // operator already has host root — but would not be for a multi-tenant
 // cluster.
 //
-// With /sys/module/rbd/parameters/single_major = Y (checked at runtime, not
-// assumed) the kernel assigns image N minor N<<4 under one dynamically
-// numbered major — confirmed against the kernel source (drivers/block/rbd.c:
+// With the module's single_major parameter on — the kernel's default, and
+// what `rbd map` asks for when it loads the module itself — the kernel
+// registers one block major named plain "rbd" and gives the device with ID N
+// minor N<<4, confirmed against the kernel source (drivers/block/rbd.c:
 // rbd_dev_id_to_minor() returns dev_id<<RBD_SINGLE_MAJOR_PART_SHIFT, and
-// RBD_SINGLE_MAJOR_PART_SHIFT is 4), not merely documentation. This step is
-// best-effort: a node that can't load the module or find its major just
-// can't mount RBD, which is today's behaviour, so it warns rather than
-// failing prep (no rc=1, no ROOKET_FAIL marker — contrast the mask above).
-// modprobe needs /lib/modules in the node, which kind only bind-mounts on
-// request; rooket's kind config does not, so this is expected to no-op via
-// the "already loaded" path whenever some other cluster has used RBD before.
+// RBD_SINGLE_MAJOR_PART_SHIFT is 4), not merely documentation. The script
+// never reads the parameter: without single-major each device gets its own
+// major named rbd0, rbd1, ..., so no plain "rbd" line appears in
+// /proc/devices and the script creates nothing. This step is best-effort: a
+// node that can't load the module or find its major just can't mount RBD, so
+// it warns rather than failing prep (no rc=1, no ROOKET_FAIL marker —
+// contrast the mask above). kind bind-mounts the host's /lib/modules
+// read-only into every node, so modprobe can load the host kernel's module
+// when it is not already loaded.
 //
-// The mknod loop below is a silent single point of failure for two distinct
-// causes that look identical at runtime: a wrong N<<4 minor still mknods
-// successfully (a wrong minor is still a valid minor) and just leaves the
-// volume unmountable, and an exhausted rbdMaxDevices does too — both
-// reproduce the exact "rbd: mapping succeeded but /dev/rbdN is not
-// accessible" error this step exists to eliminate, with nothing pointing at
-// rooket as the cause. If that message resurfaces, look here first.
+// The mknod loop below fails silently until mount time. A wrong N<<4 minor
+// still mknods successfully (a wrong minor is still a valid minor), and rbd
+// map then rejects the node as "does not match expected M:m"; an exhausted
+// rbdMaxDevices leaves /dev/rbdN missing, the exact "rbd: mapping succeeded
+// but /dev/rbdN is not accessible" error this step exists to eliminate.
+// Neither points at rooket as the cause; if either resurfaces, look here
+// first.
 func rbdNodeScript() string {
 	return fmt.Sprintf(`modprobe rbd 2>/dev/null || true
 rbd_major=$(awk '$2 == "rbd" { print $1 }' /proc/devices)
