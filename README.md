@@ -139,7 +139,12 @@ Per-cluster state lives in `~/.local/share/rooket/<name>/`:
 
 - the OSD disk images (`*.img`, exported as iSCSI targets),
 - the cluster's **kubeconfig** — rooket never touches `~/.kube/config`,
-- the local registry's host port (auto-picked from 5001 up, persisted).
+- the local registry's host port (auto-picked from 5001 up, persisted),
+- the shape the cluster was created with (worker count, disks per worker, IQN
+  date). Any of `--workers`, `--disk-count`, and `--iqn-date` you leave unset
+  takes the recorded value. A flag you set that contradicts it is refused by
+  `deploy`, `down`, and `block teardown`, and taken as the new shape by `up`,
+  `cluster create`, and `block setup`.
 
 Use the cluster from outside rooket with:
 

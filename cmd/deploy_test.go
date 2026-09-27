@@ -179,3 +179,57 @@ func TestWriteComposedEnsuresCloneDir(t *testing.T) {
 		t.Errorf(".gitignore not created after Ensure(): %v", err)
 	}
 }
+
+// isolateDeploySetup gives deploySetup a throwaway home, rook clone, and
+// cluster recorded with shape, and restores the package state it writes.
+func isolateDeploySetup(t *testing.T, cluster string, shape clusterShape) {
+	t.Helper()
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", "")
+	t.Setenv("KUBECONFIG", "")
+	name, dir, ctx, iqn := deployName, deployDir, deployKubeContext, deployIQNDate
+	port, workers, disks, env := deployRegistryPort, deployWorkers, deployDiskCount, deployHelmEnv
+	t.Cleanup(func() {
+		deployName, deployDir, deployKubeContext, deployIQNDate = name, dir, ctx, iqn
+		deployRegistryPort, deployWorkers, deployDiskCount, deployHelmEnv = port, workers, disks, env
+	})
+
+	if err := writeShape(cluster, shape); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeRegistryPort(cluster, 5001); err != nil {
+		t.Fatal(err)
+	}
+	deployName, deployDir, deployKubeContext = cluster, t.TempDir(), ""
+	deployWorkers, deployDiskCount, deployIQNDate = 3, 1, "2003-01"
+}
+
+// After 'rooket up --workers 1', a plain 'rooket deploy' pinned OSDs for three
+// workers and waited on iSCSI disks that were never created. 'up' reaches
+// deploySetup the same way this does: deployCmd with none of its flags set.
+func TestDeploySetupUsesTheRecordedShape(t *testing.T) {
+	isolateDeploySetup(t, "single", clusterShape{Workers: 1, DiskCount: 1, IQNDate: "2003-01"})
+
+	if _, _, err := deploySetup(deployCmd); err != nil {
+		t.Fatalf("deploySetup: %v", err)
+	}
+	if deployWorkers != 1 {
+		t.Errorf("deployWorkers = %d, want the recorded 1 rather than the flag default", deployWorkers)
+	}
+}
+
+func TestDeploySetupRejectsAContradictingWorkersFlag(t *testing.T) {
+	isolateDeploySetup(t, "single", clusterShape{Workers: 1, DiskCount: 1, IQNDate: "2003-01"})
+	if err := deployCmd.ParseFlags([]string{"--workers=3"}); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		f := deployCmd.Flags().Lookup("workers")
+		_ = f.Value.Set(f.DefValue)
+		f.Changed = false
+	})
+
+	if _, _, err := deploySetup(deployCmd); err == nil {
+		t.Fatal("deploySetup = nil error, want --workers 3 refused for a cluster created with 1")
+	}
+}

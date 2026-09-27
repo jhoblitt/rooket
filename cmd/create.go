@@ -69,6 +69,10 @@ Run 'rooket block setup' before 'rooket cluster create' to prepare block devices
 			return err
 		}
 		defer release()
+		if err := useRecordedShape(name, cmd.Flags().Changed, reshape,
+			&createWorkers, &createDiskCount, &createISCSIQNDate); err != nil {
+			return err
+		}
 
 		createName = name
 		return createClusterRun(os.Stdout, name, createRegistryPort,
@@ -138,7 +142,7 @@ func createClusterRun(out io.Writer, name string, requestedPort int, portExplici
 	}
 	usable := false
 	if exists {
-		if usable, err = resumeCluster(out, name, ownDevsByNode); err != nil {
+		if usable, err = resumeCluster(out, name, workers, ownDevsByNode); err != nil {
 			return err
 		}
 	}
@@ -146,6 +150,9 @@ func createClusterRun(out io.Writer, name string, requestedPort int, portExplici
 		if err := cluster.Create(out, clusterCfg); err != nil {
 			return fmt.Errorf("create cluster: %w", err)
 		}
+	}
+	if err := writeShape(name, clusterShape{Workers: workers, DiskCount: diskCount, IQNDate: iqnDate}); err != nil {
+		return err
 	}
 
 	// --- Steps 3, 4, 6, 7, 8 run concurrently ---
@@ -306,14 +313,19 @@ func reserveRegistryPort(out io.Writer, name, regName string, requested int, exp
 // cluster's LUN, or a host disk — inside a privileged container, which is
 // exactly what the per-node /dev mask exists to prevent.
 //
-// Drift on a STOPPED cluster is recovered by discarding it and building a fresh
-// one against the resolved paths. Everything else that merely looks wrong —
-// an inspect that fails, a cluster that lists with no containers, a resume that
-// does not come back — is reported, not recovered: those are indistinguishable
-// from a transient engine hiccup or a second rooket run mid-create, and the
-// recovery destroys the user's OSD data. 'rooket cluster delete' is the command
-// that throws a cluster away, and it is the one the error names.
-func resumeCluster(out io.Writer, name string, ownDevsByNode map[string][]string) (bool, error) {
+// A cluster is also kept only at the worker count it was created with. A run
+// asking for another count — told apart from a node gone missing by the
+// recorded shape, not the node set — wants it rebuilt at the new one.
+//
+// Either one on a STOPPED cluster is recovered by discarding it and building a
+// fresh one to this run's shape; on a cluster whose nodes are not all stopped
+// it is refused. Everything else that merely looks wrong — an inspect that
+// fails, a cluster that lists with no containers, a resume that does not come
+// back — is reported, not recovered: those are indistinguishable from a
+// transient engine hiccup or a second rooket run mid-create, and the recovery
+// destroys the user's OSD data. 'rooket cluster delete' is the command that
+// throws a cluster away, and it is the one the error names.
+func resumeCluster(out io.Writer, name string, workers int, ownDevsByNode map[string][]string) (bool, error) {
 	nodes, err := cluster.Nodes(out, name)
 	if err != nil {
 		return false, fmt.Errorf("list cluster nodes: %w", err)
@@ -324,6 +336,20 @@ func resumeCluster(out io.Writer, name string, ownDevsByNode map[string][]string
 	states, err := cluster.Inspect(out, containerEngine, nodes)
 	if err != nil {
 		return false, fmt.Errorf("inspect cluster %q: %w", name, err)
+	}
+
+	// A --workers other than the recorded count asks for a rebuild at the new
+	// count. The device check below misses that request whenever the nodes
+	// coming or going hold no disks, so the record decides it.
+	if from, changed := workerCountChanged(name, workers); changed {
+		if !cluster.AllExited(states) {
+			return false, fmt.Errorf("cluster %q was created with %d worker(s) and this run asks for %d, "+
+				"but its nodes are not all stopped (%s), so rooket will not rebuild it on its own; %s",
+				name, from, workers, nodeStates(states), deleteHint(name))
+		}
+		run.Fprintf(out, "==> cluster %q was created with %d worker(s) and this run asks for %d; deleting and recreating\n",
+			name, from, workers)
+		return false, deleteClusterAndZap(out, name, true)
 	}
 
 	// --disk-count 0 resolves no devices, so there is nothing to compare against
@@ -401,10 +427,10 @@ func init() {
 	clusterCmd.AddCommand(createCmd)
 
 	createCmd.Flags().StringVar(&createName, "name", "", "kind cluster name")
-	createCmd.Flags().IntVar(&createWorkers, "workers", 3, "number of worker nodes")
+	createCmd.Flags().IntVar(&createWorkers, "workers", 3, "number of worker nodes; unset, an existing cluster's recorded value")
 	createCmd.Flags().IntVar(&createRegistryPort, "registry-port", 5001, "host port for the local OCI registry")
-	createCmd.Flags().IntVar(&createDiskCount, "disk-count", 1, "number of iSCSI disks per worker (0 to skip)")
-	createCmd.Flags().StringVar(&createISCSIQNDate, "iqn-date", "2003-01", "IQN date component matching 'rooket block setup' (YYYY-MM)")
+	createCmd.Flags().IntVar(&createDiskCount, "disk-count", 1, "number of iSCSI disks per worker, 0 to skip; unset, an existing cluster's recorded value")
+	createCmd.Flags().StringVar(&createISCSIQNDate, "iqn-date", "2003-01", "IQN date component matching 'rooket block setup' (YYYY-MM); unset, an existing cluster's recorded value")
 	createCmd.Flags().StringVar(&createPromCRDsVersion, "prometheus-operator-crds-version", "29.0.0", "version of the prometheus-operator-crds helm chart to install (exact versions enable the reinstall skip)")
 	createCmd.Flags().StringVar(&createPromCRDsRelease, "prometheus-operator-crds-release", cluster.DefaultPromCRDsRelease, "helm release name for prometheus-operator-crds")
 	createCmd.Flags().StringVar(&createNodeImage, "node-image", defaultNodeImage, "kindest/node image for 'kind create cluster --image' (pin tag@digest for a reproducible Kubernetes version)")

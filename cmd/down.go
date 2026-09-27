@@ -77,6 +77,9 @@ Example:
 			return err
 		}
 		defer release()
+		if err := useRecordedShape(downName, cmd.Flags().Changed, matchShape, &downWorkers, &downDiskCount, &downIQNDate); err != nil {
+			return err
+		}
 
 		if downSkipCluster {
 			run.Printf("==> [1/2] cluster delete (skipped)\n")
@@ -136,9 +139,9 @@ func init() {
 	rootCmd.AddCommand(downCmd)
 
 	downCmd.Flags().StringVar(&downName, "name", "", "kind cluster name")
-	downCmd.Flags().IntVar(&downWorkers, "workers", 3, "number of worker nodes (must match 'up')")
-	downCmd.Flags().IntVar(&downDiskCount, "disk-count", 1, "iSCSI disks per worker (0 skips block teardown)")
-	downCmd.Flags().StringVar(&downIQNDate, "iqn-date", "2003-01", "IQN date component (YYYY-MM)")
+	downCmd.Flags().IntVar(&downWorkers, "workers", 3, "number of worker nodes; unset, the cluster's recorded value, which a set flag must match")
+	downCmd.Flags().IntVar(&downDiskCount, "disk-count", 1, "iSCSI disks per worker, 0 skips block teardown; unset, the cluster's recorded value, which a set flag must match")
+	downCmd.Flags().StringVar(&downIQNDate, "iqn-date", "2003-01", "IQN date component (YYYY-MM); unset, the cluster's recorded value, which a set flag must match")
 	downCmd.Flags().BoolVar(&downDeleteDisks, "delete-disks", false, "full teardown: remove iSCSI targets and delete the disk images and state dir (needs root)")
 	downCmd.Flags().BoolVar(&downDeleteCache, "delete-cache", false, "also remove the host-wide OCI pull-through cache container and its volume (shared by every rooket cluster)")
 	downCmd.Flags().BoolVar(&downSkipBlock, "skip-block", false, "skip block teardown even with --delete-disks")
