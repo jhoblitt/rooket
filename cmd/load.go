@@ -20,17 +20,17 @@ var loadCmd = &cobra.Command{
 	Long: `load makes a locally-available image available inside the kind cluster
 by pushing it to the local registry.
 
-The image is re-tagged as localhost:<registry-port>/<basename> and pushed.
-For example:
+The image is re-tagged as localhost:<registry-port>/<path>, where <path> is
+the image reference without its registry host, and pushed. For example:
 
   rooket load rook/ceph:latest
-  # pushes as localhost:5001/ceph:latest
+  # pushes as localhost:5001/rook/ceph:latest
 
   rooket load localhost/rook/ceph:dev
-  # pushes as localhost:5001/ceph:dev
+  # pushes as localhost:5001/rook/ceph:dev
 
 After loading, reference the image in your Rook manifests as:
-  localhost:<registry-port>/<basename>
+  localhost:<registry-port>/<path>
 `,
 	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
