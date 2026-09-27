@@ -387,16 +387,22 @@ func forEachNode(w io.Writer, nodes []string, fn func(node string, out *bytes.Bu
 	return errors.Join(errs...)
 }
 
-// rbdMaxDevices is the number of /dev/rbdN nodes nodePrepScript pre-creates
-// (see rbdNodeScript). This is NOT a per-node limit: every kind node is a
-// container sharing the one host kernel, and with single_major=Y there is a
-// single kernel-wide rbd major and dev_id allocator, so these slots are a
-// HOST-WIDE ceiling shared across every node in this cluster, every other
-// rooket cluster on the same workstation, and any manual `rbd map` the
-// operator runs outside rooket entirely. 256 is chosen generously because the
-// cost is negligible — these are empty inodes in a per-node tmpfs, so
-// pre-creating 256 of them costs nothing measurable — while a host-wide
-// ceiling is easy to exhaust at a much smaller count.
+// rbdMaxDevices is how many /dev/rbdN nodes nodePrepScript pre-creates (see
+// rbdNodeScript), and so how many krbd mappings can be usable from kind nodes
+// at once, counted across the whole HOST — NOT per node. Every kind node is a
+// container on the one host kernel, and the rbd module draws every device's
+// ID, the N in rbdN, from one module-wide allocator (rbd_dev_id_ida in
+// drivers/block/rbd.c) whatever its single_major setting; single_major decides
+// only which device numbers an ID maps to. So every node in this cluster,
+// every other rooket cluster on the workstation, and any `rbd map` the
+// operator runs outside rooket draw from the same IDs. The allocator hands out
+// the lowest free ID and frees it on unmap, so a mapping gets an ID past the
+// last pre-created node only while this many are already mapped.
+//
+// 256 is rooket's bound, not the kernel's, which allows IDs up to 65535. It is
+// generous for a ceiling that host-wide sharing makes easy to reach, and
+// cheap: 256 empty inodes in each node's tmpfs, and 256 paths in the
+// allowlist every node's prep script carries.
 const rbdMaxDevices = 256
 
 // allowedDevs is the allowlist of device-node paths kept in every node's /dev;
