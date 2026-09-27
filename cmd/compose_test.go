@@ -32,12 +32,20 @@ func TestChartName(t *testing.T) {
 	}
 }
 
-func TestActiveProfileNames(t *testing.T) {
+// cloneWithConfig returns a clone whose .rooket/config.yaml holds config,
+// written by hand as the README tells users to.
+func cloneWithConfig(t *testing.T, config string) clone.Dir {
+	t.Helper()
 	root := t.TempDir()
-	d := clone.Open(root)
-	if err := d.SetProfiles([]string{"sticky"}); err != nil {
+	if err := os.MkdirAll(filepath.Join(root, ".rooket"), 0o755); err != nil {
 		t.Fatal(err)
 	}
+	writeFile(t, filepath.Join(root, ".rooket", "config.yaml"), config)
+	return clone.Open(root)
+}
+
+func TestActiveProfileNames(t *testing.T) {
+	d := cloneWithConfig(t, "profiles: [sticky]\n")
 
 	t.Run("with appends to the sticky list", func(t *testing.T) {
 		got, err := activeProfileNames(d, []string{"extra"}, nil, false)
@@ -311,10 +319,7 @@ func TestLoadProfilesDuplicateNames(t *testing.T) {
 }
 
 func TestActiveProfileNamesRejectsStickyPath(t *testing.T) {
-	d := clone.Open(t.TempDir())
-	if err := d.SetProfiles([]string{"rbd", "./mytest"}); err != nil {
-		t.Fatal(err)
-	}
+	d := cloneWithConfig(t, "profiles: [rbd, ./mytest]\n")
 
 	_, err := activeProfileNames(d, nil, nil, false)
 	if err == nil || !strings.Contains(err.Error(), "./mytest") || !strings.Contains(err.Error(), "--with-only") {
