@@ -407,6 +407,14 @@ otherwise falls back to a single pkexec prompt.
 }
 
 func blockTeardownRun(cmd *cobra.Command, _ []string) error {
+	// --workers 0 names no worker, not a count: with no record, only the disks
+	// that can be found are torn down. down calls in without a command, having
+	// checked its own flags.
+	if cmd != nil {
+		if err := checkShapeFlags(cmd, 0); err != nil {
+			return err
+		}
+	}
 	name, err := clusterName(blockTeardownName)
 	if err != nil {
 		return err

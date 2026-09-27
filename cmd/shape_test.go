@@ -155,6 +155,13 @@ func TestCommandsRefuseAShapeNoClusterCanHave(t *testing.T) {
 		{"workers", "-1", "--workers must be more than 0, not -1"},
 		{"workers", "1", ""},
 	}
+	// down's and block teardown's --workers 0 names no worker, which for a
+	// cluster with no record leaves the disks they can find.
+	teardownWorkers := []shapeFlagCase{
+		{"workers", "-1", "--workers must be 0 or more, not -1"},
+		{"workers", "0", ""},
+		{"workers", "1", ""},
+	}
 	diskCount := []shapeFlagCase{
 		{"disk-count", "-1", "--disk-count must be 0 or more, not -1"},
 		{"disk-count", "0", ""},
@@ -174,6 +181,8 @@ func TestCommandsRefuseAShapeNoClusterCanHave(t *testing.T) {
 		{blockSetupCmd, []*string{&blockSetupName}, slices.Concat(workers, diskCount, diskSize)},
 		{deployCmd, []*string{&deployName, &deployDir}, slices.Concat(workers, diskCount, diskSize)},
 		{configCmd, []*string{&configName}, slices.Concat(workers, diskCount)},
+		{downCmd, []*string{&downName}, slices.Concat(teardownWorkers, diskCount)},
+		{blockTeardownCmd, []*string{&blockTeardownName}, slices.Concat(teardownWorkers, diskCount)},
 	} {
 		for _, c := range tc.cases {
 			t.Run(tc.cmd.CommandPath()+" --"+c.flag+"="+c.value, func(t *testing.T) {
