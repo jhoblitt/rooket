@@ -11,19 +11,34 @@ import (
 	"go.yaml.in/yaml/v3"
 )
 
-// Dir is the .rooket directory inside a rook clone: the per-checkout sticky
-// layer of values, profile selection, and ad-hoc templates.
-type Dir struct{ root string }
+// Dir is a configuration home: the .rooket directory inside a rook clone, or
+// a directory the user named with --config-dir. The zero Dir is no
+// configuration at all.
+type Dir struct {
+	root string
+	// named marks a directory the user chose. It is meant to be committed, so
+	// rooket never gives it the self-ignoring .gitignore a clone's .rooket gets.
+	named bool
+}
 
 func Open(rookDir string) Dir { return Dir{root: filepath.Join(rookDir, ".rooket")} }
 
+// At opens a configuration directory the user named.
+func At(dir string) Dir { return Dir{root: dir, named: true} }
+
 func (d Dir) Path() string { return d.root }
 
-// Ensure creates the directory tree and a .gitignore of "*". Git suppresses a
-// directory whose every path is ignored, including the ignore file itself, so
-// the rook checkout stays clean without touching .git/info/exclude or the
-// tracked .gitignore.
+// Ensure creates the directory tree and a .gitignore of "*", but only for a
+// clone's own .rooket. Git suppresses a directory whose every path is
+// ignored, including the ignore file itself, so the rook checkout stays
+// clean without touching .git/info/exclude or the tracked .gitignore. A
+// named directory or the zero Dir is left untouched: the user means to
+// commit a named directory, and there is nothing to create for no
+// configuration home at all.
 func (d Dir) Ensure() error {
+	if d.named || d.root == "" {
+		return nil
+	}
 	for _, sub := range []string{"values", "templates"} {
 		if err := os.MkdirAll(filepath.Join(d.root, sub), 0o755); err != nil {
 			return fmt.Errorf("create %s: %w", d.root, err)
@@ -39,6 +54,9 @@ func (d Dir) Ensure() error {
 }
 
 func (d Dir) ValuesPath(chart string) string {
+	if d.root == "" {
+		return ""
+	}
 	return filepath.Join(d.root, "values", chart+".yaml")
 }
 
@@ -49,6 +67,9 @@ type config struct {
 }
 
 func (d Dir) Profiles() ([]string, error) {
+	if d.root == "" {
+		return nil, nil
+	}
 	data, err := os.ReadFile(d.configPath())
 	if errors.Is(err, fs.ErrNotExist) {
 		return nil, nil
@@ -64,6 +85,9 @@ func (d Dir) Profiles() ([]string, error) {
 }
 
 func (d Dir) Templates() (map[string][]byte, error) {
+	if d.root == "" {
+		return nil, nil
+	}
 	dir := filepath.Join(d.root, "templates")
 	entries, err := os.ReadDir(dir)
 	if errors.Is(err, fs.ErrNotExist) {

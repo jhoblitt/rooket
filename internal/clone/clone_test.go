@@ -151,3 +151,48 @@ func TestValuesPath(t *testing.T) {
 		t.Errorf("got %q, want %q", got, want)
 	}
 }
+
+// A directory the user names is one they mean to commit, so rooket must not
+// hide it from git the way it hides a clone's .rooket.
+func TestNamedDirIsNeverGivenAGitignore(t *testing.T) {
+	root := t.TempDir()
+	d := At(root)
+	if err := d.Ensure(); err != nil {
+		t.Fatalf("Ensure: %v", err)
+	}
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		t.Errorf("Ensure wrote %d entries into a named directory, want none", len(entries))
+	}
+	if got := d.ValuesPath("rook-ceph"); got != filepath.Join(root, "values", "rook-ceph.yaml") {
+		t.Errorf("ValuesPath = %q, want it under the named directory itself", got)
+	}
+}
+
+// With neither a named directory nor a clone there is no configuration, and
+// reading it must not fall back to the working directory's config.yaml.
+func TestZeroDirHasNoConfiguration(t *testing.T) {
+	t.Chdir(t.TempDir())
+	if err := os.WriteFile("config.yaml", []byte("profiles: [rbd]\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll("templates", 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join("templates", "x.yaml"), []byte("kind: Pod\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var d Dir
+	if names, err := d.Profiles(); err != nil || names != nil {
+		t.Errorf("Profiles = (%v, %v), want (nil, nil)", names, err)
+	}
+	if files, err := d.Templates(); err != nil || files != nil {
+		t.Errorf("Templates = (%v, %v), want (nil, nil)", files, err)
+	}
+	if got := d.ValuesPath("rook-ceph"); got != "" {
+		t.Errorf("ValuesPath = %q, want empty", got)
+	}
+}
