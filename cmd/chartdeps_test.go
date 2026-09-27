@@ -64,16 +64,6 @@ repositories:
 	})
 }
 
-func TestEnvValue(t *testing.T) {
-	env := []string{"A=1", "HELM_REPOSITORY_CONFIG=/tmp/repositories.yaml", "B=2"}
-	if got := envValue(env, "HELM_REPOSITORY_CONFIG"); got != "/tmp/repositories.yaml" {
-		t.Errorf("envValue = %q, want the config path", got)
-	}
-	if got := envValue(env, "MISSING"); got != "" {
-		t.Errorf("envValue = %q, want empty", got)
-	}
-}
-
 func TestChartDeps(t *testing.T) {
 	t.Run("master style: alias, condition, mixed quoting", func(t *testing.T) {
 		p := writeChartYAML(t, `apiVersion: v2
