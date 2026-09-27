@@ -154,7 +154,7 @@ func TestShowBaseUsesTheRecordedShape(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	base, err := showBase(chartCluster, rookSource{charts: rookCloneWithBlockPool(t)})
+	base, err := showBase(chartCluster, rookSource{charts: rookCloneWithBlockPool(t)}, 0)
 	if err != nil {
 		t.Fatalf("showBase: %v", err)
 	}
@@ -164,7 +164,7 @@ func TestShowBaseUsesTheRecordedShape(t *testing.T) {
 }
 
 func TestShowBaseOfAReleasedOperatorKeepsTheChartsImage(t *testing.T) {
-	base, err := showBase(chartOperator, rookSource{released: "v1.20.7"})
+	base, err := showBase(chartOperator, rookSource{released: "v1.20.7"}, 0)
 	if err != nil {
 		t.Fatalf("showBase: %v", err)
 	}

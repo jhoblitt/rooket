@@ -326,11 +326,12 @@ the host's root filesystem. A `configOverride` in a higher layer replaces that
 string rather than adding to it.
 
 ```console
-$ rooket values show cluster          # what would be deployed
-$ rooket values show cluster --layers # ...and which layer set each key
-$ rooket values edit cluster          # $EDITOR, seeded with the generated base
-$ rooket values profiles              # available profiles, active ones marked *
-$ rooket values profiles fork rgw     # copy a built-in to hack on
+$ rooket values show cluster              # what would be deployed
+$ rooket values show cluster --layers     # ...and which layer set each key
+$ rooket values show cluster --workers 1  # ...for a one-worker cluster not up yet
+$ rooket values edit cluster              # $EDITOR, seeded with the generated base
+$ rooket values profiles                  # available profiles, active ones marked *
+$ rooket values profiles fork rgw         # copy a built-in to hack on
 ```
 
 Profiles bundle values overrides with Kubernetes resources the rook charts do
