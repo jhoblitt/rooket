@@ -27,8 +27,8 @@ what a reviewer checks before signing off on a parallelized step:
    needs the registry that cluster create stands up, so it waits.
 
 2. **Respect exclusive resources.** Two steps that mutate the same resource are
-   not overlapped. Example: node preparation and containerd-registry wiring
-   both `exec` a script into the *same* worker containers, so they are
+   not overlapped. Example: node preparation and containerd mirror wiring
+   both `exec` a script into the *same* node containers, so they are
    sequenced — two per-node passes must not run into one node at once — even
    though each pass internally fans out across nodes.
 
@@ -57,16 +57,29 @@ what a reviewer checks before signing off on a parallelized step:
    command. Some resources are shared across simultaneous `rooket` invocations
    — one cluster per rook clone is an explicitly supported workflow, so two
    `up` runs overlap routinely. Anything host-wide rather than per-cluster (the
-   shared image cache container and its volume) is reached by both, and an
-   exists-then-create sequence across two processes is a race no in-process
-   lock can close.
+   shared image cache container and its volume, the released-chart cache) is
+   reached by both, and an exists-then-create sequence across two processes is
+   a race no in-process lock can close.
 
    The rule is to make such a step **idempotent and race-absorbing** rather
-   than to serialize it: let the container engine arbitrate (it enforces unique
-   names), and on failure re-check whether the winner produced what was wanted.
-   `cache.Create` does exactly this — losing the race is the expected path and
-   reports success. The alternative, treating a lost race as an error, would
-   silently degrade the loser's cluster.
+   than to serialize it: let an arbiter that already exists settle the race
+   (the container engine enforces unique names; a directory rename either
+   lands or finds the winner's entry in place), and on failure re-check
+   whether the winner produced what was wanted. `cache.Create` does exactly
+   this — losing the race is the expected path and reports success — and
+   `chartcache.Ensure` pulls into a temporary directory and, when its rename
+   loses, uses the winner's entry. The alternative, treating a lost race as an
+   error, would silently degrade the loser's cluster.
+
+   Where nothing arbitrates in time, the step is serialized instead, under a
+   cross-process file lock. Registry host-port allocation (`LockPorts`) is
+   one: two clusters coming up together would both probe the same free port
+   and record it, and only the loser's registry bind — after its record is
+   written — would notice. A rook clone's build (`lockBuildCache`) is another:
+   two clusters built from one clone write the same `make` output tag. And
+   commands on one *cluster* never overlap at all: every command that mutates
+   a cluster holds that cluster's lock (`LockCluster`) for its whole run, since
+   two runs against one cluster are a mistake, not a workflow.
 
 ## Primitives
 
@@ -92,7 +105,7 @@ what a reviewer checks before signing off on a parallelized step:
 their true dependencies:
 
 ```
- resolve rookDir / cluster name / registry port   (fast, must precede all)
+ resolve name + lock, shape, registry port, source   (fast, must precede all)
         │
         ├─ block setup ─┐                              node-image pre-pull
         │  (iSCSI OSD    │  (best-effort, concurrent    with block setup)
@@ -133,10 +146,17 @@ build. The critical path becomes `make → push → deploy` instead of
 `block → create → make → push → deploy`.
 
 The overlap is chosen only when it is safe (invariant 4) and useful: if `make`
-will not run (the rook tree is unchanged since the last push) there is nothing
-to overlap, so the infra lane runs serially in front. This decision is a
-scheduling hint only — the authoritative build-skip gate re-runs after the join
-— so a wrong guess costs sequential speed, never a wrong image.
+will not run there is nothing to overlap, so the infra lane runs serially in
+front. `--skip-build` never runs it, and neither does a released Rook, which
+has nothing to build: the graph above is a clone's. (A released Rook's first
+step instead pulls its charts into the chart cache when the cache lacks them,
+so an unreachable chart repository fails before anything is stood up.)
+Otherwise a pre-create probe skips `make` when the rook tree is unchanged
+since the last push or the clone's build cache already holds a build of it.
+That probe is a scheduling hint only: when it
+says `make` can be skipped, the authoritative build-skip gate runs after the
+join, against the registry and port create may have just repaired, so a wrong
+guess costs sequential speed, never a wrong image.
 
 ## Concurrency inside `cluster create`
 
@@ -144,8 +164,13 @@ After the kind cluster exists (which also creates the "kind" network), these
 steps share only the cluster and otherwise touch disjoint subsystems, so they
 run as one `runConcurrent` group:
 
-- **prepare nodes** — `exec` into workers: remount `/sys`, install lvm2 and
-  cryptsetup, mask host devices (the long pole here — apt over the network).
+- **prepare nodes** — one script `exec`'d into every node, control plane
+  included: remount `/sys` read-write, raise systemd's `DefaultTasksMax`,
+  install lvm2 and cryptsetup, prune `/dev` to an allowlist plus the node's
+  own OSD disk(s), then pre-create `/dev/rbd0`–`/dev/rbd255` for krbd (see
+  [krbd device nodes](krbd-device-nodes.md)). On a fresh node the apt install
+  is the long pole here — it goes to the network; a reused node already
+  carries both packages and skips it.
 - **create registry** — a host-side container on the kind network.
 - **start the shared image cache** — likewise a host-side container on the kind
   network, but host-wide rather than per-cluster (invariant 6).
@@ -172,12 +197,14 @@ Teardown's dependency graph is tighter than bring-up's, and the invariants
 
 - **Across clusters (`down --all`) — parallel.** Different clusters share no
   kind cluster, registry, or disk, so every cluster's delete (kind delete →
-  registry delete → confirm-gone → zap preserved disks) runs concurrently.
-  With N clusters this collapses N sequential deletes to roughly one delete's
-  wallclock. The concurrent deletes are the group; the batched iSCSI target
-  teardown that follows is a **barrier** (invariant 1): it must see every
-  cluster confirmed gone before it removes any target, and it is deliberately a
-  single privileged run so the whole sweep costs at most one prompt.
+  registry delete → confirm-gone → zap preserved disks) runs concurrently,
+  each under its own cluster lock; a cluster another rooket holds is skipped
+  and left intact rather than waited for. With N clusters this collapses N
+  sequential deletes to roughly one delete's wallclock. The concurrent deletes
+  are the group; with `--delete-disks`, the batched iSCSI target teardown that
+  follows is a **barrier** (invariant 1): it must see every cluster confirmed
+  gone before it removes any target, and it is deliberately a single
+  privileged run so the whole sweep costs at most one prompt.
 
 - **Within one cluster (`cluster delete` / plain `down`) — mostly sequential,
   by invariant.** The disk zap truncates the OSD images, which corrupts a live
@@ -188,9 +215,9 @@ Teardown's dependency graph is tighter than bring-up's, and the invariants
   a case where the invariants legitimately preclude overlap; the design goal is
   satisfied by *not* manufacturing unsafe concurrency, and by documenting why.
 
-- **`down` → `block teardown` — sequential.** Tearing down the iSCSI targets
-  logs out sessions the kind nodes hold, so it waits for the cluster to be gone
-  (invariant 1).
+- **`down` → `block teardown` — sequential.** With `--delete-disks`, tearing
+  down the iSCSI targets logs out sessions the kind nodes hold, so it waits for
+  the cluster to be gone (invariant 1).
 
 Concurrent teardown output follows invariant 3: each cluster's delete writes to
 its own `runConcurrent` buffer (including its zap lines, which is why
@@ -198,9 +225,15 @@ its own `runConcurrent` buffer (including its zap lines, which is why
 
 ## Concurrency in `deploy`
 
-`deploy` installs four helm releases in a strict chain — rook-ceph (operator)
-→ ceph-csi-drivers → rook-ceph-cluster → rooket-profiles — and every edge is a
-real data dependency (invariant 1):
+`deploy` installs up to four helm releases, one after another: rook-ceph (the
+operator), ceph-csi-drivers, rook-ceph-cluster, and rooket-profiles. The
+ceph-csi-drivers install runs from inside the operator install, and only for a
+rook whose operator chart gates its ceph-csi-operator dependency on
+`csi.installCsiOperator` (v1.20 onward); an older rook's operator manages CSI
+itself, and the step is skipped. `deploy operator` runs the first two, and
+`deploy cluster` the last two.
+
+Three of the edges are real data dependencies (invariant 1):
 
 - **operator → ceph-csi-drivers.** ceph-csi-drivers needs the csi.ceph.io CRDs
   the operator chart's ceph-csi-operator subchart installs; they may not be
@@ -208,23 +241,59 @@ real data dependency (invariant 1):
   `installCephCsiDrivers` retries up to five times rather than assuming they
   are ready.
 - **operator → rook-ceph-cluster.** The cluster chart's CRs (CephCluster,
-  pools, object store, ...) need the operator running to reconcile them.
+  pools, object store, ...) are instances of CRDs the operator chart installs,
+  which helm needs served before it can create them, and they need the
+  operator running to reconcile them.
 - **rook-ceph-cluster → rooket-profiles.** Profile resources reference
   cluster-chart resources — a CephObjectStoreUser's object store, a
   StorageClass a PVC binds to — so they cannot be applied first.
 
-A second, narrower rule sits inside the chain: the two `ensureChartDeps` calls
-(one for rook-ceph, one for rook-ceph-cluster) share the "make" purpose helm
-home (`helmEnv`'s `HELM_CACHE_HOME` / `HELM_REPOSITORY_CONFIG`, non-atomic per
-that function's own comment), so they must never run concurrently with each
-other (invariant 2). The chain's sequencing already keeps them apart — the
-whole operator install, including ceph-csi-drivers, completes before the
-cluster install's `ensureChartDeps` call starts — so no extra synchronization
-is needed to enforce it.
+The fourth, **ceph-csi-drivers → rook-ceph-cluster**, is call structure, not
+an invariant: the cluster install comes after ceph-csi-drivers only because
+`installCephCsiDrivers` is called at the end of the operator install. Nothing
+the cluster chart creates needs what ceph-csi-drivers installs — Driver and
+OperatorConfig CRs, and the driver pods' ServiceAccounts and RBAC — and rook's
+operator reads none of it: the csi.ceph.io CRDs come with the operator chart,
+and the CephConnection and ClientProfile CRs that point ceph-csi at the Ceph
+cluster are written by rook's operator itself. The one link is a name. The
+cluster chart's StorageClasses name the drivers as their provisioners, and
+rooket's generated ceph-csi-drivers values name the drivers to match; but a
+StorageClass carries its provisioner as a string, so it can exist before the
+driver does, and a PVC against it waits until the driver runs. That is the
+order a rook v1.19 cluster comes up in, since its operator starts the CSI
+driver only once a CephCluster exists.
 
-Every edge here is a real invariant, not a leftover of code structure, so — as
-with single-cluster teardown in `down` — the design goal is satisfied by *not*
-manufacturing unsafe concurrency in this chain, and by documenting why.
+That makes ceph-csi-drivers ∥ rook-ceph-cluster, both after the operator
+install, a candidate overlap — not implemented. An overlap has to settle what
+the call order settles today: both installs run helm against the cluster's
+"rooket" purpose helm home, whose files `helmEnv` calls non-atomic (invariant
+2); both stream helm output (invariant 3); and the cluster install would start
+straight after the operator install, facing the same not-yet-established CRD
+window `installCephCsiDrivers` retries through, where today the whole
+ceph-csi-drivers install sits in between. The cluster install's own prep —
+restoring its chart's dependencies, resolving its iSCSI devices, composing its
+values — likewise waits behind the whole operator phase for no reason but
+code structure; [Overlapping `deploy`'s cluster-chart prep with the operator
+phase](deploy-concurrency-followup.md) proposes overlapping it.
+
+A second, narrower rule sits inside the chain: the operator and cluster
+installs each restore their chart's dependency archives first
+(`restoreChartDeps`, which runs `ensureChartDeps` for a clone and skips a
+released Rook, whose charts ship their dependencies unpacked). A restore that
+finds an archive missing runs helm in the cluster's "make" purpose helm home
+(`helmEnv`'s `HELM_CACHE_HOME` / `HELM_REPOSITORY_CONFIG`, non-atomic per that
+function's own comment), so the two restores must never run concurrently with
+each other (invariant 2). The chain's sequencing already keeps them apart —
+the whole operator install, including ceph-csi-drivers, completes before the
+cluster install's restore starts — so no extra synchronization is needed to
+enforce it. The same home serves the helm runs inside rook's `make`, which
+`up` finishes before it deploys; a standalone `build` and `deploy` of one
+cluster are kept apart by the cluster lock (invariant 6).
+
+So `deploy` runs wholly in sequence today, but not wholly by invariant: three
+edges and the restore rule justify their sequencing, while the
+ceph-csi-drivers → rook-ceph-cluster order and the cluster prep's wait are open
+work against the design goal.
 
 ## Per-command status
 
@@ -234,9 +303,9 @@ manufacturing unsafe concurrency in this chain, and by documenting why.
 | `cluster create` | node prep ∥ registry ∥ image cache ∥ ConfigMap ∥ prometheus CRDs, then one combined containerd mirror pass |
 | `build` | `make` overlaps cluster create (via `up`); push follows |
 | node operations | every per-node script fans out across nodes via `forEachNode` |
-| `down --all` | every cluster deleted concurrently, then one batched iSCSI target teardown as the barrier |
+| `down --all` | every cluster deleted concurrently, then (with `--delete-disks`) one batched iSCSI target teardown as the barrier |
 | `cluster delete` / `down` | sequential by invariant (zap needs a confirmed delete; registry stays intact on a failed delete) |
-| `deploy` | sequential by invariant: operator → ceph-csi-drivers → cluster → profiles, each edge a real data dependency; `ensureChartDeps` calls share a helm home and must stay apart |
+| `deploy` | sequential: operator → ceph-csi-drivers, operator → cluster, and cluster → profiles are data dependencies; ceph-csi-drivers → cluster and the cluster prep's wait are call structure, candidate overlaps; the two `restoreChartDeps` calls share a helm home and must stay apart |
 
 ## Adding concurrency to new work
 

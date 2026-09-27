@@ -28,15 +28,14 @@ and rook-ceph-cluster precedes rooket-profiles (whose resources reference
 cluster-chart resources). Each is a real data dependency (invariant 1),
 commented at its call site, and none of them changes here.
 
-It also records a narrower rule, stated in terms of `ensureChartDeps`: the
-operator and cluster installs' restores share the cluster's "make" purpose
-helm home, whose config and cache files are non-atomic (see `helmEnv`), so
-the two must never run concurrently with each other (invariant 2). On `main`
-the rule binds in fewer cases than it reads, because the installs now reach
-`ensureChartDeps` through `restoreChartDeps`, which skips a released Rook,
-and only a restore that has to fetch runs helm at all. Today call order
-keeps the two apart; both call sites carry the rule, and the operator's
-credits call order with enforcing it.
+It also records a narrower rule: the operator and cluster installs' restores
+share the cluster's "make" purpose helm home, whose config and cache files are
+non-atomic (see `helmEnv`), so the two must never run concurrently with each
+other (invariant 2). The rule binds only for a clone, because
+`restoreChartDeps` skips a released Rook, and only when a restore has to
+fetch, because only then does it run helm. Today call order keeps the two
+apart; both call sites carry the rule, and the operator's credits call order
+with enforcing it.
 
 ## The opportunity
 
@@ -169,26 +168,22 @@ The restores stay on the critical path, where they are today.
 
 ## Out of scope: the ceph-csi-drivers → rook-ceph-cluster order
 
-The join keeps the cluster install after ceph-csi-drivers, as today. None of
-the edges concurrency.md's deploy section lists requires that: both releases
-follow the operator, and neither is recorded as following the other, though
-the section's opening sentence and its *Per-command status* row write the
-four releases as a single chain. The order falls out of
-`installCephCsiDrivers` being called from inside the operator install.
-Overlapping those two installs would move a helm install, not just local
-prep, into the concurrent region, and needs its own case that nothing the
-cluster chart creates depends on what ceph-csi-drivers installs. That is a
-separate change.
+The join keeps the cluster install after ceph-csi-drivers, as today.
+concurrency.md's deploy section records that order as call structure rather
+than a data dependency — it falls out of `installCephCsiDrivers` being called
+from inside the operator install — and names overlapping the two installs as
+a candidate of its own. That overlap would move a helm install, not just local
+prep, into the concurrent region, under constraints that section lists. That
+is a separate change.
 
 ## Updating `concurrency.md`
 
 Its *Concurrency in `deploy`* section and its `deploy` row under
-*Per-command status* both describe deploy as sequential throughout, and the
-section credits the chain's call order with keeping the restores apart. Both
-change when this lands: the cluster prep overlaps the operator phase, and the
-restores are kept apart by running ahead of the fork. The same edit should
-bring the section up to date with released mode — it names only
-`ensureChartDeps`, which a released Rook no longer reaches.
+*Per-command status* both describe deploy as sequential, with the cluster
+prep's wait named as a candidate overlap, and the section credits the chain's
+call order with keeping the restores apart. Both change when this lands: the
+cluster prep overlaps the operator phase, and the restores are kept apart by
+running ahead of the fork.
 
 ## Verification
 
