@@ -69,6 +69,7 @@ var _ = Describe("rooket profiles", Ordered, func() {
 	scratch := filepath.Join(rookDir, ".rooket", "templates", "scratch-cm.yaml")
 
 	BeforeAll(func() {
+		needsClone()
 		Expect(os.MkdirAll(filepath.Dir(scratch), 0o755)).To(Succeed())
 		Expect(os.WriteFile(scratch, []byte(`apiVersion: v1
 kind: ConfigMap
@@ -221,6 +222,8 @@ data:
 	})
 
 	AfterAll(func() {
+		// Ginkgo runs AfterAll even when BeforeAll skipped the container.
+		needsClone()
 		// Remove the clone template's source file first, then prune it from the
 		// cluster with a zero-profile deploy — leaving the rooket-profiles
 		// release empty so this suite hands the shared cluster back clean for

@@ -4,8 +4,11 @@
 // real `rooket` binary to bring a Rook/Ceph cluster up on kind and tear it down,
 // asserting the cluster provisions correctly and settles.
 //
-// Prerequisites (the suite Skips if ROOK_DIR is unset):
-//   - ROOK_DIR points at a Rook source tree (its charts are deployed).
+// Prerequisites (the suite Skips if neither ROOK_DIR nor ROOKET_ROOK_VERSION
+// is set):
+//   - ROOK_DIR points at a Rook source tree (its charts are deployed), or
+//     ROOKET_ROOK_VERSION names a released Rook to deploy instead; specs that
+//     build or edit a checkout skip themselves in that mode.
 //   - The iSCSI OSD block devices already exist ('rooket block setup', which
 //     needs root); the suite runs up/down with --skip-block by default.
 //   - The container engine (podman by default, or docker via $ROOKET_ENGINE),
@@ -33,6 +36,7 @@ import (
 
 var (
 	rookDir     = os.Getenv("ROOK_DIR")
+	rookVersion = os.Getenv("ROOKET_ROOK_VERSION")
 	clusterName = envOr("ROOKET_NAME", "rook")
 	workers     = envOr("ROOKET_WORKERS", "3")
 	skipBlock   = envOr("ROOKET_SKIP_BLOCK", "true") == "true"
@@ -52,14 +56,31 @@ func envOr(k, def string) string {
 
 func numWorkers() int { n, _ := strconv.Atoi(workers); return n }
 
+// sourceArgs selects what a spec deploys: the rook checkout at ROOK_DIR, or,
+// with ROOKET_ROOK_VERSION set, that released version and no checkout at all.
+func sourceArgs() []string {
+	if rookVersion != "" {
+		return []string{"--rook-version", rookVersion}
+	}
+	return []string{"--dir", rookDir}
+}
+
+// needsClone skips a spec that builds rook or edits its clone, which a run
+// against a released version has neither of.
+func needsClone() {
+	if rookVersion != "" {
+		Skip("needs a rook checkout; this run deploys released Rook " + rookVersion)
+	}
+}
+
 func TestE2E(t *testing.T) {
 	RegisterFailHandler(Fail)
 	RunSpecs(t, "rooket e2e: up/down")
 }
 
 var _ = BeforeSuite(func() {
-	if rookDir == "" {
-		Skip("ROOK_DIR not set; skipping rooket e2e (needs a Rook source tree + iSCSI block devices)")
+	if rookDir == "" && rookVersion == "" {
+		Skip("neither ROOK_DIR nor ROOKET_ROOK_VERSION set; skipping rooket e2e (needs a Rook source tree or version, and iSCSI block devices)")
 	}
 	kubeCtx = "kind-" + clusterName
 
@@ -86,8 +107,8 @@ var _ = BeforeSuite(func() {
 		Expect(err).NotTo(HaveOccurred(), "build rooket:\n%s", out)
 		rooketBin = bin
 	}
-	GinkgoWriter.Printf("rooket: %s (cluster=%s workers=%s skipBlock=%v rook=%s)\n",
-		rooketBin, clusterName, workers, skipBlock, rookDir)
+	GinkgoWriter.Printf("rooket: %s (cluster=%s workers=%s skipBlock=%v rook=%s version=%s)\n",
+		rooketBin, clusterName, workers, skipBlock, rookDir, rookVersion)
 })
 
 // AfterSuite tears the cluster down best-effort, so a failed spec doesn't leave

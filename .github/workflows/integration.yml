@@ -17,7 +17,7 @@ on:
   workflow_dispatch:
     inputs:
       rook_ref:
-        description: "rook git ref to build and deploy in every matrix job (default: each job's own matrix ref)"
+        description: "rook git ref to build and deploy in every matrix entry that builds rook from a checkout (default: each entry's own matrix ref)"
         default: ""
       workers:
         description: "kind worker nodes (one OSD each)"
@@ -220,7 +220,7 @@ jobs:
           fi
 
   e2e:
-    name: rooket up/down e2e (docker, ${{ matrix.rook-ref }})
+    name: rooket up/down e2e (docker, ${{ matrix.rook-ref || format('released {0}', matrix.rook-version) }})
     needs: build
     runs-on: ubuntu-latest
     timeout-minutes: 120
@@ -228,13 +228,24 @@ jobs:
       # Cover both CSI deploy flows rooket must handle: release-1.19, where
       # the rook operator creates the csi.ceph.io Driver CRs itself, and
       # release-1.20/master, where rooket installs the separate
-      # ceph-csi-drivers chart.
+      # ceph-csi-drivers chart. The released entry covers the path with no
+      # rook checkout at all.
       fail-fast: false
       matrix:
-        rook-ref: [release-1.19, release-1.20, master]
+        include:
+          - rook-ref: release-1.19
+          - rook-ref: release-1.20
+          - rook-ref: master
+          # A released Rook with no checkout and no build, on one worker: the
+          # consumer's path, jhoblitt/rooket#58. Its workers wins over a
+          # dispatch's, since one worker is what it tests. Bump by hand to the
+          # newest release; it is a pin, not a range.
+          - rook-version: v1.20.7
+            workers: "1"
     env:
       ROOK_REF: ${{ github.event.inputs.rook_ref || matrix.rook-ref }}
-      WORKERS: ${{ github.event.inputs.workers || '3' }}
+      WORKERS: ${{ matrix.workers || github.event.inputs.workers || '3' }}
+      ROOKET_ROOK_VERSION: ${{ matrix.rook-version }}
       ROOKET_ENGINE: docker
       # Pin the cluster name: without it every rooket invocation derives the
       # name from its cwd, which must then never sit inside the rook checkout.
@@ -285,6 +296,7 @@ jobs:
           sudo systemctl enable --now iscsid
 
       - name: Checkout rook
+        if: matrix.rook-version == ''
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: rook/rook
@@ -299,6 +311,7 @@ jobs:
       # pin an exact patch that setup-go would install verbatim. Build rook
       # with the newest patch of the minor its go.mod declares.
       - name: Resolve rook's Go version
+        if: matrix.rook-version == ''
         id: rook-go
         run: |
           minor="$(awk '$1 == "go" { split($2, v, "."); print v[1] "." v[2]; exit }' rook/go.mod)"
@@ -306,6 +319,7 @@ jobs:
           echo "version=${minor}.x" >>"$GITHUB_OUTPUT"
 
       - name: Set up Go for rook
+        if: matrix.rook-version == ''
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: ${{ steps.rook-go.outputs.version }}
@@ -320,7 +334,9 @@ jobs:
       # failing one; -ginkgo.v streams it live instead.
       - name: Run e2e suite
         run: |
-          ROOK_DIR="${{ github.workspace }}/rook" \
+          rook_dir=""
+          if [ -z "$ROOKET_ROOK_VERSION" ]; then rook_dir="${{ github.workspace }}/rook"; fi
+          ROOK_DIR="$rook_dir" \
           ROOKET_BIN="${{ github.workspace }}/rooket" \
           ROOKET_WORKERS="$WORKERS" \
           ROOKET_SKIP_BLOCK=true \
