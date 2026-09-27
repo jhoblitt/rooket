@@ -21,13 +21,20 @@ var reOsdUp = regexp.MustCompile(`osd:\s+(\d+)\s+osds:\s+(\d+)\s+up`)
 
 var _ = Describe("rooket up/down", Ordered, func() {
 	It("brings up a healthy rook-ceph cluster that settles", func() {
-		args := append([]string{"up"}, sourceArgs()...)
+		args := append([]string{"up", "--wait"}, sourceArgs()...)
 		args = append(args, "--workers", workers, "--name", clusterName)
 		if skipBlock {
 			args = append(args, "--skip-block")
 		}
 		out, err := rooketRun(40*time.Minute, args...)
-		Expect(err).NotTo(HaveOccurred(), "rooket up failed:\n%s", tail(out, 40))
+		Expect(err).NotTo(HaveOccurred(), "rooket up --wait failed:\n%s", tail(out, 60))
+		Expect(out).To(ContainSubstring("is ready for clients"),
+			"up --wait returned without its wait declaring the cluster ready:\n%s", tail(out, 40))
+
+		By("finding it ready again with a standalone rooket wait")
+		out, err = rooketRun(5*time.Minute, "wait", "--name", clusterName, "--timeout", "3m")
+		Expect(err).NotTo(HaveOccurred(), "rooket wait failed on a cluster up --wait found ready:\n%s", tail(out, 60))
+		Expect(out).To(ContainSubstring("is ready for clients"), "rooket wait:\n%s", out)
 
 		By("running one OSD pod per worker")
 		Eventually(runningOSDs, 10*time.Minute, 15*time.Second).Should(Equal(numWorkers()))
