@@ -67,6 +67,7 @@ func TestClusterBase(t *testing.T) {
 					"mgr":          map[string]any{"requests": map[string]any{"cpu": "300m"}},
 					"cmd-reporter": map[string]any{"requests": map[string]any{"cpu": "100m"}},
 					"logcollector": map[string]any{"requests": map[string]any{"cpu": "50m"}},
+					"prepareosd":   map[string]any{"requests": map[string]any{"cpu": "100m"}},
 				},
 			},
 		}
@@ -95,6 +96,7 @@ func TestClusterBase(t *testing.T) {
 					"mgr":          map[string]any{"requests": map[string]any{"cpu": "300m"}},
 					"cmd-reporter": map[string]any{"requests": map[string]any{"cpu": "100m"}},
 					"logcollector": map[string]any{"requests": map[string]any{"cpu": "50m"}},
+					"prepareosd":   map[string]any{"requests": map[string]any{"cpu": "100m"}},
 				},
 				"storage": map[string]any{
 					"useAllNodes":   false,

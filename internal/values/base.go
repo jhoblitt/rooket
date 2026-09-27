@@ -62,15 +62,15 @@ const replicaHosts = 3
 // ClusterBase builds rooket's generated layer for the rook-ceph-cluster chart.
 //
 // The cpu trims replace the chart's production-HA requests (1 cpu per mon and
-// per OSD, half a cpu per detect-version job, a tenth per daemon's log
-// collector): on a small host those fill each node's request budget until
-// later components — the detect-version jobs, the mds — cannot schedule at
-// all, seen as a wedged cluster on 4-vCPU CI runners. A detect-version job
-// that cannot schedule leaves the CephCluster Progressing indefinitely, though
-// Ceph itself is healthy. Memory requests and limits are left
-// alone (rook derives osd_memory_target and the MDS cache limit from them). A
-// standby mgr adds nothing to a disposable dev cluster and its requests eat a
-// node's budget.
+// per OSD, half a cpu per detect-version and OSD-prepare job, a tenth per
+// daemon's log collector): on a small host those fill each node's request
+// budget until later components — the detect-version and OSD-prepare jobs,
+// the mds — cannot schedule at all, seen as a wedged cluster on 4-vCPU CI
+// runners. Either job left unschedulable holds the CephCluster Progressing
+// indefinitely, though Ceph itself is healthy. Memory requests and limits are
+// left alone (rook derives osd_memory_target and the MDS cache limit from
+// them). A standby mgr adds nothing to a disposable dev cluster and its
+// requests eat a node's budget.
 //
 // Naming a device per node keeps rook from mis-attributing OSDs — every
 // privileged kind node sees every host disk — so each worker gets exactly one
@@ -91,9 +91,11 @@ func ClusterBase(in ClusterInput) map[string]any {
 			"osd": map[string]any{"requests": map[string]any{"cpu": "500m"}},
 			"mgr": map[string]any{"requests": map[string]any{"cpu": "300m"}},
 			// cmd-reporter is the detect-version job; logcollector is the
-			// sidecar in every daemon pod.
+			// sidecar in every daemon pod; prepareosd is the per-node OSD
+			// prepare job, pinned to its node.
 			"cmd-reporter": map[string]any{"requests": map[string]any{"cpu": "100m"}},
 			"logcollector": map[string]any{"requests": map[string]any{"cpu": "50m"}},
+			"prepareosd":   map[string]any{"requests": map[string]any{"cpu": "100m"}},
 		},
 	}
 	if len(in.Nodes) > 0 {
