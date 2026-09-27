@@ -18,8 +18,9 @@ build reports (devel) with the commit it was built from.
 `,
 	Args: cobra.NoArgs,
 	// PersistentPreRunE on the root command probes for a usable container
-	// engine, which version has no use for and must not fail on.
-	PersistentPreRunE: func(*cobra.Command, []string) error { return nil },
+	// engine, which version has no use for and must not fail on; this one
+	// only accepts the command line, as every hook in place of the root's does.
+	PersistentPreRunE: func(cmd *cobra.Command, _ []string) error { return acceptCommandLine(cmd) },
 	Run: func(cmd *cobra.Command, _ []string) {
 		info, _ := debug.ReadBuildInfo()
 		fmt.Fprint(cmd.OutOrStdout(), versionString(info))

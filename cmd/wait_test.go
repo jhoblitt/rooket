@@ -1046,14 +1046,6 @@ func TestUpRunERefusesAWaitTimeoutItCannotUse(t *testing.T) {
 	}
 }
 
-// A timeout is not a usage mistake: the unmet conditions and diagnostics
-// must not be followed by the flag listing.
-func TestWaitCmdKeepsUsageOutOfItsFailure(t *testing.T) {
-	if !waitCmd.SilenceUsage {
-		t.Error("wait prints its usage after a failure")
-	}
-}
-
 func TestWaitFlagDefaults(t *testing.T) {
 	for _, tc := range []struct {
 		cmd  string

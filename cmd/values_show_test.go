@@ -18,7 +18,9 @@ func TestValuesShowInheritsWithOnlyFlag(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	prevValuesDir := valuesDir
+	silenced := valuesShowCmd.SilenceUsage
 	t.Cleanup(func() {
+		valuesShowCmd.SilenceUsage = silenced
 		deployWith, deployWithOnly = nil, nil
 		deployWithOnlySet = false
 		rootCmd.SetArgs(nil)

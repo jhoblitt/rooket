@@ -22,8 +22,6 @@ clone's path.
 	// Forward all flags (e.g. -n, -o) straight to kubectl rather than parsing
 	// them as rooket flags.
 	DisableFlagParsing: true,
-	SilenceUsage:       true,
-	SilenceErrors:      true,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		kc, err := requireKubeconfig(clusterName(""))
 		if err != nil {

@@ -33,9 +33,12 @@ privilege boundary.
 	// engine, which sudoers has no use for and must not fail on: the rule can
 	// be installed on a host that has neither podman nor docker. Cobra runs the
 	// nearest PersistentPreRunE, so this covers all four subcommands. It still
-	// applies --timestamps/--color, matching everything else root.go's version
-	// does short of the engine probe.
-	PersistentPreRunE: func(*cobra.Command, []string) error {
+	// accepts the command line and applies --timestamps/--color, matching
+	// everything else root.go's version does short of the engine probe.
+	PersistentPreRunE: func(cmd *cobra.Command, _ []string) error {
+		if err := acceptCommandLine(cmd); err != nil {
+			return err
+		}
 		run.SetTimestamps(timestampsFlag)
 		useColor, err := resolveColor(colorFlag, os.Stdout)
 		if err != nil {
@@ -47,11 +50,9 @@ privilege boundary.
 }
 
 var sudoersPrintCmd = &cobra.Command{
-	Use:           "print",
-	Short:         "Print the sudoers rule rooket would install",
-	Args:          cobra.NoArgs,
-	SilenceUsage:  true,
-	SilenceErrors: true,
+	Use:   "print",
+	Short: "Print the sudoers rule rooket would install",
+	Args:  cobra.NoArgs,
 	RunE: func(cmd *cobra.Command, _ []string) error {
 		user, paths, err := grantTarget(sudoersUser)
 		if err != nil {
@@ -72,9 +73,7 @@ var sudoersStatusCmd = &cobra.Command{
 	Long: `status exits 0 when the installed rule matches what this rooket would
 generate, and 1 otherwise.
 `,
-	Args:          cobra.NoArgs,
-	SilenceUsage:  true,
-	SilenceErrors: true,
+	Args: cobra.NoArgs,
 	RunE: func(cmd *cobra.Command, _ []string) error {
 		msg, ok, err := sudoersState(sudoersUser)
 		if err != nil {
@@ -89,22 +88,18 @@ generate, and 1 otherwise.
 }
 
 var sudoersInstallCmd = &cobra.Command{
-	Use:           "install",
-	Short:         "Install or update the sudoers rule (requires one authentication)",
-	Args:          cobra.NoArgs,
-	SilenceUsage:  true,
-	SilenceErrors: true,
+	Use:   "install",
+	Short: "Install or update the sudoers rule (requires one authentication)",
+	Args:  cobra.NoArgs,
 	RunE: func(_ *cobra.Command, _ []string) error {
 		return sudoersInstall(sudoersUser)
 	},
 }
 
 var sudoersUninstallCmd = &cobra.Command{
-	Use:           "uninstall",
-	Short:         "Remove the sudoers rule (requires one authentication)",
-	Args:          cobra.NoArgs,
-	SilenceUsage:  true,
-	SilenceErrors: true,
+	Use:   "uninstall",
+	Short: "Remove the sudoers rule (requires one authentication)",
+	Args:  cobra.NoArgs,
 	RunE: func(_ *cobra.Command, _ []string) error {
 		return sudoersUninstall()
 	},

@@ -207,7 +207,9 @@ func TestValuesEditMultiChartFailureNamesChartAndNotesEarlierSaves(t *testing.T)
 	t.Setenv("VISUAL", "")
 	t.Setenv("EDITOR", script)
 
+	silenced := valuesEditCmd.SilenceUsage
 	t.Cleanup(func() {
+		valuesEditCmd.SilenceUsage = silenced
 		rootCmd.SetArgs(nil)
 		rootCmd.SetOut(nil)
 	})

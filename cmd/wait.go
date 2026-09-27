@@ -70,11 +70,6 @@ $ROOKET_NAME, else the name derived from the enclosing rook clone's path.
   rooket wait --name mycluster --timeout 30m
 `,
 	Args: cobra.NoArgs,
-	// A timeout is not a usage mistake, and its error lists every unmet
-	// condition: cobra would print that followed by the flag listing, and
-	// Execute would then print it again.
-	SilenceUsage:  true,
-	SilenceErrors: true,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		if waitTimeout <= 0 {
 			return fmt.Errorf("--timeout must be more than 0, not %s", waitTimeout)

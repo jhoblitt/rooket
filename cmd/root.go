@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"strings"
 
@@ -37,7 +38,12 @@ or $ROOKET_ENGINE) to create:
   • (Optional) iSCSI-backed block devices passed through into each worker node
     so Rook/Ceph can consume them as raw block OSDs.
 `,
+	// execute prints a failed command's error; cobra would print it as well.
+	SilenceErrors: true,
 	PersistentPreRunE: func(cmd *cobra.Command, _ []string) error {
+		if err := acceptCommandLine(cmd); err != nil {
+			return err
+		}
 		run.SetTimestamps(timestampsFlag)
 		useColor, err := resolveColor(colorFlag, os.Stdout)
 		if err != nil {
@@ -73,10 +79,40 @@ or $ROOKET_ENGINE) to create:
 
 // Execute is the entry point called from main.
 func Execute() {
-	if err := rootCmd.Execute(); err != nil {
-		fmt.Fprintln(os.Stderr, err)
+	if err := execute(os.Stderr); err != nil {
 		os.Exit(1)
 	}
+}
+
+// execute runs the command line, printing a failure's error to stderr.
+func execute(stderr io.Writer) error {
+	cmd, err := rootCmd.ExecuteC()
+	if err != nil {
+		fmt.Fprintln(stderr, err)
+		// rooket has no Run, so cobra pins two failures on it: a flag it could
+		// not parse, already answered with the usage, and a command line that
+		// names no command, which fails before any flag is parsed and would get
+		// cobra's pointer to --help were rootCmd's errors not silenced.
+		if cmd == rootCmd && !cmd.Flags().Parsed() {
+			fmt.Fprintf(stderr, "Run '%s --help' for usage.\n", cmd.CommandPath())
+		}
+	}
+	return err
+}
+
+// acceptCommandLine finishes checking cmd's command line, then turns off the
+// usage listing for cmd: any failure after that is the command's own, not a
+// usage mistake. The PersistentPreRunE hooks call it first, because cobra
+// checks required flags and flag groups only after them.
+func acceptCommandLine(cmd *cobra.Command) error {
+	if err := cmd.ValidateRequiredFlags(); err != nil {
+		return err
+	}
+	if err := cmd.ValidateFlagGroups(); err != nil {
+		return err
+	}
+	cmd.SilenceUsage = true
+	return nil
 }
 
 func init() {

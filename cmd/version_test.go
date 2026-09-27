@@ -9,10 +9,10 @@ import (
 // version must work on a host with no usable container engine, so it has to
 // bypass the root command's engine-probing PersistentPreRunE.
 func TestVersionSkipsEngineResolution(t *testing.T) {
-	oldFlag := engineFlag
+	oldFlag, silenced := engineFlag, versionCmd.SilenceUsage
 	engineFlag = "bogus-engine"
 	defer func() {
-		engineFlag = oldFlag
+		engineFlag, versionCmd.SilenceUsage = oldFlag, silenced
 		rootCmd.SetArgs(nil)
 		rootCmd.SetOut(nil)
 	}()

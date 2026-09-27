@@ -24,8 +24,6 @@ $ROOKET_NAME, or the name derived from the enclosing rook clone's path.
 	// Forward all flags (e.g. -n, -o) straight to helm rather than parsing
 	// them as rooket flags.
 	DisableFlagParsing: true,
-	SilenceUsage:       true,
-	SilenceErrors:      true,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		name := clusterName("")
 		kc, err := requireKubeconfig(name)
