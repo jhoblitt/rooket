@@ -6,12 +6,15 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/jhoblitt/rooket/internal/engine"
 	"github.com/jhoblitt/rooket/internal/zot"
 )
 
@@ -147,5 +150,24 @@ func TestWaitReadyFailsWhenNothingServes(t *testing.T) {
 	// failure into something the user can act on.
 	if !strings.Contains(err.Error(), strconv.Itoa(port)) {
 		t.Errorf("error should name the port that never answered, got: %v", err)
+	}
+}
+
+// Lookup finds a registry container whether it runs or not; Running finds only
+// one that runs. The stubbed engine lists a stopped container for 'ps -a' and
+// nothing for 'ps', as a real one does after a host reboot.
+func TestRunningIsLookupOfAContainerThatIsUp(t *testing.T) {
+	dir := t.TempDir()
+	script := "#!/bin/sh\ncase \"$*\" in\n\"ps -a \"*) printf '%s\\n' c1-registry ;;\nesac\n"
+	if err := os.WriteFile(filepath.Join(dir, "podman"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir)
+
+	if found, err := Lookup(io.Discard, engine.Podman, "c1-registry"); err != nil || !found {
+		t.Errorf("Lookup of a stopped container = (%v, %v), want (true, nil)", found, err)
+	}
+	if up, err := Running(io.Discard, engine.Podman, "c1-registry"); err != nil || up {
+		t.Errorf("Running of a stopped container = (%v, %v), want (false, nil)", up, err)
 	}
 }

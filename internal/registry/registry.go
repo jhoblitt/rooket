@@ -82,8 +82,20 @@ func Exists(out io.Writer, eng engine.Engine, name string) bool {
 // Lookup is Exists for a caller that must tell a container that is not there
 // from an engine that could not say.
 func Lookup(out io.Writer, eng engine.Engine, name string) (bool, error) {
-	res, err := run.OutputTo(out, eng.String(), "ps", "-a",
-		"--filter", "name=^"+name+"$", "--format", "{{.Names}}")
+	return lookup(out, eng, name, "-a")
+}
+
+// Running is Lookup for a caller that needs the container up, not merely
+// there: a stopped one, as a host reboot leaves a registry, serves nothing.
+func Running(out io.Writer, eng engine.Engine, name string) (bool, error) {
+	return lookup(out, eng, name)
+}
+
+// lookup reports whether the engine's 'ps', given psFlags, lists the container.
+func lookup(out io.Writer, eng engine.Engine, name string, psFlags ...string) (bool, error) {
+	args := append([]string{"ps"}, psFlags...)
+	args = append(args, "--filter", "name=^"+name+"$", "--format", "{{.Names}}")
+	res, err := run.OutputTo(out, eng.String(), args...)
 	if err != nil {
 		return false, err
 	}
