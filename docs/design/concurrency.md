@@ -76,8 +76,17 @@ what a reviewer checks before signing off on a parallelized step:
    one: two clusters coming up together would both probe the same free port
    and record it, and only the loser's registry bind — after its record is
    written — would notice. A rook clone's build (`lockBuildCache`) is another:
-   two clusters built from one clone write the same `make` output tag. And
-   commands on one *cluster* never overlap at all: every command that mutates
+   two clusters built from one clone write the same `make` output tag. The
+   released-chart cache is a third, though its entries still absorb races as
+   above. Every first pull on the host runs helm in the one helm home under the
+   cache root, and rooket keeps every helm home to one helm run at a time
+   (invariant 2; see `helmEnv`), since helm does not promise that a home is
+   safe to share. So `chartcache.Ensure` takes the cache's pull lock before it
+   pulls, and looks for the entry again once it holds it; a cached version
+   takes no lock, and a run that has to wait says so, naming the rooket it
+   waits for.
+
+   Commands on one *cluster* never overlap at all: every command that mutates
    a cluster holds that cluster's lock (`LockCluster`) for its whole run, since
    two runs against one cluster are a mistake, not a workflow. The sweeps over
    many clusters, `down --all` and `prune`, hold it the same way for each
@@ -263,8 +272,10 @@ Three of the edges are real data dependencies (invariant 1):
   are ready.
 - **operator → rook-ceph-cluster.** The cluster chart's CRs (CephCluster,
   pools, object store, ...) are instances of CRDs the operator chart installs,
-  which helm needs served before it can create them, and they need the
-  operator running to reconcile them.
+  which helm needs served before it can create them. That is what the order
+  guarantees: the CRDs exist. The operator install does not `--wait`, so the
+  operator need not be running yet; it reconciles the CRs whenever it comes
+  up.
 - **rook-ceph-cluster → rooket-profiles.** Profile resources reference
   cluster-chart resources — a CephObjectStoreUser's object store, a
   StorageClass a PVC binds to — so they cannot be applied first.
@@ -325,6 +336,7 @@ work against the design goal.
 | `build` | `make` overlaps cluster create (via `up`); push follows |
 | node operations | every per-node script fans out across nodes via `forEachNode` |
 | `down --all` | every cluster deleted concurrently, then (with `--delete-disks`) one batched iSCSI target teardown as the barrier |
+| `prune` | sequential: one batched iSCSI target teardown for every orphaned and stranded cluster, then, once it succeeds, the orphans' state-dir removals |
 | `cluster delete` / `down` | sequential by invariant (zap needs a confirmed delete; registry stays intact on a failed delete) |
 | `deploy` | sequential: operator → ceph-csi-drivers, operator → cluster, and cluster → profiles are data dependencies; ceph-csi-drivers → cluster and the cluster prep's wait are call structure, candidate overlaps; the two `restoreChartDeps` calls share a helm home and must stay apart |
 

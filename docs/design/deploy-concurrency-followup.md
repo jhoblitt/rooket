@@ -23,7 +23,7 @@ what it settles.
 
 concurrency.md's *Concurrency in `deploy`* section records the edges between
 the releases: the operator precedes ceph-csi-drivers (which needs the
-csi.ceph.io CRDs) and rook-ceph-cluster (whose CRs need the operator running),
+csi.ceph.io CRDs) and rook-ceph-cluster (whose CRs need the ceph.rook.io CRDs),
 and rook-ceph-cluster precedes rooket-profiles (whose resources reference
 cluster-chart resources). Each is a real data dependency (invariant 1),
 commented at its call site, and none of them changes here.
