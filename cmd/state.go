@@ -164,6 +164,22 @@ func kubeconfigPath(name string) (string, error) {
 	return filepath.Join(dir, "kubeconfig"), nil
 }
 
+// requireKubeconfig returns a cluster's kubeconfig path, or an error asking
+// whether the cluster is up when no kubeconfig is there. Commands that need
+// the cluster call it first, so a cluster that is down reads as that rather
+// than as "connection refused" noise from kubectl or helm chasing a missing
+// kubeconfig.
+func requireKubeconfig(name string) (string, error) {
+	kc, err := kubeconfigPath(name)
+	if err != nil {
+		return "", err
+	}
+	if _, err := os.Stat(kc); err != nil {
+		return "", fmt.Errorf("no kubeconfig for cluster %q at %s (is it up?)", name, kc)
+	}
+	return kc, nil
+}
+
 // helmEnv returns environment variables pointing helm at a per-cluster,
 // per-purpose config/cache/data triplet inside the cluster's state dir,
 // creating the directories. Each cluster gets its own helm world — repos

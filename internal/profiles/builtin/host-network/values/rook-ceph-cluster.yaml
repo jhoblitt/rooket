@@ -1,0 +1,3 @@
+cephClusterSpec:
+  network:
+    provider: host

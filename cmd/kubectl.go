@@ -1,7 +1,6 @@
 package cmd
 
 import (
-	"fmt"
 	"os"
 	"os/exec"
 
@@ -23,18 +22,10 @@ clone's path.
 	// Forward all flags (e.g. -n, -o) straight to kubectl rather than parsing
 	// them as rooket flags.
 	DisableFlagParsing: true,
-	SilenceUsage:       true,
-	SilenceErrors:      true,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		name := clusterName("")
-		kc, err := kubeconfigPath(name)
+		kc, err := requireKubeconfig(clusterName(""))
 		if err != nil {
 			return err
-		}
-		// Fail with an actionable error instead of letting kubectl chase a
-		// missing kubeconfig into "connection refused" noise.
-		if _, err := os.Stat(kc); err != nil {
-			return fmt.Errorf("no kubeconfig for cluster %q at %s (is it up?)", name, kc)
 		}
 		if err := os.Setenv("KUBECONFIG", kc); err != nil {
 			return err

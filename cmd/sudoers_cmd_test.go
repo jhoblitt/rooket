@@ -66,10 +66,10 @@ func TestSudoersInstallRejectsBadUser(t *testing.T) {
 // bypassed and the root engine probe ran.
 func TestSudoersSkipsEngineResolution(t *testing.T) {
 	t.Setenv("PATH", t.TempDir())
-	oldFlag, oldUser := engineFlag, sudoersUser
+	oldFlag, oldUser, silenced := engineFlag, sudoersUser, sudoersStatusCmd.SilenceUsage
 	engineFlag = "bogus-engine"
 	defer func() {
-		engineFlag, sudoersUser = oldFlag, oldUser
+		engineFlag, sudoersUser, sudoersStatusCmd.SilenceUsage = oldFlag, oldUser, silenced
 		rootCmd.SetArgs(nil)
 		rootCmd.SetOut(nil)
 	}()
@@ -81,6 +81,42 @@ func TestSudoersSkipsEngineResolution(t *testing.T) {
 	if err != nil && strings.Contains(err.Error(), "unsupported container engine") {
 		t.Fatalf("rooket sudoers status with an unusable engine hit the root engine probe: %v", err)
 	}
+}
+
+// sudoers replaces the root's PersistentPreRunE with its own, yet its usage
+// mistakes show the usage and its other failures do not, as every other
+// command's do.
+func TestSudoersFailuresPrintLikeEveryCommands(t *testing.T) {
+	prevUser, silenced := sudoersUser, sudoersPrintCmd.SilenceUsage
+	t.Cleanup(func() {
+		sudoersUser, sudoersPrintCmd.SilenceUsage = prevUser, silenced
+		sudoersPrintCmd.Flags().Lookup("user").Changed = false
+	})
+
+	t.Run("an unknown flag", func(t *testing.T) {
+		out, err := runRooket(t, "sudoers", "print", "--bogus")
+		if err == nil || !strings.Contains(err.Error(), "unknown flag: --bogus") {
+			t.Fatalf("rooket sudoers print --bogus = %v, want an unknown-flag error", err)
+		}
+		if n := strings.Count(out, err.Error()); n != 1 {
+			t.Errorf("printed the error %d times, want once:\n%s", n, out)
+		}
+		if !strings.Contains(out, "Usage:") {
+			t.Errorf("printed no usage for an unknown flag:\n%s", out)
+		}
+	})
+	t.Run("a refused user", func(t *testing.T) {
+		out, err := runRooket(t, "sudoers", "print", "--user", "Not A User")
+		if err == nil || !strings.Contains(err.Error(), "invalid user name") {
+			t.Fatalf("rooket sudoers print --user 'Not A User' = %v, want the user refused", err)
+		}
+		if n := strings.Count(out, err.Error()); n != 1 {
+			t.Errorf("printed the error %d times, want once:\n%s", n, out)
+		}
+		if strings.Contains(out, "Usage:") {
+			t.Errorf("printed the usage after a failure that is not a usage mistake:\n%s", out)
+		}
+	})
 }
 
 // stubGrantedCommands replaces $PATH with a temp dir holding every vocabulary
@@ -161,8 +197,9 @@ exit 1
 func TestSudoersPrintWritesThroughCobraWriter(t *testing.T) {
 	stubGrantedCommands(t)
 	oldUser := sudoersUser
+	silenced := sudoersPrintCmd.SilenceUsage
 	defer func() {
-		sudoersUser = oldUser
+		sudoersUser, sudoersPrintCmd.SilenceUsage = oldUser, silenced
 		rootCmd.SetArgs(nil)
 		rootCmd.SetOut(nil)
 	}()

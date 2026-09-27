@@ -161,6 +161,91 @@ A released cluster made outside a clone with no `--config-dir` records no
 owner, so `rooket prune` always keeps it; remove it with `rooket down
 --delete-disks`.
 
+## Using rooket as a test harness
+
+A consumer's test suite usually runs its client — librados, an S3 SDK — on
+the host, against a cluster it pins and waits for. A configuration directory
+holds the pins, and is recorded with the cluster, so later commands keep them:
+
+```yaml
+# harness/config.yaml
+profiles: [host-network]
+```
+
+```yaml
+# harness/values/rook-ceph-cluster.yaml
+cephImage:
+  tag: v19.2.5
+```
+
+```console
+$ export ROOKET_NAME=rgw-test
+$ rooket up --rook-version v1.20.7 --workers 1 --config-dir ./harness --wait
+$ rooket ceph-config --out ./ceph     # the client reads ./ceph/ceph.conf
+$ rooket k -n rook-ceph exec deploy/rook-ceph-tools -- \
+    radosgw-admin user create --uid=test --display-name=test \
+    --rgw-realm=ceph-objectstore --rgw-zonegroup=ceph-objectstore \
+    --rgw-zone=ceph-objectstore
+```
+
+The `host-network` profile sets `cephClusterSpec.network.provider: host`, so
+the mons, OSDs, and RGW listen on the kind nodes' IPs rather than on the pod
+network; the object store's RGW follows the cluster unless its own
+`gateway.hostNetwork` says otherwise. Keep the profile in the configuration
+directory's `config.yaml`, as above, from the first `up`:
+`--with host-network` selects it for one run only, and a later `up` or
+`deploy` without it would move the running cluster off host networking, which
+Rook does not support. A cluster brought up without the profile has to be
+recreated (`rooket down`, then `up`, naming the same cluster) to gain it.
+
+Pin the Ceph version with `cephImage.tag` in the configuration directory's
+`values/rook-ceph-cluster.yaml`. A release newer than the deployed Rook
+supports also needs `cephImage.allowUnsupported: true`; one below Rook's
+minimum is refused either way. Set both under `cephImage`, not
+`cephClusterSpec.cephVersion`: the chart renders the CephCluster's
+`cephVersion` from `cephImage`, and its values file says not to set both. The
+toolbox runs the same image, so its `ceph` and `radosgw-admin` match the
+daemons.
+
+With one worker, the generated base fits the chart's pools to it, including
+those of its `ceph-objectstore` object store (see "Chart values and
+profiles"), so the store deploys with no values of your own. Rook names the
+store's realm, zonegroup, and zone after the store, and the example names all
+three; without them, `radosgw-admin` works in a `default` zone the RGW never
+reads.
+
+From the host, reach the RGW at its node's IP on the gateway port, 80 by the
+chart's default. The Service name in the CephObjectStore's status is where the
+RGW serves inside the cluster, and what `rooket wait` probes, but it does not
+resolve from the host. The first command below lists the RGW's pods, and
+since a host-networked pod's IP is its node's, their `IP` column holds the
+address. The second exits 0 if the host can reach the RGW there; it assumes
+the chart's default port 80, so add `:<port>` for another. rooket itself
+never checks whether the host can.
+
+```console
+$ rooket k -n rook-ceph get pods -l app=rook-ceph-rgw -o wide
+$ curl -sS --max-time 10 -o /dev/null http://<IP>/
+```
+
+`rooket ceph-config --out <dir>` writes a `ceph.conf` and the admin keyring
+it names into `<dir>`, so `<dir>/ceph.conf` is the only path a librados client
+needs. Run it again whenever the cluster is recreated: a new cluster has a
+new admin key and possibly new mon addresses. It refuses a cluster that is not
+host-networked, and warns when the admin key is not AES: an AES256KRB5 key,
+for one, cannot be parsed by librados older than 19.2.6 / 20.2.4. See
+`rooket ceph-config --help` for the rest.
+
+`rooket wait` blocks until the cluster is ready for clients, and exits
+non-zero with diagnostics once `--timeout` passes. Ready means the
+CephCluster's phase is `Ready`; there are OSDs, all up and in; there are PGs,
+all active and clean with their IO flowing; and every CephObjectStore in the
+`rook-ceph` namespace is `Ready`, with an RGW that answers HTTP from inside
+the cluster. HEALTH_OK is not required, since a single-worker cluster settles
+at HEALTH_WARN. `rooket up --wait` runs the same wait after deploying, with
+`--wait-timeout` in place of `--timeout`. See `rooket wait --help` for the
+exact rules.
+
 ## Clusters and state
 
 Each rook clone gets its own cluster. The cluster name is derived from the
@@ -230,8 +315,10 @@ $ rooket values profiles fork rgw     # copy a built-in to hack on
 
 Profiles bundle values overrides with Kubernetes resources the rook charts do
 not template. Built-ins: `rbd` (PVC + pod on the default `ceph-block` class),
-`rgw` (object store user, OBC, s3 client pod), and `nfs` (enables the NFS CSI
-driver, a CephNFS server, and a pod mounting an export).
+`rgw` (object store user, OBC, s3 client pod), `nfs` (enables the NFS CSI
+driver, a CephNFS server, and a pod mounting an export), and `host-network`
+(Ceph on the nodes' IPs, for clients on the host; see "Using rooket as a test
+harness").
 
 ```console
 $ rooket up --with rgw                # sticky list plus rgw
@@ -313,10 +400,12 @@ configuration home's sticky profile list, so that list is not read, but its
 | `rooket cluster create` / `delete` | create/delete the kind cluster + registry |
 | `rooket build` | `make` in the rook source, tag + push the image to the registry |
 | `rooket deploy` | install the rook-ceph and rook-ceph-cluster charts |
+| `rooket wait` | block until the cluster is ready for clients, without requiring HEALTH_OK; `up --wait` does the same after deploying |
 | `rooket load <image>` | push any local image into the cluster's registry |
 | `rooket kubectl` (`k`) | run kubectl with `KUBECONFIG` set for the cluster |
 | `rooket helm` | run helm with the cluster's kubeconfig and isolated per-cluster helm config |
 | `rooket kubeconfig` | print the cluster's kubeconfig (`--path` for its path) |
+| `rooket ceph-config` | write a `ceph.conf` and admin keyring into `--out <dir>` for a librados client on the host; host-networked clusters only |
 | `rooket list` | list clusters: live status, registry port, state dir |
 | `rooket prune` | remove state dirs of clusters that no longer exist |
 | `rooket config` | print the kind config that `create` would use |

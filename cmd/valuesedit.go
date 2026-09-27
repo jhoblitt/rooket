@@ -117,7 +117,7 @@ func editValues(path string, seed []byte, edit func(string) error) error {
 			if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 				return err
 			}
-			if err := writeFileAtomic(path, data); err != nil {
+			if err := writeFileAtomic(path, data, 0o644); err != nil {
 				return err
 			}
 			run.Printf("==> wrote %s\n", path)
@@ -136,8 +136,9 @@ func editValues(path string, seed []byte, edit func(string) error) error {
 // leave path holding a truncated blend of the old and new content; the
 // rename target is always either the old file or the complete new one. The
 // sibling must live in path's own directory, since rename fails across
-// filesystems.
-func writeFileAtomic(path string, data []byte) error {
+// filesystems. The new file has mode perm before any data reaches it, whatever
+// mode a file it replaces had.
+func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
 	dir := filepath.Dir(path)
 	tmp, err := os.CreateTemp(dir, filepath.Base(path)+".tmp-*")
 	if err != nil {
@@ -145,7 +146,7 @@ func writeFileAtomic(path string, data []byte) error {
 	}
 	defer os.Remove(tmp.Name())
 
-	if err := tmp.Chmod(0o644); err != nil {
+	if err := tmp.Chmod(perm); err != nil {
 		tmp.Close()
 		return fmt.Errorf("write %s: %w", path, err)
 	}

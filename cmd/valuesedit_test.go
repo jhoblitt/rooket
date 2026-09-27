@@ -74,7 +74,7 @@ func TestWriteFileAtomicLeavesOldFileOnFailure(t *testing.T) {
 	}
 	t.Cleanup(func() { os.Chmod(dir, 0o755) })
 
-	if err := writeFileAtomic(p, []byte("new: true\n")); err == nil {
+	if err := writeFileAtomic(p, []byte("new: true\n"), 0o644); err == nil {
 		t.Fatal("expected writeFileAtomic to fail against a read-only directory")
 	}
 
@@ -207,7 +207,9 @@ func TestValuesEditMultiChartFailureNamesChartAndNotesEarlierSaves(t *testing.T)
 	t.Setenv("VISUAL", "")
 	t.Setenv("EDITOR", script)
 
+	silenced := valuesEditCmd.SilenceUsage
 	t.Cleanup(func() {
+		valuesEditCmd.SilenceUsage = silenced
 		rootCmd.SetArgs(nil)
 		rootCmd.SetOut(nil)
 	})

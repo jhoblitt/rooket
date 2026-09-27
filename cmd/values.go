@@ -170,9 +170,14 @@ func init() {
 	rootCmd.AddCommand(valuesCmd)
 	valuesCmd.AddCommand(valuesShowCmd)
 
-	// cmd.Flags() on a subcommand includes inherited persistent flags, so this
-	// sees --with-only wherever it was given under `values`.
+	// Cobra runs this instead of the root's PersistentPreRunE under `values`,
+	// so it accepts the command line itself. cmd.Flags() on a subcommand
+	// includes inherited persistent flags, so this sees --with-only wherever it
+	// was given under `values`.
 	valuesCmd.PersistentPreRunE = func(cmd *cobra.Command, args []string) error {
+		if err := acceptCommandLine(cmd); err != nil {
+			return err
+		}
 		deployWithOnlySet = cmd.Flags().Changed("with-only")
 		return nil
 	}
