@@ -66,9 +66,12 @@ Example:
 		if err := installRookCephOperator(src, active); err != nil {
 			return err
 		}
-		// rook-ceph-cluster's CRs (CephCluster, pools, object store, ...) need
-		// the operator running to reconcile them, so cluster waits on the
-		// operator install (invariant 1).
+		// rook-ceph-cluster's CRs (CephCluster, pools, object store, ...) are
+		// of kinds whose CRDs the operator chart installs, and helm fails a
+		// release naming a kind the apiserver does not serve, so cluster waits
+		// on the operator install (invariant 1). That install does not --wait,
+		// so the operator need not be running yet; it reconciles the CRs
+		// whenever it comes up.
 		if err := installRookCephCluster(src, active); err != nil {
 			return err
 		}
