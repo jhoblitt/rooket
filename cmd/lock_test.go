@@ -301,7 +301,7 @@ func TestPruneExecuteLocksTheRootItWasGiven(t *testing.T) {
 		}
 		return nil
 	}
-	if err := pruneExecute(root, []string{"orphan"}, nil,
+	if err := pruneExecute(root, []string{"orphan"}, nil, noRecheck,
 		func([]iscsiDisk) error { return nil }, remove, io.Discard); err != nil {
 		t.Fatalf("pruneExecute: %v", err)
 	}

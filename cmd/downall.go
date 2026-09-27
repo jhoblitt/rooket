@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"text/tabwriter"
@@ -114,11 +115,7 @@ func downAllRun(cmd *cobra.Command) error {
 	for _, n := range names {
 		liveCol := "-"
 		if engs := live[n]; len(engs) > 0 {
-			ss := make([]string, len(engs))
-			for i, e := range engs {
-				ss[i] = e.String()
-			}
-			liveCol = strings.Join(ss, ",")
+			liveCol = engineNames(engs)
 		}
 		dirCol := "-"
 		if hasState[n] {
@@ -172,8 +169,46 @@ func downAllRun(cmd *cobra.Command) error {
 	// blocked marks clusters that another rooket holds, or that survived a
 	// failed delete: their disks may still be in use, so nothing downstream may
 	// zap, teardown, or remove their state.
-	blocked, releaseAll := lockSweep(os.Stdout, root, toLock)
-	defer releaseAll()
+	locks, blocked := lockSweep(os.Stdout, root, toLock)
+	defer locks.releaseAll()
+
+	// The scan's view of a cluster may be stale by the time the sweep holds it:
+	// a down and an up that ran to completion in between leave nothing in the
+	// lock to show for it. The cluster may have gained a kind cluster since, or
+	// been brought back up under the other engine, where a delete and a
+	// confirm-gone asked of the scan's engines would find nothing; either way
+	// the zap or the batched teardown would then reach disks its nodes use. So
+	// every held cluster is asked again, with the scan's own probe, and is
+	// deleted, confirmed gone, and zapped by that answer. Held, it cannot come
+	// up or move after it.
+	var held []string
+	for _, n := range toLock {
+		if !blocked[n] {
+			held = append(held, n)
+		}
+	}
+	if len(held) > 0 {
+		now, consulted, failed := liveClusters()
+		if len(consulted) == 0 || len(failed) > 0 {
+			unqueried := "no container engine"
+			if len(failed) > 0 {
+				unqueried = engineNames(failed)
+			}
+			return fmt.Errorf("cannot check again which clusters are live (%s could not be queried); nothing was torn down", unqueried)
+		}
+		for _, n := range held {
+			was, is := live[n], now[n]
+			switch {
+			case len(was) == 0 && len(is) > 0:
+				run.Printf("cluster %q came up since the sweep looked; deleting it as a live cluster\n", n)
+			case len(is) == 0 && len(was) > 0:
+				run.Printf("cluster %q went down since the sweep looked\n", n)
+			case !slices.Equal(was, is):
+				run.Printf("cluster %q is now live under %s, not %s; deleting it there\n", n, engineNames(is), engineNames(was))
+			}
+			live[n] = is
+		}
+	}
 
 	// The clusters share no kind cluster, registry, or disk, so they are deleted
 	// concurrently — N deletes cost roughly one delete's wallclock, not N — with
@@ -269,7 +304,7 @@ func downAllRun(cmd *cobra.Command) error {
 		}
 	}
 	removeStatelessLockFiles(root, tornDown)
-	releaseAll()
+	locks.releaseAll()
 
 	// Safe to run even with clusters left behind: the cache is a soft
 	// dependency, so a node that outlives it falls back to pulling upstream.
@@ -291,6 +326,16 @@ func downAllRun(cmd *cobra.Command) error {
 
 	run.Printf("\nrooket down --all complete.\n")
 	return nil
+}
+
+// engineNames renders engines as a comma-separated list, as down --all's table
+// shows where a cluster is live.
+func engineNames(engs []engine.Engine) string {
+	ss := make([]string, len(engs))
+	for i, e := range engs {
+		ss[i] = e.String()
+	}
+	return strings.Join(ss, ",")
 }
 
 // stillLive reports whether a kind cluster is still present under any of the

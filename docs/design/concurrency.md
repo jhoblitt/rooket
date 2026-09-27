@@ -88,12 +88,24 @@ what a reviewer checks before signing off on a parallelized step:
 
    Commands on one *cluster* never overlap at all: every command that mutates
    a cluster holds that cluster's lock (`LockCluster`) for its whole run, since
-   two runs against one cluster are a mistake, not a workflow. The sweeps over
-   many clusters, `down --all` and `prune`, hold it the same way for each
-   cluster they touch (`lockSweep`): they try every affected cluster's lock
-   before removing anything of any of them, tear down only the clusters they
-   hold, and keep those locks through the batched privileged teardown and the
-   state-dir removals; a cluster another rooket holds is skipped and reported.
+   two runs against one cluster are a mistake, not a workflow.
+
+   The sweeps over many clusters, `down --all` and `prune`, hold the cluster
+   lock the same way for each cluster they touch (`lockSweep`): they try every
+   affected cluster's lock before removing anything of any of them, tear down
+   only the clusters they hold, and keep those locks through the batched
+   privileged teardown and the state-dir removals; a cluster another rooket
+   holds is skipped and reported. A lock shows only a rooket still at work, so
+   with the locks held each sweep asks its clusters again what its scan asked,
+   with the scan's probes. `prune` leaves alone a cluster that came up in
+   between, from an `up` that finished. `down --all` deletes each cluster it
+   holds under the engines it is live under now, so one that came up in
+   between, or came back up under the other engine, is deleted as the live
+   cluster it is. It holds a cluster that had only a state dir, though, only
+   when it tears down disks (`--delete-disks` without `--skip-block`).
+   Otherwise such a cluster is neither locked nor asked again, and one that
+   came up in between is left running.
+
    Holding many locks at once cannot deadlock, because a cluster lock is only
    ever tried, never waited for: a run that finds one held gives up at once, so
    no run ever waits on a cluster lock and no cycle of waits can pass through

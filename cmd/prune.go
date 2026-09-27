@@ -166,8 +166,46 @@ regardless, so this does not add a new restriction there.
 			}
 		}
 
-		return pruneExecute(root, orphans, disks, teardownISCSI, os.RemoveAll, os.Stdout)
+		isOrphan := map[string]bool{}
+		for _, o := range orphans {
+			isOrphan[o] = true
+		}
+		recheck := func(planned []string) (map[string]string, error) {
+			return pruneRecheck(root, isOrphan, pruneInclParked, planned)
+		}
+		return pruneExecute(root, orphans, disks, recheck, teardownISCSI, os.RemoveAll, os.Stdout)
 	},
+}
+
+// pruneRecheck asks again, of each cluster prune is about to touch, what the
+// scan asked to choose it, with the scan's own probes, and returns why each
+// that no longer passes must be left alone. An orphan must still have no live
+// kind cluster and, unless parked clusters are in scope, no owner; a stranded
+// cluster must still have no live kind cluster and no state dir. Like the
+// scan, it will not answer without every installed engine.
+func pruneRecheck(root string, orphans map[string]bool, includeParked bool, planned []string) (map[string]string, error) {
+	live, consulted, failed := liveClusters()
+	if len(consulted) == 0 || len(failed) > 0 {
+		return nil, fmt.Errorf("cannot check again which clusters are live (a container engine could not be queried); nothing was pruned")
+	}
+	changed := map[string]string{}
+	for _, n := range planned {
+		dir := filepath.Join(root, n)
+		if _, ok := live[n]; ok {
+			changed[n] = "its kind cluster came up after prune looked"
+			continue
+		}
+		if orphans[n] {
+			if !includeParked && !ownerGone(dir) {
+				changed[n] = "it is parked now: " + parkedBecause(dir)
+			}
+			continue
+		}
+		if fi, err := os.Stat(dir); err == nil && fi.IsDir() {
+			changed[n] = "it has a state directory now"
+		}
+	}
+	return changed, nil
 }
 
 // teardownISCSI runs disks' privileged teardown, wrapping a failure with the
@@ -201,7 +239,15 @@ func teardownISCSI(disks []iscsiDisk) error {
 // and is reported; prune still succeeds, as it always has for one it skips. A
 // state dir whose name cannot be a cluster's has no lock anyone could hold,
 // and is pruned unlocked.
-func pruneExecute(root string, orphans []string, disks map[string][]iscsiDisk, teardown func([]iscsiDisk) error, remove func(string) error, out io.Writer) error {
+//
+// A lock shows only a rooket still at work: an up that finished between the
+// scan and the lock left a live cluster and nothing to show for it. So, with
+// the locks held, recheck asks each cluster again what the scan asked, and one
+// that no longer passes is let go at once, reported, and left alone. The
+// answer cannot go stale again, since whatever could bring a held cluster up
+// needs its lock. A re-check that cannot be answered stops prune before it
+// touches anything.
+func pruneExecute(root string, orphans []string, disks map[string][]iscsiDisk, recheck func(planned []string) (map[string]string, error), teardown func([]iscsiDisk) error, remove func(string) error, out io.Writer) error {
 	touched := map[string]bool{}
 	for n := range disks {
 		touched[n] = true
@@ -216,8 +262,26 @@ func pruneExecute(root string, orphans []string, disks map[string][]iscsiDisk, t
 			toLock = append(toLock, n)
 		}
 	}
-	skipped, releaseAll := lockSweep(out, root, toLock)
-	defer releaseAll()
+	locks, skipped := lockSweep(out, root, toLock)
+	defer locks.releaseAll()
+
+	var planned []string
+	for _, n := range names {
+		if !skipped[n] {
+			planned = append(planned, n)
+		}
+	}
+	changed, err := recheck(planned)
+	if err != nil {
+		return err
+	}
+	for _, n := range planned {
+		if why, ok := changed[n]; ok {
+			fmt.Fprintf(out, "skipping cluster %q: %s\n", n, why)
+			locks.release(n)
+			skipped[n] = true
+		}
+	}
 
 	var batch []iscsiDisk
 	for _, n := range names {

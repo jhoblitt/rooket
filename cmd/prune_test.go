@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -215,6 +216,51 @@ func TestPruneReadsTheStubbedHostsISCSIConfiguration(t *testing.T) {
 	}
 	if iqn := "iqn.2003-01.local.rooket:w5-stranded-worker0-disk0"; !strings.Contains(out, iqn) {
 		t.Errorf("prune --dry-run printed\n%s\nwant the stubbed host's stranded target %s listed", out, iqn)
+	}
+}
+
+// A cluster that comes up after prune looked — an up that finished between the
+// scan and the lock — is no orphan by the time prune could remove it, so it
+// keeps its targets and its state dir, and prune says why; the orphan beside it
+// is pruned as planned.
+func TestPruneLeavesAClusterThatCameUpAfterItLooked(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	const late, gone = "w5-late", "w5-gone"
+	log := stubDownHost(t, downHost{upLater: []string{late}})
+	root, err := stateDirRoot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, n := range []string{late, gone} {
+		// No clone recorded, so each reads as abandoned rather than parked.
+		dir := filepath.Join(root, n)
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "worker0-disk0.img"), nil, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	out, err := runPrune(t, "--force")
+	if err != nil {
+		t.Fatalf("prune: %v", err)
+	}
+	deleted := deletedTargets(calls(t, log))
+	if slices.Contains(deleted, workerTargets(late, 0)[0]) {
+		t.Errorf("prune tore down the targets of %s, which came up after it looked", late)
+	}
+	if !slices.Contains(deleted, workerTargets(gone, 0)[0]) {
+		t.Errorf("prune did not tear down the targets of the orphan %s: deleted %v", gone, deleted)
+	}
+	if _, err := os.Stat(filepath.Join(root, late)); err != nil {
+		t.Errorf("prune removed the state dir of %s, which came up after it looked: %v", late, err)
+	}
+	if _, err := os.Stat(filepath.Join(root, gone)); !os.IsNotExist(err) {
+		t.Errorf("state dir of the orphan %s survived (stat: %v)", gone, err)
+	}
+	if want := fmt.Sprintf("skipping cluster %q", late); !strings.Contains(out, want) {
+		t.Errorf("prune printed\n%s\nwant a line %s", out, want)
 	}
 }
 
@@ -460,7 +506,7 @@ func TestPruneExecute(t *testing.T) {
 			return nil
 		}
 		disks := map[string][]iscsiDisk{"orphan-a": {{targetIQN: "iqn.x"}}}
-		err := pruneExecute(t.TempDir(), []string{"orphan-a", "orphan-b"}, disks, teardown, remove, io.Discard)
+		err := pruneExecute(t.TempDir(), []string{"orphan-a", "orphan-b"}, disks, noRecheck, teardown, remove, io.Discard)
 		if err == nil {
 			t.Fatal("pruneExecute = nil error, want the teardown failure")
 		}
@@ -488,7 +534,7 @@ func TestPruneExecute(t *testing.T) {
 			removed = append(removed, p)
 			return nil
 		}
-		if err := pruneExecute(root, []string{"a", "b"}, nil, teardown, remove, io.Discard); err != nil {
+		if err := pruneExecute(root, []string{"a", "b"}, nil, noRecheck, teardown, remove, io.Discard); err != nil {
 			t.Fatalf("pruneExecute: %v", err)
 		}
 		if teardownCalled {
@@ -510,7 +556,7 @@ func TestPruneExecute(t *testing.T) {
 			}
 			return nil
 		}
-		if err := pruneExecute(root, []string{"a", "b"}, nil, func([]iscsiDisk) error { return nil }, remove, io.Discard); err != nil {
+		if err := pruneExecute(root, []string{"a", "b"}, nil, noRecheck, func([]iscsiDisk) error { return nil }, remove, io.Discard); err != nil {
 			t.Fatalf("pruneExecute: %v", err)
 		}
 		want := []string{filepath.Join(root, "a"), filepath.Join(root, "b")}
@@ -534,7 +580,7 @@ func TestPruneExecute(t *testing.T) {
 			}
 			return os.RemoveAll(p)
 		}
-		if err := pruneExecute(root, []string{"gone", "kept"}, nil, func([]iscsiDisk) error { return nil }, remove, io.Discard); err != nil {
+		if err := pruneExecute(root, []string{"gone", "kept"}, nil, noRecheck, func([]iscsiDisk) error { return nil }, remove, io.Discard); err != nil {
 			t.Fatalf("pruneExecute: %v", err)
 		}
 		lock := func(name string) string {
@@ -561,7 +607,7 @@ func TestPruneExecute(t *testing.T) {
 		a := []iscsiDisk{{targetIQN: "iqn.a0"}, {targetIQN: "iqn.a1"}}
 		b := []iscsiDisk{{targetIQN: "iqn.b0"}}
 		disks := map[string][]iscsiDisk{"a": a, "b": b}
-		if err := pruneExecute(t.TempDir(), nil, disks, teardown, func(string) error { return nil }, io.Discard); err != nil {
+		if err := pruneExecute(t.TempDir(), nil, disks, noRecheck, teardown, func(string) error { return nil }, io.Discard); err != nil {
 			t.Fatalf("pruneExecute: %v", err)
 		}
 		if want := [][]iscsiDisk{slices.Concat(a, b)}; !reflect.DeepEqual(batches, want) {
@@ -633,7 +679,7 @@ func TestPruneExecuteTearsDownOnlyTheClustersItHolds(t *testing.T) {
 		return os.RemoveAll(p)
 	}
 	var out strings.Builder
-	if err := pruneExecute(root, []string{busyOrphan, orphan}, disks, teardown, remove, &out); err != nil {
+	if err := pruneExecute(root, []string{busyOrphan, orphan}, disks, noRecheck, teardown, remove, &out); err != nil {
 		t.Fatalf("pruneExecute = %v, want success: a cluster prune cannot lock is reported, not an error", err)
 	}
 
@@ -686,7 +732,7 @@ func TestPruneExecuteRemovesAStateDirNoClusterCouldOwn(t *testing.T) {
 	}
 
 	var out strings.Builder
-	if err := pruneExecute(root, []string{name}, disks, teardown, os.RemoveAll, &out); err != nil {
+	if err := pruneExecute(root, []string{name}, disks, noRecheck, teardown, os.RemoveAll, &out); err != nil {
 		t.Fatalf("pruneExecute = %v, want success", err)
 	}
 	if !reflect.DeepEqual(tornDown, disks[name]) {
@@ -695,4 +741,152 @@ func TestPruneExecuteRemovesAStateDirNoClusterCouldOwn(t *testing.T) {
 	if entries, _ := os.ReadDir(root); len(entries) != 0 {
 		t.Errorf("state root holds %v, want %s removed and nothing left:\n%s", entries, name, out.String())
 	}
+}
+
+// noRecheck finds every cluster prune holds just as its scan did.
+func noRecheck([]string) (map[string]string, error) { return nil, nil }
+
+// prune asks its questions again of each cluster once it holds the lock, and a
+// cluster that no longer passes is let go at once and left wholly alone, with
+// the reason said; the rest are pruned as planned. A re-check that cannot be
+// answered stops prune before it touches anything.
+func TestPruneExecuteRechecksEachClusterUnderItsLock(t *testing.T) {
+	const kept, late = "w5-kept", "w5-late"
+	setup := func(t *testing.T) (string, map[string][]iscsiDisk) {
+		t.Setenv("HOME", t.TempDir())
+		root, err := stateDirRoot()
+		if err != nil {
+			t.Fatal(err)
+		}
+		disks := map[string][]iscsiDisk{}
+		for _, n := range []string{kept, late} {
+			if err := os.MkdirAll(filepath.Join(root, n), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			id := n + "-worker0-disk0"
+			disks[n] = []iscsiDisk{{backstoreName: id, targetIQN: "iqn.2003-01.local.rooket:" + id}}
+		}
+		return root, disks
+	}
+
+	t.Run("a cluster that changed is let go and left alone", func(t *testing.T) {
+		root, disks := setup(t)
+		var rechecked []string
+		recheck := func(held []string) (map[string]string, error) {
+			rechecked = held
+			for _, n := range held {
+				if !clusterLockHeld(t, root, n) {
+					t.Errorf("re-checked %s without holding its lock", n)
+				}
+			}
+			return map[string]string{late: "its kind cluster came up"}, nil
+		}
+		var tornDown []string
+		teardown := func(batch []iscsiDisk) error {
+			for _, d := range batch {
+				_, n, _ := parseRooketIQN(d.targetIQN)
+				tornDown = append(tornDown, n)
+			}
+			if clusterLockHeld(t, root, late) {
+				t.Errorf("prune still held the lock of %s, which it no longer meant to touch", late)
+			}
+			return nil
+		}
+		var removed []string
+		remove := func(p string) error {
+			removed = append(removed, filepath.Base(p))
+			return os.RemoveAll(p)
+		}
+		var out strings.Builder
+		if err := pruneExecute(root, []string{kept, late}, disks, recheck, teardown, remove, &out); err != nil {
+			t.Fatalf("pruneExecute = %v, want success", err)
+		}
+		if want := []string{kept, late}; !slices.Equal(rechecked, want) {
+			t.Errorf("re-checked %v, want every cluster prune holds %v", rechecked, want)
+		}
+		if want := []string{kept}; !slices.Equal(tornDown, want) || !slices.Equal(removed, want) {
+			t.Errorf("tore down %v and removed %v, want only %v", tornDown, removed, want)
+		}
+		if _, err := os.Stat(filepath.Join(root, late)); err != nil {
+			t.Errorf("the state dir of %s, which changed, was removed: %v", late, err)
+		}
+		if want := fmt.Sprintf("skipping cluster %q: its kind cluster came up", late); !strings.Contains(out.String(), want) {
+			t.Errorf("prune printed\n%s\nwant %q", out.String(), want)
+		}
+	})
+
+	t.Run("a re-check that fails stops prune", func(t *testing.T) {
+		root, disks := setup(t)
+		recheck := func([]string) (map[string]string, error) { return nil, errors.New("engine down") }
+		teardown := func([]iscsiDisk) error {
+			t.Error("tore down targets after the re-check failed")
+			return nil
+		}
+		remove := func(p string) error {
+			t.Errorf("removed %s after the re-check failed", p)
+			return nil
+		}
+		if err := pruneExecute(root, []string{kept, late}, disks, recheck, teardown, remove, io.Discard); err == nil {
+			t.Fatal("pruneExecute = nil error, want the re-check's failure")
+		}
+		for _, n := range []string{kept, late} {
+			if _, ok := heldFile(n); ok {
+				t.Errorf("prune still holds the lock of %s after stopping", n)
+			}
+		}
+	})
+}
+
+// pruneRecheck asks of each cluster prune holds what the scan asked, with the
+// scan's probes: an orphan must still have no live kind cluster and no owner
+// (unless parked clusters are in scope), and a stranded cluster no live kind
+// cluster and no state dir.
+func TestPruneRecheck(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	root, err := stateDirRoot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	clone := t.TempDir()
+	const (
+		cameUp    = "w5-came-up"    // orphan whose kind cluster is live now
+		nowParked = "w5-now-parked" // orphan whose recorded clone exists now
+		abandoned = "w5-abandoned"  // orphan that still is one
+		gotState  = "w5-got-state"  // stranded, with a state dir now
+		stranded  = "w5-stranded"   // stranded, and still so
+	)
+	stubDownHost(t, downHost{live: []string{cameUp}})
+	for _, n := range []string{cameUp, nowParked, abandoned, gotState} {
+		if err := os.MkdirAll(filepath.Join(root, n), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeFile(t, filepath.Join(root, nowParked, clonePathFile), clone+"\n")
+	orphans := map[string]bool{cameUp: true, nowParked: true, abandoned: true}
+	held := []string{abandoned, cameUp, gotState, nowParked, stranded}
+
+	for _, tc := range []struct {
+		includeParked bool
+		want          []string
+	}{
+		{false, []string{cameUp, gotState, nowParked}},
+		{true, []string{cameUp, gotState}},
+	} {
+		t.Run(fmt.Sprintf("include-parked=%v", tc.includeParked), func(t *testing.T) {
+			changed, err := pruneRecheck(root, orphans, tc.includeParked, held)
+			if err != nil {
+				t.Fatalf("pruneRecheck: %v", err)
+			}
+			if got := slices.Sorted(maps.Keys(changed)); !slices.Equal(got, tc.want) {
+				t.Errorf("changed = %v, want %v", changed, tc.want)
+			}
+		})
+	}
+
+	t.Run("an engine that cannot be queried", func(t *testing.T) {
+		stubDownHost(t, downHost{kindFails: true})
+		if _, err := pruneRecheck(root, orphans, false, held); err == nil {
+			t.Error("pruneRecheck = nil error, want it to refuse to answer without every engine")
+		}
+	})
 }

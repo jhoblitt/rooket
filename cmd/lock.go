@@ -5,8 +5,10 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"maps"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"syscall"
@@ -134,8 +136,14 @@ func removeClusterLockOnRelease(name string) {
 // down, or let go before its last step, could remove what an up in flight had
 // just built. A cluster whose lock cannot be taken — another rooket holds it,
 // say — is reported on out and returned in skipped, and the sweep must touch
-// nothing of it. releaseAll lets go of every lock taken; a second call does
-// nothing.
+// nothing of it.
+//
+// What the sweep decided before it held a lock is only as current as the scan
+// it came from: a rooket that ran to completion in between changed the cluster
+// without the lock ever showing it. So a sweep asks its questions of a held
+// cluster again before acting on them. prune lets go at once of a cluster it
+// no longer means to touch; down --all keeps every lock it took until it is
+// done, even that of a cluster that went down since the scan.
 //
 // Holding any number of these at once cannot deadlock. Every cluster lock in
 // rooket is taken through lockClusterIn, which only ever tries it: a rooket
@@ -144,9 +152,9 @@ func removeClusterLockOnRelease(name string) {
 // holder). With no one ever waiting for a cluster lock, no cycle of waits can
 // pass through one, whatever else its holders wait on. Two sweeps at once each
 // take what is free and skip the rest, splitting the clusters between them.
-func lockSweep(out io.Writer, root string, names []string) (skipped map[string]bool, releaseAll func()) {
+func lockSweep(out io.Writer, root string, names []string) (locks *sweepLocks, skipped map[string]bool) {
+	locks = &sweepLocks{releases: map[string]func(){}}
 	skipped = map[string]bool{}
-	var releases []func()
 	for _, n := range names {
 		release, err := lockClusterIn(root, n)
 		if err != nil {
@@ -154,13 +162,29 @@ func lockSweep(out io.Writer, root string, names []string) (skipped map[string]b
 			run.Fprintf(out, "warning: skipping cluster %q: %v\n", n, err)
 			continue
 		}
-		releases = append(releases, release)
+		locks.releases[n] = release
 	}
-	return skipped, func() {
-		for _, release := range releases {
-			release()
-		}
-		releases = nil
+	return locks, skipped
+}
+
+// sweepLocks is the cluster locks one sweep holds; see lockSweep.
+type sweepLocks struct {
+	releases map[string]func()
+}
+
+// release lets go of one cluster's lock, if the sweep holds it.
+func (s *sweepLocks) release(name string) {
+	if release, ok := s.releases[name]; ok {
+		delete(s.releases, name)
+		release()
+	}
+}
+
+// releaseAll lets go of every lock the sweep still holds; a second call does
+// nothing.
+func (s *sweepLocks) releaseAll() {
+	for _, n := range slices.Sorted(maps.Keys(s.releases)) {
+		s.release(n)
 	}
 }
 

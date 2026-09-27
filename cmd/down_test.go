@@ -24,10 +24,28 @@ func keep[T any](t *testing.T, p *T) {
 
 // downHost is what the stubbed host reports to a down run.
 type downHost struct {
-	live       []string // the kind clusters 'kind get clusters' lists
+	live []string // the kind clusters 'kind get clusters' lists
+	// upLater are kind clusters 'kind get clusters' lists only from its second
+	// call on: ones that come up after the command under test first looked.
+	upLater []string
+	// movedLater are kind clusters listed under podman on its first listing
+	// and under docker from docker's second on: ones brought back up under the
+	// other engine after the command under test first looked. Setting it puts
+	// a docker on PATH, so that both engines are asked; each engine counts its
+	// own listings and forgets only the clusters deleted under it.
+	movedLater []string
+	// docker puts a docker on PATH beside podman, whose kind lists dockerLive.
+	docker     bool
+	dockerLive []string
 	containers []string // the container names the engine's 'ps -a' lists
 	kindFails  bool     // 'kind get clusters' fails, as it does with the engine down
-	psFails    bool     // the engine's 'ps -a' fails
+	// kindFailsFrom has an engine's 'kind get clusters' fail from its nth
+	// listing on, as it does once that engine stops answering after the
+	// command under test first looked.
+	kindFailsFrom map[engine.Engine]int
+	// kindDeleteFails has kind's delete of a cluster fail and leave it listed.
+	kindDeleteFails bool
+	psFails         bool // the engine's 'ps -a' fails
 	// The kernel's iSCSI configuration, in writeFakeLIO's terms: a backstore
 	// name and its backing path, each exported by a target.
 	lio map[string]string
@@ -36,7 +54,8 @@ type downHost struct {
 // stubDownHost puts stubs for every command a down run can reach on PATH, and
 // nothing else, so no real kind, container engine, or iSCSI tool can run — as
 // root or through sudo. Each stub appends its invocation to the returned log.
-// kind stops listing a cluster once it has been asked to delete it. targetcli
+// kind stops listing a cluster once it has been asked to delete it, and starts
+// listing h.upLater from its second listing on. targetcli
 // fails every delete, as the real one does for an object that does not exist.
 // The kernel's iSCSI configuration is read from h.lio, empty unless set, and
 // never from the machine's own.
@@ -55,20 +74,36 @@ func stubDownHost(t *testing.T, h downHost) string {
 		return "printf '%s\\n' '" + strings.Join(lines, "' '") + "'"
 	}
 	// Only shell builtins are on PATH, so a deletion is a marker file rather
-	// than an edit of a list.
+	// than an edit of a list, and the listings are counted in a file. kind's
+	// engine is its KIND_EXPERIMENTAL_PROVIDER, so the markers and counts are
+	// per engine, and its log lines carry it.
 	deleted := filepath.Join(dir, "deleted-")
-	kindList := fmt.Sprintf(`for n in %s; do [ -e %q"$n" ] || printf '%%s\n' "$n"; done`,
-		strings.Join(h.live, " "), deleted)
+	listings := filepath.Join(dir, "kind-listings-")
+	kindList := fmt.Sprintf(`p=$KIND_EXPERIMENTAL_PROVIDER
+case $p in
+docker) always=%[6]q; first=; later=%[5]q; failFrom=%[7]d ;;
+*) always=%[2]q; first=%[5]q; later=%[4]q; failFrom=%[8]d ;;
+esac
+n=0; [ -e %[1]q"$p" ] && read n < %[1]q"$p"; n=$((n+1)); printf '%%s\n' "$n" > %[1]q"$p"
+if [ "$failFrom" -gt 0 ] && [ "$n" -ge "$failFrom" ]; then exit 1; fi
+if [ "$n" -gt 1 ]; then set -- $always $later; else set -- $always $first; fi
+for c in "$@"; do [ -e %[3]q"$p-$c" ] || printf '%%s\n' "$c"; done`,
+		listings, strings.Join(h.live, " "), deleted, strings.Join(h.upLater, " "), strings.Join(h.movedLater, " "),
+		strings.Join(h.dockerLive, " "), h.kindFailsFrom[engine.Docker], h.kindFailsFrom[engine.Podman])
 	if h.kindFails {
 		kindList = "exit 1"
+	}
+	kindDelete := fmt.Sprintf(`: > %q"$KIND_EXPERIMENTAL_PROVIDER-$4"`, deleted)
+	if h.kindDeleteFails {
+		kindDelete = "exit 1"
 	}
 	psList := printLines(h.containers)
 	if h.psFails {
 		psList = "exit 1"
 	}
 	stubs := map[string]string{
-		"kind": fmt.Sprintf("case \"$*\" in\n\"get clusters\") %s ;;\n\"delete cluster --name \"*) : > %q\"$4\" ;;\nesac",
-			kindList, deleted),
+		"kind": fmt.Sprintf("case \"$*\" in\n\"get clusters\") %s ;;\n\"delete cluster --name \"*) %s ;;\nesac",
+			kindList, kindDelete),
 		"podman":    fmt.Sprintf("case \"$1\" in\nps) %s ;;\nesac", psList),
 		"targetcli": "case \"$*\" in\n*\" delete \"*) echo 'No such path' >&2; exit 1 ;;\nesac",
 		// Drops -n and runs what it was handed, when that is a path: itemized
@@ -79,8 +114,16 @@ func stubDownHost(t *testing.T, h downHost) string {
 		"systemctl": ":",
 		"pkexec":    ":",
 	}
+	if h.docker || len(h.movedLater) > 0 {
+		stubs["docker"] = stubs["podman"]
+	}
+	kindLogCall := fmt.Sprintf(`printf 'KIND_EXPERIMENTAL_PROVIDER=%%s kind %%s\n' "$KIND_EXPERIMENTAL_PROVIDER" "$*" >> %q`, logPath)
 	for name, body := range stubs {
-		script := "#!/bin/sh\n" + logCall + "\n" + body + "\nexit 0\n"
+		logLine := logCall
+		if name == "kind" {
+			logLine = kindLogCall
+		}
+		script := "#!/bin/sh\n" + logLine + "\n" + body + "\nexit 0\n"
 		if err := os.WriteFile(filepath.Join(dir, name), []byte(script), 0o755); err != nil {
 			t.Fatal(err)
 		}
@@ -400,6 +443,192 @@ func TestDownAllTearsDownOnlyTheClustersItHolds(t *testing.T) {
 	}
 	if _, err := os.Stat(images[busy]); err != nil {
 		t.Errorf("the disk image of a cluster another rooket holds was removed: %v", err)
+	}
+}
+
+// A cluster with no kind cluster when down --all looked, whose kind cluster
+// came up before the sweep locked it — an up that finished in between — is
+// torn down as the live cluster it now is: its kind cluster is deleted, and
+// confirmed gone, before the batch removes the targets its nodes use.
+func TestDownAllDeletesAClusterThatCameUpAfterItLooked(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	const late = "w5-late"
+	log := stubDownHost(t, downHost{upLater: []string{late}})
+	dir, err := ensureStateDir(late)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "worker0-disk0.img"), nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := runDown(t, "--all", "--delete-disks", "--force"); err != nil {
+		t.Fatalf("down --all: %v", err)
+	}
+	got := calls(t, log)
+	deleted := strings.Index(got, "kind delete cluster --name "+late+"\n")
+	target := strings.Index(got, "targetcli /iscsi delete "+workerTargets(late, 0)[0]+"\n")
+	if deleted < 0 {
+		t.Fatalf("down --all never deleted the kind cluster of %s, which came up after it looked:\n%s", late, got)
+	}
+	switch {
+	case target < 0:
+		t.Errorf("down --all never tore down the targets of %s:\n%s", late, got)
+	case target < deleted:
+		t.Errorf("down --all tore down the targets of %s before deleting its kind cluster:\n%s", late, got)
+	}
+	if _, err := os.Stat(dir); !os.IsNotExist(err) {
+		t.Errorf("state dir of %s survived (stat: %v)", late, err)
+	}
+}
+
+// A cluster down --all saw live under one engine, but that was brought back up
+// under the other before the sweep locked it, is deleted under the engine it
+// runs under now, and confirmed gone there, before the sweep touches its disks:
+// a plain sweep's zap of its images, or the batched teardown of its targets.
+// Deleted and confirmed gone under the engine the sweep first saw, it would
+// look gone while its nodes still used those disks.
+func TestDownAllDeletesAClusterUnderTheEngineItNowRunsUnder(t *testing.T) {
+	const moved = "y6-moved"
+	for _, c := range []struct {
+		args  []string
+		disks string // the first call of the sweep's that reaches the cluster's disks
+	}{
+		{args: nil, disks: " images --format "},
+		{args: []string{"--delete-disks"}, disks: "targetcli /iscsi delete " + workerTargets(moved, 0)[0] + "\n"},
+	} {
+		t.Run(fmt.Sprintf("%v", c.args), func(t *testing.T) {
+			t.Setenv("HOME", t.TempDir())
+			log := stubDownHost(t, downHost{movedLater: []string{moved}})
+			dir, err := ensureStateDir(moved)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(dir, "worker0-disk0.img"), nil, 0o644); err != nil {
+				t.Fatal(err)
+			}
+
+			if _, err := runDown(t, append([]string{"--all", "--force"}, c.args...)...); err != nil {
+				t.Fatalf("down --all %v: %v", c.args, err)
+			}
+			got := calls(t, log)
+			deleted := strings.Index(got, "KIND_EXPERIMENTAL_PROVIDER=docker kind delete cluster --name "+moved+"\n")
+			if deleted < 0 {
+				t.Fatalf("down --all %v never deleted %s under docker, where it runs now:\n%s", c.args, moved, got)
+			}
+			switch touched := strings.Index(got, c.disks); {
+			case touched < 0:
+				t.Errorf("down --all %v never reached the disks of %s (%q):\n%s", c.args, moved, c.disks, got)
+			case touched < deleted:
+				t.Errorf("down --all %v reached the disks of %s before deleting it under docker:\n%s", c.args, moved, got)
+			}
+		})
+	}
+}
+
+// osdData is what writeOSDImage puts in an image, and what is gone from it
+// once a zap has truncated it.
+const osdData = "OSD-DATA"
+
+// writeOSDImage gives cluster name a state dir holding one disk image with
+// data in it, and returns both.
+func writeOSDImage(t *testing.T, name string) (dir, img string) {
+	t.Helper()
+	dir, err := ensureStateDir(name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	img = filepath.Join(dir, "worker0-disk0.img")
+	if err := os.WriteFile(img, []byte(osdData), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return dir, img
+}
+
+// An engine that answered down --all's scan but cannot answer the re-check
+// under the locks may still run a cluster the sweep holds, so the sweep stops,
+// naming the engine, before it deletes, zaps, or tears down anything of any
+// cluster.
+func TestDownAllStopsWhenAnEngineCannotAnswerTheRecheck(t *testing.T) {
+	const name = "y7-recheck"
+	for _, eng := range []engine.Engine{engine.Podman, engine.Docker} {
+		for _, c := range []struct {
+			desc string
+			args []string
+			live bool // the cluster is live under eng at the scan
+		}{
+			{desc: "live", live: true},
+			{desc: "live, --delete-disks", args: []string{"--delete-disks"}, live: true},
+			{desc: "state only, --delete-disks", args: []string{"--delete-disks"}},
+		} {
+			t.Run(eng.String()+", "+c.desc, func(t *testing.T) {
+				t.Setenv("HOME", t.TempDir())
+				h := downHost{docker: true, kindFailsFrom: map[engine.Engine]int{eng: 2}}
+				if c.live {
+					h.containers = []string{registry.ContainerName(name)}
+					if eng == engine.Docker {
+						h.dockerLive = []string{name}
+					} else {
+						h.live = []string{name}
+					}
+				}
+				log := stubDownHost(t, h)
+				dir, img := writeOSDImage(t, name)
+
+				_, err := runDown(t, append([]string{"--all", "--force"}, c.args...)...)
+				if want := "(" + eng.String() + " could not be queried); nothing was torn down"; err == nil || !strings.Contains(err.Error(), want) {
+					t.Errorf("down --all %v = %v, want it to stop with %q", c.args, err, want)
+				}
+				got := calls(t, log)
+				for _, cmd := range []string{"kind delete ", " rm ", " images ", "targetcli "} {
+					if strings.Contains(got, cmd) {
+						t.Errorf("down --all %v ran %q with %s unable to answer:\n%s", c.args, cmd, eng, got)
+					}
+				}
+				if b, err := os.ReadFile(img); string(b) != osdData {
+					t.Errorf("the disk image of %s holds %q (%v), want it untouched", name, b, err)
+				}
+				if _, err := os.Stat(dir); err != nil {
+					t.Errorf("the state dir of %s went: %v", name, err)
+				}
+			})
+		}
+	}
+}
+
+// A cluster down --all saw under one engine, but that was brought back up under
+// the other before the sweep locked it, is confirmed gone under the engine it
+// runs under now. When its delete there leaves it running, the sweep leaves its
+// disks and state alone and fails naming it, though the engine the scan saw it
+// under no longer lists it.
+func TestDownAllConfirmsAClusterGoneUnderTheEngineItNowRunsUnder(t *testing.T) {
+	const moved = "y7-survivor"
+	for _, args := range [][]string{nil, {"--delete-disks"}} {
+		t.Run(fmt.Sprintf("%v", args), func(t *testing.T) {
+			t.Setenv("HOME", t.TempDir())
+			log := stubDownHost(t, downHost{movedLater: []string{moved}, kindDeleteFails: true})
+			dir, img := writeOSDImage(t, moved)
+
+			out, err := runDown(t, append([]string{"--all", "--force"}, args...)...)
+			if err == nil || !strings.Contains(err.Error(), moved) {
+				t.Errorf("down --all %v = %v, want it to fail naming %s", args, err, moved)
+			}
+			if want := fmt.Sprintf("cluster %q is still present after delete", moved); !strings.Contains(out, want) {
+				t.Errorf("down --all %v printed\n%s\nwant %q", args, out, want)
+			}
+			got := calls(t, log)
+			for _, cmd := range []string{" images ", "targetcli "} {
+				if strings.Contains(got, cmd) {
+					t.Errorf("down --all %v ran %q on a cluster still running under docker:\n%s", args, cmd, got)
+				}
+			}
+			if b, err := os.ReadFile(img); string(b) != osdData {
+				t.Errorf("the disk image of %s holds %q (%v), want it untouched", moved, b, err)
+			}
+			if _, err := os.Stat(dir); err != nil {
+				t.Errorf("the state dir of %s went: %v", moved, err)
+			}
+		})
 	}
 }
 
