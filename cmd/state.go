@@ -80,12 +80,8 @@ func resolveClusterName(flagName, dir string, refusal noClusterError) (string, e
 			return encodePath(root), nil
 		}
 	}
-	if dir != "" {
-		if abs, err := filepath.Abs(dir); err == nil {
-			if root := findRookRoot(abs); root != "" {
-				return encodePath(root), nil
-			}
-		}
+	if root := enclosingClone(dir); root != "" {
+		return encodePath(root), nil
 	}
 	return "", refusal
 }
@@ -221,10 +217,19 @@ func stateDirPath(name string) (string, error) {
 }
 
 // ensureStateDir returns a cluster's state directory, creating it and
-// recording the rook clone it belongs to. Recording here rather than in the
-// build stamp is what keeps prune's parked-vs-abandoned test (see
-// clonePathFile) working for a cluster brought up without ever building rook.
+// recording the rook clone it belongs to: the one enclosing the working
+// directory, unless a command pointed at another clone recorded that first
+// (see ensureStateDirFrom). Recording here rather than in the build stamp is
+// what keeps prune's parked-vs-abandoned test (see clonePathFile) working for
+// a cluster brought up without ever building rook.
 func ensureStateDir(name string) (string, error) {
+	return ensureStateDirFrom(name, enclosingClone("."))
+}
+
+// ensureStateDirFrom is ensureStateDir for a cluster built from clone. The
+// first clone recorded stands, so a command pointed at a clone other than the
+// working directory's calls this before anything else writes the state dir.
+func ensureStateDirFrom(name, clone string) (string, error) {
 	dir, err := stateDirPath(name)
 	if err != nil {
 		return "", err
@@ -232,9 +237,7 @@ func ensureStateDir(name string) (string, error) {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return "", fmt.Errorf("create state dir: %w", err)
 	}
-	if wd, err := os.Getwd(); err == nil {
-		recordClonePath(dir, findRookRoot(wd))
-	}
+	recordClonePath(dir, clone)
 	return dir, nil
 }
 

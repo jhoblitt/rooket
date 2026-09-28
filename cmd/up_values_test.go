@@ -260,6 +260,62 @@ func TestUpSourceCloneMode(t *testing.T) {
 	}
 }
 
+// A cluster up builds from a clone that --dir or $ROOK_DIR names belongs to
+// that clone, wherever up ran: prune keeps it parked while that clone exists,
+// and not after. Recording none from outside a clone, or the working
+// directory's clone from inside another, had prune sweep a cluster that
+// 'rooket down' parked, disk images and iSCSI targets included.
+func TestUpSourceRecordsTheNamedClone(t *testing.T) {
+	for _, c := range []struct {
+		name  string
+		point func(t *testing.T, built string)
+	}{
+		{"--dir from outside any clone", func(t *testing.T, built string) {
+			upRookDir = built
+		}},
+		{"relative --dir", func(t *testing.T, built string) {
+			t.Chdir(filepath.Dir(built))
+			upRookDir = filepath.Base(built)
+		}},
+		{"$ROOK_DIR from inside another clone", func(t *testing.T, built string) {
+			other := t.TempDir()
+			writeGoMod(t, other, rookModulePath)
+			t.Chdir(other)
+			t.Setenv("ROOK_DIR", built)
+		}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			isolateUpSource(t)
+			built := filepath.Join(t.TempDir(), "rook")
+			if err := os.Mkdir(built, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			writeGoMod(t, built, rookModulePath)
+			c.point(t, built)
+
+			if _, _, err := upSource(upCmd, "parked"); err != nil {
+				t.Fatalf("upSource: %v", err)
+			}
+			// Cluster create writes the state dir next, from where up ran.
+			stateDir, err := ensureStateDir("parked")
+			if err != nil {
+				t.Fatal(err)
+			}
+			// prune runs from anywhere, so a relative record would dangle.
+			t.Chdir(t.TempDir())
+			if ownerGone(stateDir) {
+				t.Fatal("ownerGone = true while the clone up built from exists, want the cluster parked")
+			}
+			if err := os.RemoveAll(built); err != nil {
+				t.Fatal(err)
+			}
+			if !ownerGone(stateDir) {
+				t.Error("ownerGone = false once the clone up built from is gone, want the cluster abandoned")
+			}
+		})
+	}
+}
+
 // up's refusal of a cluster it cannot name comes from useClusterOrRookDir, at
 // the top of its RunE, ahead of any cluster work; this wires it into the
 // command a user actually runs. Given --rook-version, up reads no rook tree,
