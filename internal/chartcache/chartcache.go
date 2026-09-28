@@ -11,10 +11,10 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
-	"strings"
 	"syscall"
 	"time"
 
+	"github.com/jhoblitt/rooket/internal/lockowner"
 	"github.com/jhoblitt/rooket/internal/run"
 )
 
@@ -168,7 +168,7 @@ func lockPulls(out io.Writer, root string) (release func(), err error) {
 		err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
 		switch {
 		case err == nil:
-			writeOwner(f)
+			lockowner.Write(f)
 			return func() { f.Close() }, nil
 		case !errors.Is(err, syscall.EWOULDBLOCK):
 			f.Close()
@@ -176,55 +176,11 @@ func lockPulls(out io.Writer, root string) (release func(), err error) {
 		case !time.Now().Before(deadline):
 			f.Close()
 			return nil, fmt.Errorf("another rooket%s has been pulling released Rook charts for over %s (lock %s); "+
-				"if it is wedged, kill it and retry", ownerAt(path), lockWait, path)
+				"if it is wedged, kill it and retry", lockowner.At(path), lockWait, path)
 		}
 		if !waiting {
-			run.Fprintf(out, "==> waiting for another rooket%s to finish pulling released Rook charts (lock %s)\n", ownerAt(path), path)
+			run.Fprintf(out, "==> waiting for another rooket%s to finish pulling released Rook charts (lock %s)\n", lockowner.At(path), path)
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
-}
-
-// writeOwner records this process in the pull lock it has just taken, for the
-// messages of the runs that wait on it: "<pid> <argv>", the record cmd's locks
-// keep. It is diagnostic only: a failure to write costs a clearer message and
-// nothing else, since the flock is what excludes.
-func writeOwner(f *os.File) {
-	if err := f.Truncate(0); err != nil {
-		return
-	}
-	if _, err := f.Seek(0, 0); err != nil {
-		return
-	}
-	fmt.Fprintf(f, "%d %s\n", os.Getpid(), strings.Join(os.Args, " "))
-}
-
-// ownerAt renders the holder recorded in the pull lock at path. Reading needs
-// no lock and races the holder's own write, so anything unexpected yields no
-// attribution rather than a guess.
-func ownerAt(path string) string {
-	f, err := os.Open(path)
-	if err != nil {
-		return ""
-	}
-	defer f.Close()
-	buf := make([]byte, 512)
-	n, _ := f.Read(buf)
-	return formatOwner(string(buf[:n]))
-}
-
-// formatOwner turns a recorded "<pid> <argv>" into a clause for a message
-// about the holder, or "" when there is nothing trustworthy to report.
-func formatOwner(content string) string {
-	line := strings.TrimSpace(strings.SplitN(content, "\n", 2)[0])
-	pid, argv, ok := strings.Cut(line, " ")
-	if !ok || pid == "" || strings.TrimSpace(argv) == "" {
-		return ""
-	}
-	for _, r := range pid {
-		if r < '0' || r > '9' {
-			return ""
-		}
-	}
-	return fmt.Sprintf(" (pid %s: %s)", pid, strings.TrimSpace(argv))
 }

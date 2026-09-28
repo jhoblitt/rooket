@@ -9,11 +9,11 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
-	"strings"
 	"sync"
 	"syscall"
 	"time"
 
+	"github.com/jhoblitt/rooket/internal/lockowner"
 	"github.com/jhoblitt/rooket/internal/run"
 )
 
@@ -87,11 +87,11 @@ func lockClusterIn(root, name string) (release func(), err error) {
 	if err != nil {
 		if errors.Is(err, errLockBusy) {
 			return nil, fmt.Errorf("cluster %q is locked by another rooket%s; wait for it to finish, "+
-				"or work on a different cluster with --name", name, lockOwnerAt(path))
+				"or work on a different cluster with --name", name, lockowner.At(path))
 		}
 		return nil, fmt.Errorf("lock cluster %q: %w", name, err)
 	}
-	writeLockOwner(f)
+	lockowner.Write(f)
 
 	l := &clusterLock{f: f, path: path}
 	held[name] = l
@@ -225,19 +225,6 @@ func clusterLockPath(root, name string) (string, error) {
 	return filepath.Join(root, name+".lock"), nil
 }
 
-// writeLockOwner records who holds the lock, for the message the next caller
-// gets. It is diagnostic only: a failure to write costs a clearer error and
-// nothing else, since the kernel's lock is what actually excludes.
-func writeLockOwner(f *os.File) {
-	if err := f.Truncate(0); err != nil {
-		return
-	}
-	if _, err := f.Seek(0, 0); err != nil {
-		return
-	}
-	fmt.Fprintf(f, "%d %s\n", os.Getpid(), strings.Join(os.Args, " "))
-}
-
 // errLockBusy reports that another process holds the lock, as opposed to the
 // lock file being unusable — the caller phrases those very differently.
 var errLockBusy = errors.New("lock is held by another process")
@@ -268,11 +255,11 @@ func LockPorts() (release func(), err error) {
 	if err != nil {
 		if errors.Is(err, errLockBusy) {
 			return nil, fmt.Errorf("another rooket has been allocating a registry port for over %s%s; "+
-				"if it is wedged, kill it and retry", portsLockWait, lockOwnerAt(path))
+				"if it is wedged, kill it and retry", portsLockWait, lockowner.At(path))
 		}
 		return nil, fmt.Errorf("lock registry port allocation: %w", err)
 	}
-	writeLockOwner(f)
+	lockowner.Write(f)
 	return func() { f.Close() }, nil
 }
 
@@ -359,34 +346,4 @@ func namesFile(path string, f *os.File) (bool, error) {
 		return false, err
 	}
 	return os.SameFile(open, now), nil
-}
-
-// lockOwnerAt renders the holder recorded in a lock file we failed to take.
-// Reading needs no lock and races the holder's own write, so anything
-// unexpected yields no attribution rather than a guess.
-func lockOwnerAt(path string) string {
-	f, err := os.Open(path)
-	if err != nil {
-		return ""
-	}
-	defer f.Close()
-	buf := make([]byte, 512)
-	n, _ := f.Read(buf)
-	return formatLockOwner(string(buf[:n]))
-}
-
-// formatLockOwner turns a lock file's recorded "<pid> <argv>" into a clause for
-// the busy error, or "" when there is nothing trustworthy to report.
-func formatLockOwner(content string) string {
-	line := strings.TrimSpace(strings.SplitN(content, "\n", 2)[0])
-	pid, argv, ok := strings.Cut(line, " ")
-	if !ok || pid == "" || strings.TrimSpace(argv) == "" {
-		return ""
-	}
-	for _, r := range pid {
-		if r < '0' || r > '9' {
-			return ""
-		}
-	}
-	return fmt.Sprintf(" (pid %s: %s)", pid, strings.TrimSpace(argv))
 }

@@ -232,19 +232,6 @@ func TestClusterLockFileRemovedByTheOutermostRelease(t *testing.T) {
 	}
 }
 
-func TestFormatLockOwner(t *testing.T) {
-	if got := formatLockOwner("4321 rooket up --workers 3\n"); got != " (pid 4321: rooket up --workers 3)" {
-		t.Errorf("formatLockOwner = %q", got)
-	}
-	// Anything unexpected yields no attribution rather than a guess: the read
-	// races the holder's own truncate-and-write.
-	for _, bad := range []string{"", "\n", "4321", "4321 ", "not-a-pid rooket up", "  "} {
-		if got := formatLockOwner(bad); got != "" {
-			t.Errorf("formatLockOwner(%q) = %q, want empty", bad, got)
-		}
-	}
-}
-
 // heldFile reports whether this process currently owns a cluster's lock.
 func heldFile(name string) (*os.File, bool) {
 	heldMu.Lock()

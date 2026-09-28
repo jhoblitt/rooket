@@ -408,19 +408,6 @@ func TestEnsureRecordsItselfWhileItPulls(t *testing.T) {
 	}
 }
 
-func TestFormatOwner(t *testing.T) {
-	if got := formatOwner("4321 rooket up --workers 3\n"); got != " (pid 4321: rooket up --workers 3)" {
-		t.Errorf("formatOwner = %q", got)
-	}
-	// Anything unexpected yields no attribution rather than a guess: the read
-	// races the holder's own truncate-and-write.
-	for _, bad := range []string{"", "\n", "4321", "4321 ", "not-a-pid rooket up", "  "} {
-		if got := formatOwner(bad); got != "" {
-			t.Errorf("formatOwner(%q) = %q, want empty", bad, got)
-		}
-	}
-}
-
 // syncBuffer is a bytes.Buffer the test can read while an Ensure writes it.
 type syncBuffer struct {
 	mu sync.Mutex
