@@ -167,8 +167,9 @@ func downAllRun(cmd *cobra.Command) error {
 		toLock = append(toLock, n)
 	}
 	// blocked marks clusters that another rooket holds, or that survived a
-	// failed delete: their disks may still be in use, so nothing downstream may
-	// zap, teardown, or remove their state.
+	// failed delete or no listing could show gone after it: their disks may
+	// still be in use, so nothing downstream may zap, teardown, or remove their
+	// state.
 	locks, blocked := lockSweep(os.Stdout, root, toLock)
 	defer locks.releaseAll()
 
@@ -236,8 +237,14 @@ func downAllRun(cmd *cobra.Command) error {
 				}
 			}
 			// Confirm the cluster is actually gone before anything truncates or
-			// removes its disks; a survivor still holding them must be left intact.
-			if stillLive(engs, n) {
+			// removes its disks; a survivor still holding them must be left
+			// intact, and so must one no listing could show gone.
+			switch live, err := stillLive(engs, n); {
+			case err != nil:
+				blockedByIdx[i] = true
+				run.Fprintf(w, "warning: could not tell whether cluster %q is gone (%v); leaving its disks and state alone\n", n, err)
+				return nil
+			case live:
 				blockedByIdx[i] = true
 				run.Fprintf(w, "warning: cluster %q is still present after delete; leaving its disks and state alone\n", n)
 				return nil
@@ -340,14 +347,27 @@ func engineNames(engs []engine.Engine) string {
 
 // stillLive reports whether a kind cluster is still present under any of the
 // given engines — used after a delete attempt to decide whether its disks are
-// safe to zap.
-func stillLive(engs []engine.Engine, name string) bool {
+// safe to zap. A listing that fails shows nothing either way, so unless another
+// engine lists the cluster it is an error, naming the engine, and never a "no":
+// the cluster may still be running on the disks.
+func stillLive(engs []engine.Engine, name string) (bool, error) {
+	var err error
 	for _, eng := range engs {
-		if ok, err := cluster.Exists(os.Stdout, eng, name); err == nil && ok {
-			return true
+		ok, listErr := cluster.Exists(os.Stdout, eng, name)
+		if listErr != nil {
+			listErr = fmt.Errorf("kind get clusters under %s: %w", eng, listErr)
+			if err == nil {
+				err = listErr
+			} else {
+				err = fmt.Errorf("%w; %w", err, listErr)
+			}
+			continue
+		}
+		if ok {
+			return true, nil
 		}
 	}
-	return false
+	return false, err
 }
 
 func init() {

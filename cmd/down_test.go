@@ -185,10 +185,17 @@ func statusLines(out string) []string {
 	return lines
 }
 
-// runDown runs down with args as its command line and returns what it
-// printed. Everything a run writes — down's flags, and the variables of the
-// delete and block teardown steps it hands work to — is restored afterwards.
+// runDown is runDownUnder podman.
 func runDown(t *testing.T, args ...string) (string, error) {
+	t.Helper()
+	return runDownUnder(t, engine.Podman, args...)
+}
+
+// runDownUnder runs down under eng with args as its command line and returns
+// what it printed. Everything a run writes — down's flags, and the variables
+// of the delete and block teardown steps it hands work to — is restored
+// afterwards.
+func runDownUnder(t *testing.T, eng engine.Engine, args ...string) (string, error) {
 	t.Helper()
 	if hostLIORoot() == lio.DefaultRoot {
 		t.Fatal("runDown without stubDownHost would read this machine's iSCSI configuration")
@@ -204,7 +211,7 @@ func runDown(t *testing.T, args ...string) (string, error) {
 		keep(t, p)
 	}
 	keep(t, &containerEngine)
-	containerEngine = engine.Podman
+	containerEngine = eng
 	// Deleting the cluster points $KUBECONFIG at it.
 	t.Setenv("KUBECONFIG", "")
 	t.Cleanup(func() {
@@ -640,6 +647,143 @@ func TestDownAllConfirmsAClusterGoneUnderTheEngineItNowRunsUnder(t *testing.T) {
 				t.Errorf("the state dir of %s went: %v", moved, err)
 			}
 		})
+	}
+}
+
+// checkLeftAlone fails t unless a run left a cluster's disks and state as they
+// were: its image's data, its kubeconfig kc, and its state dir, with no zap
+// and no target teardown in log.
+func checkLeftAlone(t *testing.T, log, dir, img, kc string) {
+	t.Helper()
+	for _, cmd := range []string{" images ", "targetcli "} {
+		if strings.Contains(log, cmd) {
+			t.Errorf("the run ran %q:\n%s", cmd, log)
+		}
+	}
+	if b, err := os.ReadFile(img); string(b) != osdData {
+		t.Errorf("the disk image holds %q (%v), want it untouched", b, err)
+	}
+	for _, p := range []string{dir, kc} {
+		if _, err := os.Stat(p); err != nil {
+			t.Errorf("%s went: %v", p, err)
+		}
+	}
+}
+
+// checkTornDown fails t unless a run went on to cluster name's disks: with
+// --delete-disks it tore down the targets of its one worker and removed its
+// state dir, and without it it zapped the image and removed the kubeconfig kc.
+func checkTornDown(t *testing.T, log, name, dir, img, kc string, deleteDisks bool) {
+	t.Helper()
+	if deleteDisks {
+		if got, want := deletedTargets(log), workerTargets(name, 0); !slices.Equal(got, want) {
+			t.Errorf("deleted targets %v, want %v", got, want)
+		}
+		if _, err := os.Stat(dir); !os.IsNotExist(err) {
+			t.Errorf("the state dir survived (stat: %v)", err)
+		}
+		return
+	}
+	if b, err := os.ReadFile(img); err != nil || string(b) == osdData {
+		t.Errorf("the disk image holds %q (%v), want it zapped", b, err)
+	}
+	if _, err := os.Stat(kc); !os.IsNotExist(err) {
+		t.Errorf("the kubeconfig survived (stat: %v)", err)
+	}
+}
+
+// A delete that fails still lets down go on once a listing under the run's
+// engine shows the cluster gone. A listing that fails shows nothing: the
+// cluster may still be running on its disks, so down stops, naming the engine
+// and what failed, before it removes the kubeconfig, zaps the images, or tears
+// down the targets and the state dir.
+func TestDownGoesOnOnlyOnceAListingShowsTheClusterGone(t *testing.T) {
+	const name = "y7-unlisted"
+	for _, eng := range []engine.Engine{engine.Podman, engine.Docker} {
+		for _, listingFails := range []bool{true, false} {
+			for _, args := range [][]string{nil, {"--delete-disks"}} {
+				t.Run(fmt.Sprintf("%s, listing fails %v, %v", eng, listingFails, args), func(t *testing.T) {
+					t.Setenv("HOME", t.TempDir())
+					h := downHost{docker: true, kindDeleteFails: true}
+					if listingFails {
+						h.kindFailsFrom = map[engine.Engine]int{eng: 1}
+					}
+					log := stubDownHost(t, h)
+					if err := writeShape(name, clusterShape{Workers: 1, DiskCount: 1, IQNDate: "2003-01"}); err != nil {
+						t.Fatal(err)
+					}
+					dir, img := writeOSDImage(t, name)
+					kc := writeKubeconfig(t, name)
+
+					_, err := runDownUnder(t, eng, append([]string{"--name", name}, args...)...)
+					got := calls(t, log)
+					if !listingFails {
+						if err != nil {
+							t.Fatalf("down %v under %s = %v, want success", args, eng, err)
+						}
+						checkTornDown(t, got, name, dir, img, kc, len(args) > 0)
+						return
+					}
+					if want := fmt.Sprintf("kind get clusters under %s: exit status 1", eng); err == nil || !strings.Contains(err.Error(), want) {
+						t.Errorf("down %v under %s = %v, want it to stop naming %q", args, eng, err, want)
+					}
+					checkLeftAlone(t, got, dir, img, kc)
+				})
+			}
+		}
+	}
+}
+
+// down --all deletes each cluster it holds and confirms it gone before it
+// touches the cluster's disks, and a listing that answers without the cluster
+// confirms it. A listing that fails confirms nothing: the cluster may still be
+// running on its disks, so the sweep leaves its kubeconfig, images, targets,
+// and state dir alone, says which engine failed and how, and fails naming the
+// cluster.
+func TestDownAllGoesOnOnlyOnceAListingShowsTheClusterGone(t *testing.T) {
+	const name = "y7-unconfirmed"
+	for _, eng := range []engine.Engine{engine.Podman, engine.Docker} {
+		for _, listingFails := range []bool{true, false} {
+			for _, args := range [][]string{nil, {"--delete-disks"}} {
+				t.Run(fmt.Sprintf("%s, listing fails %v, %v", eng, listingFails, args), func(t *testing.T) {
+					t.Setenv("HOME", t.TempDir())
+					h := downHost{docker: true}
+					if eng == engine.Docker {
+						h.dockerLive = []string{name}
+					} else {
+						h.live = []string{name}
+					}
+					if listingFails {
+						// The scan and the re-check under the locks are the
+						// first two listings; the third is confirm-gone's.
+						h.kindFailsFrom = map[engine.Engine]int{eng: 3}
+					}
+					log := stubDownHost(t, h)
+					dir, img := writeOSDImage(t, name)
+					kc := writeKubeconfig(t, name)
+
+					out, err := runDown(t, append([]string{"--all", "--force"}, args...)...)
+					got := calls(t, log)
+					if want := fmt.Sprintf("KIND_EXPERIMENTAL_PROVIDER=%s kind delete cluster --name %s\n", eng, name); !strings.Contains(got, want) {
+						t.Fatalf("down --all %v never deleted %s under %s:\n%s", args, name, eng, got)
+					}
+					if !listingFails {
+						if err != nil {
+							t.Fatalf("down --all %v = %v, want success", args, err)
+						}
+						checkTornDown(t, got, name, dir, img, kc, len(args) > 0)
+						return
+					}
+					if err == nil || !strings.Contains(err.Error(), name) {
+						t.Errorf("down --all %v = %v, want it to fail naming %s", args, err, name)
+					}
+					if want := fmt.Sprintf("kind get clusters under %s: exit status 1", eng); !strings.Contains(out, want) {
+						t.Errorf("down --all %v printed\n%s\nwant it to say %q", args, out, want)
+					}
+					checkLeftAlone(t, got, dir, img, kc)
+				})
+			}
+		}
 	}
 }
 
