@@ -268,6 +268,81 @@ at HEALTH_WARN. `rooket up --wait` runs the same wait after deploying, with
 `--wait-timeout` in place of `--timeout`. See `rooket wait --help` for the
 exact rules.
 
+### Testing a custom Ceph image
+
+To test a modified Ceph — a patched `radosgw`, a debug build, extra tools —
+build an image on a Ceph release image and point `cephImage` at it. The nodes
+pull it from the cluster's own registry, which exists only once the cluster
+does, so bring the cluster up without deploying, load the image, then deploy:
+
+```dockerfile
+# ceph-custom/Containerfile
+FROM quay.io/ceph/ceph:v20.2.4
+# built from the v20.2.4 source, on CentOS Stream 9 like the image
+COPY radosgw /usr/bin/radosgw
+```
+
+```yaml
+# harness/values/rook-ceph-cluster.yaml
+cephImage:
+  repository: localhost:5099/ceph-custom
+  tag: dev1
+```
+
+```console
+$ export ROOKET_NAME=ceph-dev
+$ rooket up --rook-version v1.20.7 --workers 1 --config-dir ./harness \
+    --registry-port 5099 --skip-deploy
+$ podman build -t localhost/ceph-custom:dev1 ./ceph-custom
+$ rooket load localhost/ceph-custom:dev1   # pushes localhost:5099/ceph-custom:dev1
+$ rooket deploy
+$ rooket wait
+```
+
+`--registry-port` asks for the registry's host port, which the values file has
+to name; without it, rooket picks one from 5001 up. If the port asked for is
+taken, `up` picks another and says so, and the reference `rooket load` prints
+is the one to use: the nodes reach the registry as `localhost:<port>`, so it
+goes into `cephImage` as it is. A cluster keeps the port it was created with,
+which is why the example creates a new one, `ceph-dev`. It also records the
+Rook version and the configuration directory, so `deploy` needs none of them
+again. `load` tags and pushes with the container engine rooket runs on (see
+"Prerequisites"), so build the image with that one.
+
+The Ceph daemons and the toolbox all run the image, so the toolbox's `ceph`
+and `radosgw-admin` are the custom ones. The object store's realm, zonegroup,
+and zone are still written by the operator image's Ceph, as described above.
+
+Rook takes the Ceph version from the image's `ceph --version`, not from its
+tag, and deploys no daemons from an image whose output does not read
+`ceph version <major>.<minor>.<patch>`. The version rules above apply to what
+it reads.
+
+To try another build, load it under a new tag, set that tag in the values
+file, and run `rooket deploy` again:
+
+```console
+$ podman build -t localhost/ceph-custom:dev2 ./ceph-custom
+$ rooket load localhost/ceph-custom:dev2
+$ $EDITOR harness/values/rook-ceph-cluster.yaml   # tag: dev2
+$ rooket deploy
+$ rooket k -n rook-ceph get pods \
+    -o 'custom-columns=NAME:.metadata.name,IMAGE:.spec.containers[0].image'
+```
+
+Rook then restarts the daemons on the new image, even with the Ceph version
+unchanged, but `rooket wait` does not wait for that: it checks that the
+cluster is ready, not which image it runs, so it can return before any daemon
+has moved. Repeat the last command until every Ceph pod shows the new tag and
+none shows the old one, then run `rooket wait` again.
+
+Loading a new build over the tag the cluster already runs does not work: the
+values do not change, so nothing restarts, and a pod that restarts anyway
+keeps its node's copy of the old build, since the Ceph pods pull
+`IfNotPresent` by default. Only a pod that lands on a node without the tag
+gets the new build, so a cluster with several workers can end up running
+both.
+
 ## Clusters and state
 
 Each rook clone gets its own cluster. The cluster name is derived from the
