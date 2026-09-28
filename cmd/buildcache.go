@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/jhoblitt/rooket/internal/lockowner"
 	"github.com/jhoblitt/rooket/internal/run"
 )
 
@@ -141,17 +142,17 @@ func lockBuildCacheIn(out io.Writer, root, dir string) (*buildCache, func(), err
 	path := buildCacheLockPath(root, clone)
 	f, err := acquireFlock(path, 0)
 	if errors.Is(err, errLockBusy) {
-		run.Fprintf(out, "==> waiting for another rooket building in %s%s\n", dir, lockOwnerAt(path))
+		run.Fprintf(out, "==> waiting for another rooket building in %s%s\n", dir, lockowner.At(path))
 		f, err = acquireFlock(path, cloneLockWait)
 	}
 	if err != nil {
 		if errors.Is(err, errLockBusy) {
 			return nil, nil, fmt.Errorf("another rooket has been building in %s for over %s%s; "+
-				"if it is wedged, kill it and retry", dir, cloneLockWait, lockOwnerAt(path))
+				"if it is wedged, kill it and retry", dir, cloneLockWait, lockowner.At(path))
 		}
 		return nil, nil, fmt.Errorf("lock the build cache for %s: %w", dir, err)
 	}
-	writeLockOwner(f)
+	lockowner.Write(f)
 	return &buildCache{dir: cacheDir, clone: clone}, func() { f.Close() }, nil
 }
 

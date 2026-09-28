@@ -27,7 +27,6 @@ var (
 	deployHelmEnv      []string
 	deployWorkers      int
 	deployDiskCount    int
-	deployDiskSizeGB   int
 	deployIQNDate      string
 	deployWith         []string
 	deployWithOnly     []string
@@ -67,9 +66,12 @@ Example:
 		if err := installRookCephOperator(src, active); err != nil {
 			return err
 		}
-		// rook-ceph-cluster's CRs (CephCluster, pools, object store, ...) need
-		// the operator running to reconcile them, so cluster waits on the
-		// operator install (invariant 1).
+		// rook-ceph-cluster's CRs (CephCluster, pools, object store, ...) are
+		// of kinds whose CRDs the operator chart installs, and helm fails a
+		// release naming a kind the apiserver does not serve, so cluster waits
+		// on the operator install (invariant 1). That install does not --wait,
+		// so the operator need not be running yet; it reconciles the CRs
+		// whenever it comes up.
 		if err := installRookCephCluster(src, active); err != nil {
 			return err
 		}
@@ -187,6 +189,9 @@ type rookSource struct {
 // see the same selection even if the configuration home's config.yaml
 // changes mid-deploy.
 func deploySetup(cmd *cobra.Command) (rookSource, []profiles.Profile, func(), error) {
+	if err := checkShapeFlags(cmd, 1); err != nil {
+		return rookSource{}, nil, nil, err
+	}
 	versionSet := cmd.Flags().Changed("rook-version")
 	name, err := useClusterOrDir(deployName, deployDir, versionSet)
 	if err != nil {
@@ -586,7 +591,10 @@ func init() {
 	pf.StringVar(&deployName, "name", "", "kind cluster name (for node-name and iSCSI by-path derivation)")
 	pf.IntVar(&deployWorkers, "workers", 3, "worker node count for per-node OSD device pinning; unset, the cluster's recorded value, which a set flag must match")
 	pf.IntVar(&deployDiskCount, "disk-count", 1, "iSCSI disks per worker, 0 disables OSD device pinning; unset, the cluster's recorded value, which a set flag must match")
-	pf.IntVar(&deployDiskSizeGB, "disk-size", 10, "disk size in GiB (matches 'rooket block setup')")
+	// Kept so a script passing it still runs. deploy never read it: 'rooket
+	// block setup' is what sizes the disks.
+	pf.Int("disk-size", 10, "disk size in GiB; no effect")
+	_ = pf.MarkDeprecated("disk-size", "it has no effect on deploy")
 	pf.StringVar(&deployIQNDate, "iqn-date", "2003-01", "IQN date component (YYYY-MM); unset, the cluster's recorded value, which a set flag must match")
 	pf.StringArrayVar(&deployWith, "with", nil, "profile to enable, by name or by directory path (./dir), in addition to the configuration home's sticky list (repeatable)")
 	pf.StringArrayVar(&deployWithOnly, "with-only", nil, "profile to enable, by name or by directory path (./dir), replacing the configuration home's sticky list (repeatable)")

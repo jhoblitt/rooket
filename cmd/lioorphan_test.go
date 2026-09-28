@@ -4,6 +4,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -187,6 +188,29 @@ func TestLIORepairStepsQuoteOperands(t *testing.T) {
 	script := renderScript(steps)
 	if !strings.Contains(script, "'c-worker0-disk0; touch /tmp/pwned'") {
 		t.Errorf("operand not single-quoted in script:\n%s", script)
+	}
+}
+
+// Block setup reads the host's iSCSI configuration through hostLIORoot, as down
+// does, so a test hands it one and none depends on the machine's own.
+func TestLIORepairPreflightReadsTheStubbedHost(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	keep(t, &hostLIORoot)
+	lioRoot := writeFakeLIO(t, map[string]string{
+		"c-worker3-disk0": filepath.Join(t.TempDir(), "gone", "worker3-disk0.img"),
+	})
+	hostLIORoot = func() string { return lioRoot }
+
+	steps, err := lioRepairPreflight(io.Discard, needsCreate)
+	if err != nil {
+		t.Fatalf("lioRepairPreflight: %v", err)
+	}
+	var argvs []string
+	for _, s := range steps {
+		argvs = append(argvs, strings.Join(s.argv, " "))
+	}
+	if want := "targetcli /backstores/fileio delete c-worker3-disk0"; !slices.Contains(argvs, want) {
+		t.Errorf("steps = %q, want the stubbed host's orphan removed with %q", argvs, want)
 	}
 }
 

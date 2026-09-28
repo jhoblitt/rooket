@@ -84,6 +84,9 @@ Example:
 		if err := checkUpWaitFlags(upWait, cmd.Flags().Changed("wait-timeout"), upWaitTimeout); err != nil {
 			return err
 		}
+		if err := checkShapeFlags(cmd, 1); err != nil {
+			return err
+		}
 		name, err := useClusterOrRookDir(upName, upRookDir, cmd.Flags().Changed("rook-version"))
 		if err != nil {
 			return err
@@ -200,7 +203,6 @@ Example:
 			deployName = upName
 			deployWorkers = upWorkers
 			deployDiskCount = upDiskCount
-			deployDiskSizeGB = upDiskSizeGB
 			deployIQNDate = upIQNDate
 			applyUpValueFlags(cmd.Flags().Changed("with-only"))
 			if err := deployCmd.RunE(deployCmd, nil); err != nil {

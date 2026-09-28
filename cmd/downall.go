@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"text/tabwriter"
@@ -14,7 +15,6 @@ import (
 
 	"github.com/jhoblitt/rooket/internal/cluster"
 	"github.com/jhoblitt/rooket/internal/engine"
-	"github.com/jhoblitt/rooket/internal/lio"
 	"github.com/jhoblitt/rooket/internal/registry"
 	"github.com/jhoblitt/rooket/internal/run"
 )
@@ -115,11 +115,7 @@ func downAllRun(cmd *cobra.Command) error {
 	for _, n := range names {
 		liveCol := "-"
 		if engs := live[n]; len(engs) > 0 {
-			ss := make([]string, len(engs))
-			for i, e := range engs {
-				ss[i] = e.String()
-			}
-			liveCol = strings.Join(ss, ",")
+			liveCol = engineNames(engs)
 		}
 		dirCol := "-"
 		if hasState[n] {
@@ -152,10 +148,69 @@ func downAllRun(cmd *cobra.Command) error {
 		}
 	}
 
-	// blocked marks clusters that survived a failed delete, or that another
-	// rooket holds: their disks may still be in use, so nothing downstream may
-	// zap, teardown, or remove their state.
-	//
+	// Every cluster the sweep will touch is locked before anything of any of
+	// them is removed, and stays locked until the sweep is done with it (see
+	// lockSweep). A cluster with no kind cluster may be an up that has not
+	// created it yet, and one released after its delete could be taken by an
+	// up before the batched teardown below reached its targets. A cluster
+	// someone else is working on is skipped rather than failing the sweep — the
+	// point of --all is to clear whatever it can.
+	tearDownDisks := downDeleteDisks && !downSkipBlock
+	var toLock []string
+	for _, n := range names {
+		// A cluster with only a state dir is touched only by the disk teardown,
+		// and one whose name LockCluster refuses has no lock anyone could hold,
+		// so it goes unlocked.
+		if len(live[n]) == 0 && (!tearDownDisks || validateClusterName(n) != nil) {
+			continue
+		}
+		toLock = append(toLock, n)
+	}
+	// blocked marks clusters that another rooket holds, or that survived a
+	// failed delete or no listing could show gone after it: their disks may
+	// still be in use, so nothing downstream may zap, teardown, or remove their
+	// state.
+	locks, blocked := lockSweep(os.Stdout, root, toLock)
+	defer locks.releaseAll()
+
+	// The scan's view of a cluster may be stale by the time the sweep holds it:
+	// a down and an up that ran to completion in between leave nothing in the
+	// lock to show for it. The cluster may have gained a kind cluster since, or
+	// been brought back up under the other engine, where a delete and a
+	// confirm-gone asked of the scan's engines would find nothing; either way
+	// the zap or the batched teardown would then reach disks its nodes use. So
+	// every held cluster is asked again, with the scan's own probe, and is
+	// deleted, confirmed gone, and zapped by that answer. Held, it cannot come
+	// up or move after it.
+	var held []string
+	for _, n := range toLock {
+		if !blocked[n] {
+			held = append(held, n)
+		}
+	}
+	if len(held) > 0 {
+		now, consulted, failed := liveClusters()
+		if len(consulted) == 0 || len(failed) > 0 {
+			unqueried := "no container engine"
+			if len(failed) > 0 {
+				unqueried = engineNames(failed)
+			}
+			return fmt.Errorf("cannot check again which clusters are live (%s could not be queried); nothing was torn down", unqueried)
+		}
+		for _, n := range held {
+			was, is := live[n], now[n]
+			switch {
+			case len(was) == 0 && len(is) > 0:
+				run.Printf("cluster %q came up since the sweep looked; deleting it as a live cluster\n", n)
+			case len(is) == 0 && len(was) > 0:
+				run.Printf("cluster %q went down since the sweep looked\n", n)
+			case !slices.Equal(was, is):
+				run.Printf("cluster %q is now live under %s, not %s; deleting it there\n", n, engineNames(is), engineNames(was))
+			}
+			live[n] = is
+		}
+	}
+
 	// The clusters share no kind cluster, registry, or disk, so they are deleted
 	// concurrently — N deletes cost roughly one delete's wallclock, not N — with
 	// each cluster's blocked-ness recorded into its own slot and merged after the
@@ -168,21 +223,9 @@ func downAllRun(cmd *cobra.Command) error {
 	for i, n := range names {
 		delFns[i] = func(w io.Writer) error {
 			engs := live[n]
-			if len(engs) == 0 {
+			if len(engs) == 0 || blocked[n] {
 				return nil
 			}
-			// Each cluster is taken and released on its own. A sweep that held
-			// every lock at once would need an ordering to stay deadlock-free,
-			// and these run concurrently. A cluster someone else is working on
-			// is skipped rather than failing the sweep — the point of --all is
-			// to clear whatever it can.
-			release, err := LockCluster(n)
-			if err != nil {
-				blockedByIdx[i] = true
-				run.Fprintf(w, "warning: skipping cluster %q: %v\n", n, err)
-				return nil
-			}
-			defer release()
 			run.Fprintf(w, "==> deleting cluster %q\n", n)
 			kc, _ := kubeconfigPath(n)
 			for _, eng := range engs {
@@ -194,8 +237,14 @@ func downAllRun(cmd *cobra.Command) error {
 				}
 			}
 			// Confirm the cluster is actually gone before anything truncates or
-			// removes its disks; a survivor still holding them must be left intact.
-			if stillLive(engs, n) {
+			// removes its disks; a survivor still holding them must be left
+			// intact, and so must one no listing could show gone.
+			switch live, err := stillLive(engs, n); {
+			case err != nil:
+				blockedByIdx[i] = true
+				run.Fprintf(w, "warning: could not tell whether cluster %q is gone (%v); leaving its disks and state alone\n", n, err)
+				return nil
+			case live:
 				blockedByIdx[i] = true
 				run.Fprintf(w, "warning: cluster %q is still present after delete; leaving its disks and state alone\n", n)
 				return nil
@@ -218,21 +267,20 @@ func downAllRun(cmd *cobra.Command) error {
 	if err := runConcurrent(os.Stdout, delFns...); err != nil {
 		return err
 	}
-	blocked := map[string]bool{}
 	for i, n := range names {
 		if blockedByIdx[i] {
 			blocked[n] = true
 		}
 	}
 
-	if downDeleteDisks && !downSkipBlock {
+	if tearDownDisks {
 		var disks []iscsiDisk
 		for _, n := range names {
 			// --all rejects --workers/--disk-count, so there are no per-cluster
 			// counts to name a grid from: each cluster's disks come from its
 			// state dir and from what the kernel still holds for it.
 			if !blocked[n] {
-				disks = append(disks, teardownDisks(lio.DefaultRoot, n, filepath.Join(root, n), downIQNDate, 0, 0)...)
+				disks = append(disks, teardownDisks(hostLIORoot(), n, filepath.Join(root, n), downIQNDate, 0, 0)...)
 			}
 		}
 		if len(disks) > 0 {
@@ -246,32 +294,24 @@ func downAllRun(cmd *cobra.Command) error {
 			if !hasState[n] || blocked[n] {
 				continue
 			}
-			// Taken so that a cluster another rooket is working on keeps its
-			// state, and so that the lock file can go with it: only its holder
-			// may delete one. A directory whose name LockCluster refuses has
-			// no lock anyone could hold, and goes unlocked.
-			release := func() {}
-			if validateClusterName(n) == nil {
-				locked, err := LockCluster(n)
-				if err != nil {
-					blocked[n] = true
-					run.Printf("warning: keeping the state dir of cluster %q: %v\n", n, err)
-					continue
-				}
-				release = locked
-			}
 			dir := filepath.Join(root, n)
 			if err := os.RemoveAll(dir); err != nil {
 				run.Printf("warning: remove state dir %s: %v\n", dir, err)
 			} else {
 				run.Printf("removed state dir %s\n", dir)
-				removeClusterLockOnRelease(n)
 			}
-			release()
 		}
 	} else if downDeleteDisks {
 		run.Printf("block teardown skipped by --skip-block; disk images and state dirs preserved\n")
 	}
+	var tornDown []string
+	for _, n := range names {
+		if !blocked[n] {
+			tornDown = append(tornDown, n)
+		}
+	}
+	removeStatelessLockFiles(root, tornDown)
+	locks.releaseAll()
 
 	// Safe to run even with clusters left behind: the cache is a soft
 	// dependency, so a node that outlives it falls back to pulling upstream.
@@ -295,16 +335,39 @@ func downAllRun(cmd *cobra.Command) error {
 	return nil
 }
 
+// engineNames renders engines as a comma-separated list, as down --all's table
+// shows where a cluster is live.
+func engineNames(engs []engine.Engine) string {
+	ss := make([]string, len(engs))
+	for i, e := range engs {
+		ss[i] = e.String()
+	}
+	return strings.Join(ss, ",")
+}
+
 // stillLive reports whether a kind cluster is still present under any of the
 // given engines — used after a delete attempt to decide whether its disks are
-// safe to zap.
-func stillLive(engs []engine.Engine, name string) bool {
+// safe to zap. A listing that fails shows nothing either way, so unless another
+// engine lists the cluster it is an error, naming the engine, and never a "no":
+// the cluster may still be running on the disks.
+func stillLive(engs []engine.Engine, name string) (bool, error) {
+	var err error
 	for _, eng := range engs {
-		if ok, err := cluster.Exists(os.Stdout, eng, name); err == nil && ok {
-			return true
+		ok, listErr := cluster.Exists(os.Stdout, eng, name)
+		if listErr != nil {
+			listErr = fmt.Errorf("kind get clusters under %s: %w", eng, listErr)
+			if err == nil {
+				err = listErr
+			} else {
+				err = fmt.Errorf("%w; %w", err, listErr)
+			}
+			continue
+		}
+		if ok {
+			return true, nil
 		}
 	}
-	return false
+	return false, err
 }
 
 func init() {

@@ -74,7 +74,7 @@ func deleteClusterAndZap(out io.Writer, name string, zap bool) error {
 		// live cluster. Only continue if the cluster is confirmed gone.
 		exists, exErr := cluster.Exists(out, containerEngine, name)
 		if exErr != nil {
-			return fmt.Errorf("delete cluster %q: %w; could not verify it was removed (%v), so not zapping its disks", name, err, exErr)
+			return fmt.Errorf("delete cluster %q: %w; could not tell whether it is gone (kind get clusters under %s: %v), so not zapping its disks", name, err, containerEngine, exErr)
 		}
 		if exists {
 			return fmt.Errorf("delete cluster %q: %w; cluster still present, not zapping its disks", name, err)

@@ -209,11 +209,17 @@ func TestValuesEditMultiChartFailureNamesChartAndNotesEarlierSaves(t *testing.T)
 	t.Setenv("VISUAL", "")
 	t.Setenv("EDITOR", script)
 
-	silenced := valuesEditCmd.SilenceUsage
+	prevValuesDir, silenced := valuesDir, valuesEditCmd.SilenceUsage
 	t.Cleanup(func() {
 		valuesEditCmd.SilenceUsage = silenced
 		rootCmd.SetArgs(nil)
 		rootCmd.SetOut(nil)
+		dirFlag := valuesCmd.PersistentFlags().Lookup("dir")
+		_ = dirFlag.Value.Set(dirFlag.DefValue)
+		dirFlag.Changed = false
+		// Last, since resetting "dir" above writes valuesDir through its
+		// bound flag.Value; this restore must win.
+		valuesDir = prevValuesDir
 	})
 	rootCmd.SetArgs([]string{"values", "edit", "--dir", dir})
 	err := rootCmd.Execute()

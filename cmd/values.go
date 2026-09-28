@@ -90,8 +90,8 @@ func valuesWorkerCount(cmd *cobra.Command) (int, error) {
 	if !cmd.Flags().Changed("workers") {
 		return 0, nil
 	}
-	if valuesWorkers < 1 {
-		return 0, fmt.Errorf("--workers must be more than 0, not %d", valuesWorkers)
+	if err := checkShapeFlags(cmd, 1); err != nil {
+		return 0, err
 	}
 	return valuesWorkers, nil
 }

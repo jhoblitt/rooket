@@ -32,15 +32,25 @@ var createCmd = &cobra.Command{
 
   1. Locate iSCSI block devices set up by 'rooket block setup' and bind-mount
      them — together with /run/udev, which ceph-volume needs to inventory the
-     disks — into each worker node via the kind config.
+     disks, and /dev/disk, whose by-path links Rook pins OSDs to — into each
+     worker node via the kind config.
   2. Create the kind cluster (via the selected engine's kind provider). An
      existing cluster whose nodes are stopped — the usual state after a host
-     reboot — is started again when its OSD device bindings still match the
-     disks resolved in step 1. If they no longer match, that cluster CANNOT be
-     resumed and is deleted and recreated, which wipes its OSD disks; every
-     other unusable state is reported so you can decide.
-  3. Prepare every node: remount /sys read-write and install lvm2 and cryptsetup,
-     which Rook needs to provision LVM-backed and encrypted OSDs.
+     reboot — is started again when this run asks for the worker count it
+     was created with and its OSD device bindings still match the disks
+     resolved in step 1. If not, that cluster CANNOT be resumed and is
+     deleted and recreated, which wipes its OSD disks; every other unusable
+     state is reported so you can decide.
+  3. Prepare every node: remount /sys read-write, raise systemd's
+     DefaultTasksMax so a pod's thread pool (notably rgw's) is not capped at
+     a node-derived default, and install lvm2 and cryptsetup, which Rook
+     needs to provision LVM-backed and encrypted OSDs. Then prune the node's
+     /dev to an allowlist plus its own OSD disks, so neither the node nor its
+     pods can open the host's disks and hardware or another worker's disk,
+     and Rook adopts no other node's disk as an OSD. Last, pre-create
+     /dev/rbdN device nodes (best effort) for ceph-csi to mount RBD volumes
+     through: the kernel creates them only in the host's /dev, which a node
+     does not see.
   4. Start a local OCI registry container (zot, the same image as the shared
      cache) joined to the kind network, bound to localhost:<registry-port> on
      the host. The registry must be created after the cluster so that the
@@ -60,6 +70,9 @@ the registry and the cache, and must not exec into a node while step 3 does.
 Run 'rooket block setup' before 'rooket cluster create' to prepare block devices.
 `,
 	RunE: func(cmd *cobra.Command, args []string) error {
+		if err := checkShapeFlags(cmd, 1); err != nil {
+			return err
+		}
 		name, err := useCluster(createName)
 		if err != nil {
 			return err

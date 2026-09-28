@@ -3,13 +3,18 @@ package cmd
 import (
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
+	"maps"
 	"os"
 	"path/filepath"
-	"strings"
+	"slices"
 	"sync"
 	"syscall"
 	"time"
+
+	"github.com/jhoblitt/rooket/internal/lockowner"
+	"github.com/jhoblitt/rooket/internal/run"
 )
 
 // held records the cluster locks this process already owns.
@@ -82,11 +87,11 @@ func lockClusterIn(root, name string) (release func(), err error) {
 	if err != nil {
 		if errors.Is(err, errLockBusy) {
 			return nil, fmt.Errorf("cluster %q is locked by another rooket%s; wait for it to finish, "+
-				"or work on a different cluster with --name", name, lockOwnerAt(path))
+				"or work on a different cluster with --name", name, lockowner.At(path))
 		}
 		return nil, fmt.Errorf("lock cluster %q: %w", name, err)
 	}
-	writeLockOwner(f)
+	lockowner.Write(f)
 
 	l := &clusterLock{f: f, path: path}
 	held[name] = l
@@ -111,15 +116,90 @@ func lockClusterIn(root, name string) (release func(), err error) {
 
 // removeClusterLockOnRelease has the release of this process's lock on a
 // cluster delete the lock file as well, for a run that leaves nothing of the
-// cluster behind. The deletion waits for the release that actually lets go, a
-// nested one staying a no-op, and nothing happens unless this process holds the
-// lock: only the holder may delete a lock file, and only as it lets go (see
-// acquireFlock).
+// cluster in the state root. The deletion waits for the release that actually
+// lets go, a nested one staying a no-op, and nothing happens unless this
+// process holds the lock: only the holder may delete a lock file, and only as
+// it lets go (see acquireFlock).
 func removeClusterLockOnRelease(name string) {
 	heldMu.Lock()
 	defer heldMu.Unlock()
 	if l, ok := held[name]; ok {
 		l.remove = true
+	}
+}
+
+// lockSweep takes the locks of a sweep over many clusters (down --all, prune):
+// every named cluster's, under root, before the sweep removes anything of any
+// of them, to be held until it is done with them all. The lock is the only sign
+// that another rooket is using a cluster, and it says so only while that rooket
+// holds it, so a sweep that took a cluster's lock after tearing anything of it
+// down, or let go before its last step, could remove what an up in flight had
+// just built. A cluster whose lock cannot be taken — another rooket holds it,
+// say — is reported on out and returned in skipped, and the sweep must touch
+// nothing of it.
+//
+// What the sweep decided before it held a lock is only as current as the scan
+// it came from: a rooket that ran to completion in between changed the cluster
+// without the lock ever showing it. So a sweep asks its questions of a held
+// cluster again before acting on them. prune lets go at once of a cluster it
+// no longer means to touch; down --all keeps every lock it took until it is
+// done, even that of a cluster that went down since the scan.
+//
+// Holding any number of these at once cannot deadlock. Every cluster lock in
+// rooket is taken through lockClusterIn, which only ever tries it: a rooket
+// that finds one held gives up at once rather than wait (acquireFlock's loop
+// with no wait re-opens only a file deleted under it, and never waits for a
+// holder). With no one ever waiting for a cluster lock, no cycle of waits can
+// pass through one, whatever else its holders wait on. Two sweeps at once each
+// take what is free and skip the rest, splitting the clusters between them.
+func lockSweep(out io.Writer, root string, names []string) (locks *sweepLocks, skipped map[string]bool) {
+	locks = &sweepLocks{releases: map[string]func(){}}
+	skipped = map[string]bool{}
+	for _, n := range names {
+		release, err := lockClusterIn(root, n)
+		if err != nil {
+			skipped[n] = true
+			run.Fprintf(out, "warning: skipping cluster %q: %v\n", n, err)
+			continue
+		}
+		locks.releases[n] = release
+	}
+	return locks, skipped
+}
+
+// sweepLocks is the cluster locks one sweep holds; see lockSweep.
+type sweepLocks struct {
+	releases map[string]func()
+}
+
+// release lets go of one cluster's lock, if the sweep holds it.
+func (s *sweepLocks) release(name string) {
+	if release, ok := s.releases[name]; ok {
+		delete(s.releases, name)
+		release()
+	}
+}
+
+// releaseAll lets go of every lock the sweep still holds; a second call does
+// nothing.
+func (s *sweepLocks) releaseAll() {
+	for _, n := range slices.Sorted(maps.Keys(s.releases)) {
+		s.release(n)
+	}
+}
+
+// removeStatelessLockFiles has the release of each named cluster's lock delete
+// the lock file too, if the cluster has no state dir under root. It is for a
+// sweep that tore the clusters down, and decides under their locks: one left
+// with no state dir, whether the sweep removed it or the cluster never had
+// one, has nothing in the state root for its lock file to stand beside.
+// removeClusterLockOnRelease does nothing for a cluster the sweep does not
+// hold.
+func removeStatelessLockFiles(root string, names []string) {
+	for _, n := range names {
+		if _, err := os.Stat(filepath.Join(root, n)); os.IsNotExist(err) {
+			removeClusterLockOnRelease(n)
+		}
 	}
 }
 
@@ -132,8 +212,10 @@ func removeClusterLockOnRelease(name string) {
 // acquireFlock's check while the holder was still at work, leaving two runs
 // each convinced it holds the cluster.
 //
-// Only down and prune delete a lock file: with the cluster's state dir, or, for
-// down, on finding nothing of the cluster at all. A leftover is harmless:
+// Only down and prune delete a lock file: with the cluster's state dir, or when
+// the cluster has none — down on finding nothing of it at all, 'down --all' on
+// deleting a live cluster that never had one, and prune on tearing down the
+// iSCSI targets a cluster left with no state dir. A leftover is harmless:
 // stateDirNames only counts directories, so it is invisible to 'list',
 // 'down --all', and 'prune'.
 func clusterLockPath(root, name string) (string, error) {
@@ -141,19 +223,6 @@ func clusterLockPath(root, name string) (string, error) {
 		return "", err
 	}
 	return filepath.Join(root, name+".lock"), nil
-}
-
-// writeLockOwner records who holds the lock, for the message the next caller
-// gets. It is diagnostic only: a failure to write costs a clearer error and
-// nothing else, since the kernel's lock is what actually excludes.
-func writeLockOwner(f *os.File) {
-	if err := f.Truncate(0); err != nil {
-		return
-	}
-	if _, err := f.Seek(0, 0); err != nil {
-		return
-	}
-	fmt.Fprintf(f, "%d %s\n", os.Getpid(), strings.Join(os.Args, " "))
 }
 
 // errLockBusy reports that another process holds the lock, as opposed to the
@@ -186,11 +255,11 @@ func LockPorts() (release func(), err error) {
 	if err != nil {
 		if errors.Is(err, errLockBusy) {
 			return nil, fmt.Errorf("another rooket has been allocating a registry port for over %s%s; "+
-				"if it is wedged, kill it and retry", portsLockWait, lockOwnerAt(path))
+				"if it is wedged, kill it and retry", portsLockWait, lockowner.At(path))
 		}
 		return nil, fmt.Errorf("lock registry port allocation: %w", err)
 	}
-	writeLockOwner(f)
+	lockowner.Write(f)
 	return func() { f.Close() }, nil
 }
 
@@ -277,34 +346,4 @@ func namesFile(path string, f *os.File) (bool, error) {
 		return false, err
 	}
 	return os.SameFile(open, now), nil
-}
-
-// lockOwnerAt renders the holder recorded in a lock file we failed to take.
-// Reading needs no lock and races the holder's own write, so anything
-// unexpected yields no attribution rather than a guess.
-func lockOwnerAt(path string) string {
-	f, err := os.Open(path)
-	if err != nil {
-		return ""
-	}
-	defer f.Close()
-	buf := make([]byte, 512)
-	n, _ := f.Read(buf)
-	return formatLockOwner(string(buf[:n]))
-}
-
-// formatLockOwner turns a lock file's recorded "<pid> <argv>" into a clause for
-// the busy error, or "" when there is nothing trustworthy to report.
-func formatLockOwner(content string) string {
-	line := strings.TrimSpace(strings.SplitN(content, "\n", 2)[0])
-	pid, argv, ok := strings.Cut(line, " ")
-	if !ok || pid == "" || strings.TrimSpace(argv) == "" {
-		return ""
-	}
-	for _, r := range pid {
-		if r < '0' || r > '9' {
-			return ""
-		}
-	}
-	return fmt.Sprintf(" (pid %s: %s)", pid, strings.TrimSpace(argv))
 }

@@ -79,6 +79,11 @@ Example:
 		if downInclUnmanaged {
 			return fmt.Errorf("--include-unmanaged requires --all")
 		}
+		// --workers 0 is down's default, not a count: the recorded one, or with
+		// no record the disks that can be found.
+		if err := checkShapeFlags(cmd, 0); err != nil {
+			return err
+		}
 
 		name, err := clusterName(downName)
 		if err != nil {
@@ -95,7 +100,7 @@ Example:
 		}
 		// Decided under the lock, so no up can be creating the cluster between
 		// this check and the report that it does not exist.
-		if _, recorded := readShape(downName); !recorded && !clusterLeftovers(downName, lio.DefaultRoot, downIQNDate) {
+		if _, recorded := readShape(downName); !recorded && !clusterLeftovers(downName, hostLIORoot(), downIQNDate) {
 			run.Printf("cluster %q not found: no kind cluster, registry, state directory, or iSCSI targets; nothing to tear down\n", downName)
 			// Nothing is left for its lock file to guard.
 			removeClusterLockOnRelease(downName)

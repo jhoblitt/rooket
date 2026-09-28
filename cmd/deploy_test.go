@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"bytes"
 	"errors"
 	"io/fs"
 	"os"
@@ -8,6 +9,8 @@ import (
 	"slices"
 	"strings"
 	"testing"
+
+	"github.com/spf13/cobra"
 
 	"github.com/jhoblitt/rooket/internal/chartcache"
 )
@@ -404,5 +407,22 @@ func TestDeploySetupReleasedRefusesAMissingDir(t *testing.T) {
 	}
 	if _, err := os.Stat(missing); err == nil {
 		t.Errorf("a typo'd --dir got created rather than refused")
+	}
+}
+
+// deploy never read --disk-size: block setup sizes the disks, before deploy
+// runs. The flag stays so a script passing it keeps working, but deploy and
+// each of its subcommands say it does nothing.
+func TestDeployDiskSizeIsDeprecated(t *testing.T) {
+	for _, c := range []*cobra.Command{deployCmd, deployOperatorCmd, deployClusterCmd} {
+		t.Run(c.Name(), func(t *testing.T) {
+			var out bytes.Buffer
+			c.SetOut(&out)
+			t.Cleanup(func() { c.SetOut(nil) })
+			setFlag(t, c, "disk-size", "5")
+			if want := "Flag --disk-size has been deprecated, it has no effect on deploy"; !strings.Contains(out.String(), want) {
+				t.Errorf("%s --disk-size printed %q, want %q", c.CommandPath(), out.String(), want)
+			}
+		})
 	}
 }

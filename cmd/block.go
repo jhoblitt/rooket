@@ -62,6 +62,9 @@ passwordless sudo), otherwise falls back to a single pkexec prompt.
 }
 
 func blockSetupRun(cmd *cobra.Command, _ []string) error {
+	if err := checkShapeFlags(cmd, 1); err != nil {
+		return err
+	}
 	name, err := clusterName(blockSetupName)
 	if err != nil {
 		return err
@@ -276,7 +279,7 @@ func pathUnder(dir, p string) bool {
 // about to create backstores: a run whose devices are all attached creates
 // nothing an orphan could poison.
 func lioRepairPreflight(out io.Writer, disks []iscsiDisk) ([]privStep, error) {
-	st, err := lio.Read(lio.DefaultRoot)
+	st, err := lio.Read(hostLIORoot())
 	if err != nil {
 		run.Fprintf(out, "warning: could not read the host's iSCSI configuration (%v); continuing\n", err)
 		return nil, nil
@@ -404,6 +407,14 @@ otherwise falls back to a single pkexec prompt.
 }
 
 func blockTeardownRun(cmd *cobra.Command, _ []string) error {
+	// --workers 0 names no worker, not a count: with no record, only the disks
+	// that can be found are torn down. down calls in without a command, having
+	// checked its own flags.
+	if cmd != nil {
+		if err := checkShapeFlags(cmd, 0); err != nil {
+			return err
+		}
+	}
 	name, err := clusterName(blockTeardownName)
 	if err != nil {
 		return err
@@ -436,7 +447,7 @@ func blockTeardownRun(cmd *cobra.Command, _ []string) error {
 		}
 	}
 
-	disks := teardownDisks(lio.DefaultRoot, blockTeardownName, dataDir, blockTeardownIQNDate,
+	disks := teardownDisks(hostLIORoot(), blockTeardownName, dataDir, blockTeardownIQNDate,
 		blockTeardownWorkers, blockTeardownDiskCount)
 	// A teardown told no worker count (down, for a cluster with no record) can
 	// find nothing, and the privileged run would then ask for root only to save
@@ -769,7 +780,7 @@ const (
 
 // iscsiByPathLink returns the /dev/disk/by-path symlink for a target's LUN 0.
 func iscsiByPathLink(targetIQN string) string {
-	return filepath.Join(iscsiByPathDir, iscsiByPathPrefix+targetIQN+iscsiByPathSuffix)
+	return filepath.Join(hostByPathDir(), iscsiByPathPrefix+targetIQN+iscsiByPathSuffix)
 }
 
 // resolveDeviceLink reads a symlink and returns its target as an absolute path,

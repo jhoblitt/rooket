@@ -20,6 +20,9 @@ var configCmd = &cobra.Command{
 	Use:   "config",
 	Short: "Print the kind cluster configuration that would be used by 'create'",
 	RunE: func(cmd *cobra.Command, args []string) error {
+		if err := checkShapeFlags(cmd, 1); err != nil {
+			return err
+		}
 		name, err := clusterName(configName)
 		if err != nil {
 			return err
