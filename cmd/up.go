@@ -262,7 +262,9 @@ func releasedBuildConflict(released, forceBuild bool) error {
 // build and deploy; for a released Rook it only locates the configuration
 // home, as deploy's --dir does. The source is recorded here because deploy,
 // which up runs with none of its own flags set, takes it from the record, and
-// last, so an up refused here leaves the record as it was.
+// last, so an up refused here leaves the record as it was. So is a clone that
+// --dir or $ROOK_DIR names, which prune judges the cluster by (see
+// clonePathFile).
 func upSource(cmd *cobra.Command, name string) (clusterSource, string, error) {
 	src, changed, err := resolveSource(name, upRookVersion, cmd.Flags().Changed("rook-version"),
 		upConfigDir, cmd.Flags().Changed("config-dir"))
@@ -305,6 +307,17 @@ func upSource(cmd *cobra.Command, name string) (clusterSource, string, error) {
 	if !upSkipDeploy {
 		if err := checkProfileSelection(configHome(src, rookDir), cmd.Flags().Changed("with-only")); err != nil {
 			return clusterSource{}, "", err
+		}
+	}
+	// A clone named by --dir or $ROOK_DIR is the one this cluster is built
+	// from, but every other write to the state dir, writeSource's included,
+	// would record the working directory's clone instead, and the first
+	// record stands.
+	if !released {
+		if clone := enclosingClone(namedRookDir(upRookDir)); clone != "" {
+			if _, err := ensureStateDirFrom(name, clone); err != nil {
+				return clusterSource{}, "", err
+			}
 		}
 	}
 	if changed {

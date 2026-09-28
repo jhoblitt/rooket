@@ -42,6 +42,19 @@ func namedRookDir(flagDir string) string {
 	return os.Getenv("ROOK_DIR")
 }
 
+// enclosingClone returns the root of the rook clone enclosing dir, resolved
+// against the working directory, or "" when dir is empty or in no clone.
+func enclosingClone(dir string) string {
+	if dir == "" {
+		return ""
+	}
+	abs, err := filepath.Abs(dir)
+	if err != nil {
+		return ""
+	}
+	return findRookRoot(abs)
+}
+
 // findRookRoot walks up from dir (inclusive) and returns the first directory
 // holding a go.mod that declares the rook module, or "" if it reaches the
 // filesystem root without finding one.
