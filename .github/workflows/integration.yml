@@ -228,22 +228,21 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 120
     strategy:
-      # Cover both CSI deploy flows rooket must handle: release-1.19, where
-      # the rook operator creates the csi.ceph.io Driver CRs itself, and
-      # release-1.20/master, where rooket installs the separate
-      # ceph-csi-drivers chart. The released entry covers the path with no
-      # rook checkout at all.
+      # The two newest rook release branches and master. All of them take the
+      # ceph-csi-drivers chart rooket installs; the flow of rook before 1.20,
+      # whose operator creates the csi.ceph.io Driver CRs itself, has no entry.
+      # The released entry covers the path with no rook checkout at all.
       fail-fast: false
       matrix:
         include:
-          - rook-ref: release-1.19
           - rook-ref: release-1.20
+          - rook-ref: release-1.21
           - rook-ref: master
           # A released Rook with no checkout and no build, on one worker: the
           # consumer's path, jhoblitt/rooket#58. Its workers wins over a
           # dispatch's, since one worker is what it tests. Bump by hand to the
           # newest release; it is a pin, not a range.
-          - rook-version: v1.20.7
+          - rook-version: v1.21.1
             workers: "1"
     env:
       ROOK_REF: ${{ github.event.inputs.rook_ref || matrix.rook-ref }}
