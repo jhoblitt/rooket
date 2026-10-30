@@ -1,0 +1,13 @@
+{
+  "name": "rooket",
+  "private": true,
+  "description": "Release tooling only: semantic-release cuts rooket's version tags (.releaserc.yml). Nothing is published to npm.",
+  "engines": {
+    "node": "24"
+  },
+  "devDependencies": {
+    "@semantic-release/commit-analyzer": "13.0.1",
+    "conventional-changelog-conventionalcommits": "10.4.1",
+    "semantic-release": "25.0.9"
+  }
+}

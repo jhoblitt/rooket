@@ -19,8 +19,8 @@ source checkout.
   `rooket down --delete-disks`. See "Passwordless iSCSI setup" below for how
   that privilege is obtained. Day-to-day `up`/`down` cycles reuse the existing
   targets and never prompt.
-- A Go toolchain (to build rooket) and, unless you deploy a released Rook
-  (see below), a [rook](https://github.com/rook/rook) source checkout.
+- Unless you deploy a released Rook (see below), a Go toolchain and a
+  [rook](https://github.com/rook/rook) source checkout.
 
 ### Passwordless iSCSI setup
 
@@ -47,7 +47,19 @@ survive until `rooket down --all --delete-disks` clears them.
 
 ## Installation
 
-Install straight from source with the Go toolchain — no clone needed:
+Each [release](https://github.com/jhoblitt/rooket/releases) publishes a
+linux/amd64 and a linux/arm64 archive with `rooket` at its root, a
+`checksums.txt` over them, and a cosign keyless signature of that file:
+
+```console
+$ v=0.1.0 arch=amd64
+$ curl -fsSLO "https://github.com/jhoblitt/rooket/releases/download/v$v/rooket_${v}_linux_$arch.tar.gz"
+$ curl -fsSLO "https://github.com/jhoblitt/rooket/releases/download/v$v/checksums.txt"
+$ sha256sum --ignore-missing -c checksums.txt
+$ tar -xzf "rooket_${v}_linux_$arch.tar.gz" rooket && install -m 0755 rooket ~/bin/rooket
+```
+
+Or install from source with the Go toolchain — no clone needed:
 
 ```console
 $ go install github.com/jhoblitt/rooket@latest
@@ -55,9 +67,8 @@ $ go install github.com/jhoblitt/rooket@latest
 
 This drops a `rooket` binary in `$(go env GOBIN)`, or `$(go env GOPATH)/bin`
 (usually `~/go/bin`) when `GOBIN` is unset; make sure that directory is on your
-`PATH`. rooket is untagged, so `@latest` resolves to the newest commit on
-`main` as a pseudo-version; pin a specific one with `@<commit-sha>` in place of
-`@latest`.
+`PATH`. `@latest` resolves to the newest release; `@main` builds the newest
+commit, which may not be released yet.
 
 To hack on rooket itself, build from a checkout instead:
 

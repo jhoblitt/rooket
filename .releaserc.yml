@@ -1,0 +1,17 @@
+branches:
+  - main
+
+# semantic-release only computes the next version and pushes its tag. The
+# release workflow's goreleaser job then builds, signs, and publishes the
+# GitHub release for that tag, so no notes or GitHub plugin runs here.
+plugins:
+  - - "@semantic-release/commit-analyzer"
+    - preset: conventionalcommits
+      # While rooket is on 0.x a breaking change cuts a minor, which semver
+      # allows below 1.0.0. Deleting this rule lets the next breaking change
+      # cut 1.0.0. Past v1 a major also needs go.mod's module path to end in
+      # /vN first: Go does not stamp a v2+ tag on an unsuffixed path, and the
+      # release job's stamp check fails after the tag is already pushed.
+      releaseRules:
+        - breaking: true
+          release: minor

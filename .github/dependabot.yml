@@ -10,3 +10,11 @@ updates:
     directory: /
     schedule:
       interval: weekly
+  # semantic-release and its preset, which cut the release tags.
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      semantic-release:
+        patterns: ["*"]

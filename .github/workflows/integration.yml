@@ -9,11 +9,12 @@ name: integration
 # kind nodes get the host block devices and the local registry works without the
 # rootful-podman gymnastics a runner otherwise needs. iSCSI target setup still
 # needs root, which `rooket block setup` gets via the runner's passwordless sudo.
+#
+# Pushes to main run it through release.yml, which releases only once it passes.
 
 on:
   pull_request:
-  push:
-    branches: [main]
+  workflow_call:
   workflow_dispatch:
     inputs:
       rook_ref:
@@ -26,8 +27,10 @@ on:
 permissions:
   contents: read
 
+# The event name keeps a dispatch on main from cancelling the run release.yml
+# is gating a release on: a called workflow sees the caller's push event.
 concurrency:
-  group: integration-${{ github.ref }}
+  group: integration-${{ github.event_name }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:

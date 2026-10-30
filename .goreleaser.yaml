@@ -1,0 +1,50 @@
+# Managed by go-conventions (references/release.md owns the release contract).
+version: 2
+
+# Fixes the archive names consumers download, rooket_<version>_linux_<arch>,
+# which goreleaser would otherwise derive from the git remote's name.
+project_name: rooket
+
+builds:
+  - id: rooket
+    main: .
+    binary: rooket
+    env:
+      - CGO_ENABLED=0
+    flags:
+      - -trimpath
+    # No -X: the version comes from debug.ReadBuildInfo, stamped by go build
+    # from the git tag. goreleaser's default ldflags would add harmless -X
+    # values for symbols that do not exist; they are replaced, not extended.
+    ldflags:
+      - -s -w
+    # rooket's data path — LIO iSCSI targets, open-iscsi, host /dev passed
+    # into kind nodes — exists only on Linux.
+    goos:
+      - linux
+    goarch:
+      - amd64
+      - arm64
+
+archives:
+  - formats:
+      - tar.gz
+
+checksum:
+  name_template: checksums.txt
+
+sboms:
+  - artifacts: archive
+
+signs:
+  - cmd: cosign
+    signature: "${artifact}.sigstore.json"
+    args:
+      - sign-blob
+      - "--bundle=${signature}"
+      - "${artifact}"
+      - "--yes"
+    artifacts: checksum
+
+changelog:
+  use: github

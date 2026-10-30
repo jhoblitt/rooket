@@ -1,0 +1,17 @@
+# Managed by github-conventions (references/commits.md); converge rewrites it.
+extends:
+  - "@commitlint/config-conventional"
+
+rules:
+  # Dependabot bodies carry compare URLs longer than 100 chars, and the
+  # commitlint bundled in the wagoid action (19.x) has no URL exemption;
+  # rook/rook disables this rule for the same reason.
+  body-max-line-length: [0, always]
+  # Dependabot picks "bump" or "Bump" by scanning recent commits for
+  # `: <Uppercase>` anywhere in the full message, trailers included, and
+  # has no option to set the case. With a Co-Authored-By or Signed-off-by
+  # trailer on every commit, as in a repository agents scaffold, its first
+  # PR comes out sentence-case and later ones copy it. config-conventional
+  # forbids sentence-case; allow it and keep the bans on Start Case,
+  # PascalCase, and UPPER CASE.
+  subject-case: [2, never, [start-case, pascal-case, upper-case]]
