@@ -5,10 +5,13 @@ name: integration
 # provisions one OSD per worker (node-device, loop-free), settles healthy, serves
 # I/O, and tears down cleanly.
 #
-# Uses docker (the runner's preinstalled, rootful engine) via ROOKET_ENGINE, so
-# kind nodes get the host block devices and the local registry works without the
-# rootful-podman gymnastics a runner otherwise needs. iSCSI target setup still
-# needs root, which `rooket block setup` gets via the runner's passwordless sudo.
+# The e2e job prepares its runner with jhoblitt/rooket-action, handed the rooket
+# this workflow builds, so rooket is tested under the action its consumers use.
+# The action sets ROOKET_ENGINE=docker (the runner's preinstalled, rootful
+# engine), so kind nodes get the host block devices and the local registry works
+# without the rootful-podman gymnastics a runner otherwise needs. iSCSI target
+# setup still needs root, which `rooket block setup` gets via the runner's
+# passwordless sudo.
 #
 # Pushes to main run it through release.yml, which releases only once it passes.
 
@@ -248,54 +251,19 @@ jobs:
       ROOK_REF: ${{ github.event.inputs.rook_ref || matrix.rook-ref }}
       WORKERS: ${{ matrix.workers || github.event.inputs.workers || '3' }}
       ROOKET_ROOK_VERSION: ${{ matrix.rook-version }}
-      ROOKET_ENGINE: docker
       # Pin the cluster name: without it every rooket invocation derives the
       # name from its cwd, which must then never sit inside the rook checkout.
       ROOKET_NAME: rook
     steps:
-      # Deleting the preinstalled toolchains takes 1-5 minutes, so do it only
-      # when the runner is short. The worst case needs about 60G: three 10GiB
-      # sparse OSD images written full, plus rook's build and the cluster's
-      # images.
-      - name: Free up runner disk
-        run: |
-          df -h /
-          avail_gb="$(df --output=avail -BG / | tail -n1 | tr -dc '0-9')"
-          if [ "$avail_gb" -ge 60 ]; then
-            echo "${avail_gb}G free; skipping cleanup"
-            exit 0
-          fi
-          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
-            /opt/hostedtoolcache/CodeQL /usr/local/.ghcup /usr/lib/jvm \
-            /usr/share/swift /usr/local/share/powershell || true
-          df -h /
-
       - name: Download rooket and the e2e test binary
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: rooket-bin
 
-      # Artifacts do not preserve the executable bit.
-      - name: Mark binaries executable
-        run: chmod +x rooket e2e.test
-
-      - name: Install kind, kubectl, helm
-        run: |
-          set -eux
-          curl -fsSLo ./kind https://kind.sigs.k8s.io/dl/v0.32.0/kind-linux-amd64
-          sudo install -m 0755 ./kind /usr/local/bin/kind && rm -f ./kind
-          curl -fsSLo ./kubectl "https://dl.k8s.io/release/$(curl -fsSL https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
-          sudo install -m 0755 ./kubectl /usr/local/bin/kubectl && rm -f ./kubectl
-          curl -fsSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
-          kind version && kubectl version --client && helm version && docker version
-
-      - name: Install iSCSI and LVM tooling
-        run: |
-          set -eux
-          sudo apt-get update
-          sudo apt-get install -y open-iscsi targetcli-fb lvm2
-          sudo modprobe -a configfs target_core_mod target_core_file iscsi_tcp
-          sudo systemctl enable --now iscsid
+      # Artifacts do not preserve the executable bit. The action installs its
+      # own copy of rooket executable, so only the suite needs it.
+      - name: Mark the e2e test binary executable
+        run: chmod +x e2e.test
 
       - name: Checkout rook
         if: matrix.rook-version == ''
@@ -328,18 +296,29 @@ jobs:
           check-latest: true
           cache-dependency-path: rook/go.sum
 
+      # Frees disk when / is short of 30G plus 10G per worker, then installs
+      # this run's rooket and the action's pinned kind, kubectl and helm on
+      # PATH, and the iSCSI and LVM tooling.
+      - name: Prepare the runner
+        id: rooket
+        uses: jhoblitt/rooket-action@50c13c194401bb855130d7031e9fef095ac8f500 # v1.0.2
+        with:
+          rooket-path: rooket
+          workers: ${{ env.WORKERS }}
+
       - name: Set up iSCSI OSD disks
-        run: ./rooket block setup --workers "$WORKERS" --disk-count 1
+        run: rooket block setup --workers "$WORKERS" --disk-count 1
 
       # The suite routes every command's output through GinkgoWriter, which
       # Ginkgo discards for a passing spec and holds back until the end of a
       # failing one; -ginkgo.v streams it live instead.
       - name: Run e2e suite
+        env:
+          ROOKET_BIN: ${{ steps.rooket.outputs.path }}
         run: |
           rook_dir=""
           if [ -z "$ROOKET_ROOK_VERSION" ]; then rook_dir="${{ github.workspace }}/rook"; fi
           ROOK_DIR="$rook_dir" \
-          ROOKET_BIN="${{ github.workspace }}/rooket" \
           ROOKET_WORKERS="$WORKERS" \
           ROOKET_SKIP_BLOCK=true \
             ./e2e.test -test.v -test.timeout 100m \
@@ -357,9 +336,9 @@ jobs:
 
       # Also exercises 'down --all': it must enumerate the suite's leftovers
       # (state dir plus targets, or a still-live cluster on failure) and remove
-      # them without flags naming the cluster or its disk layout.
+      # them without flags naming the cluster or its disk layout. The action's
+      # post step runs the same command afterwards but only warns when it
+      # fails, so this step is what fails the job.
       - name: Tear down (always)
-        if: always()
-        run: |
-          [ -x ./rooket ] || { echo "rooket was never built; nothing to tear down"; exit 0; }
-          ./rooket down --all --force --delete-disks
+        if: always() && steps.rooket.outcome == 'success'
+        run: rooket down --all --force --delete-disks
