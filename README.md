@@ -546,10 +546,10 @@ provisioning and reclaim, krbd-mounted RBD I/O, CephFS-PVC I/O, the
 `list`/`kubectl`/`kubeconfig`/`prune` surfaces,
 registry-port reuse across re-ups, `down --all` ownership scoping against a
 foreign kind cluster, and clean teardown. CI runs the suite under docker on
-every PR against rook master, release-1.20, and release-1.19 — covering both
-the ceph-csi-drivers and rook-managed CSI flows. A released Rook v1.20.7
-entry also runs with no checkout, on one worker, alongside a fast unit + vet
-job.
+every PR, and before every release, against rook master, release-1.21, and
+release-1.20, all of which deploy CSI through the ceph-csi-drivers chart. A
+released Rook v1.21.1 entry also runs with no checkout, on one worker,
+alongside a fast unit + vet job.
 
 ## Upgrading from older rooket
 
